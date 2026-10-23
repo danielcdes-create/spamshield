@@ -88,11 +88,11 @@ class SpamScoringEngine @Inject constructor(
             )
         }
 
-        // 2.2 Repetição de Emergência (apenas MOBILE local sem quarentena ativa e sem falha STIR/SHAKEN)
+        // 2.2 Repetição de Emergência (apenas MOBILE local sem quarentena ativa, sem cabeçalho CSP anômalo e sem falha STIR/SHAKEN)
         if (normalized.normalizedNumber.isNotEmpty() &&
             resolvedLineType == "MOBILE" &&
             stirShakenStatus != "FAILED" &&
-            !rawNumber.trim().startsWith("0")
+            !PhoneNormalizer.hasAbnormalTrunkOrCspHeader(rawNumber, settings.userDdd)
         ) {
             val activeQ7 = dao.getActiveQuarantineForPrefix(normalized.prefix7, nowMillis)
             val activeQ6Count = dao.countActiveQuarantinesByPrefix6(normalized.prefix6, nowMillis)
@@ -201,8 +201,8 @@ class SpamScoringEngine @Inject constructor(
                     prefix6 = normalized.prefix6,
                     sinceTimestamp = nowMillis - NEIGHBORHOOD_BURST_WINDOW_MS
                 )
-                if (q6Count > 0 || distinct6In24h >= 1) {
-                    val w6 = 50
+                if (q6Count >= 2 || distinct6In24h >= 2) {
+                    val w6 = 45
                     score += w6
                     subBlockClusterTriggered = true
                     triggeredRules.add(
@@ -218,7 +218,7 @@ class SpamScoringEngine @Inject constructor(
             val prefix5 = normalized.prefix7.take(5)
             if (prefix5.length == 5) {
                 val q5Count = dao.countActiveQuarantinesByPrefix5(prefix5, nowMillis)
-                if (q5Count >= 2) {
+                if (PhoneNormalizer.isKnownChipeiraFarmPrefix5(prefix5) || q5Count >= 6) {
                     val w5 = 35
                     score += w5
                     subBlockClusterTriggered = true
@@ -304,7 +304,7 @@ class SpamScoringEngine @Inject constructor(
             )
         }
 
-        if (rawNumber.trim().startsWith("0")) {
+        if (PhoneNormalizer.hasAbnormalTrunkOrCspHeader(rawNumber, settings.userDdd)) {
             val trunkZeroWeight = 25
             score += trunkZeroWeight
             triggeredRules.add(

@@ -1,4 +1,4 @@
-# SpamShield BR (`v1.2.3` — Build `7`)
+# SpamShield BR (`v1.2.4` — Build `8`)
 
 Ecossistema privado de defesa em borda (`< 2 ms`), telemetria vetorial e inteligência contra chamadas de spam, robocall, chipeiras GSM e spoofing no Brasil (padrões Anatel RNPM / Ato nº 10.413 / STIR-SHAKEN).
 

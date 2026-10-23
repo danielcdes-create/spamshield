@@ -119,6 +119,10 @@ class FakeSpamShieldDao : SpamShieldDao {
 
     override suspend fun getAllQuarantines(): List<PrefixQuarantineEntity> = quarantines.toList()
 
+    override suspend fun clearAllQuarantines() {
+        quarantines.clear()
+    }
+
     override suspend fun insertQuarantines(items: List<PrefixQuarantineEntity>) {
         quarantines.clear()
         quarantines.addAll(items)

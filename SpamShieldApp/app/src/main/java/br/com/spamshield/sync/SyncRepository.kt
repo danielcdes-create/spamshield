@@ -198,6 +198,7 @@ class SyncRepository @Inject constructor(
                         expiresAt = parseIsoToMillis(q.expires_at, now + 7L * 86_400_000L)
                     )
                 }
+                dao.clearAllQuarantines()
                 dao.insertQuarantines(localQuarantines)
             }
 

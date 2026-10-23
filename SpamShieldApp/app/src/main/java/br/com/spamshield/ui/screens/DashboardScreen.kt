@@ -266,7 +266,7 @@ fun DashboardScreen(
             )
             KpiCard(
                 title = "Total Bloqueado",
-                value = String.format(Locale.US, "%d (%.0f%%)", totalBlocked, blockedPercent),
+                value = String.format(Locale.US, "%d (%.1f%%)", totalBlocked, blockedPercent),
                 subtitle = "Threshold >= ${settings.blockThresholdScore}",
                 modifier = Modifier.weight(1f)
             )

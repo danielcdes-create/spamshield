@@ -336,13 +336,24 @@ class CallHistoryAnalyzer @Inject constructor(
                     )
                 }
 
-                if (call.rawNumber.trim().startsWith("0")) {
+                if (PhoneNormalizer.hasAbnormalTrunkOrCspHeader(call.rawNumber, settings.userDdd)) {
                     score += 25
                     triggered.add(
                         TriggeredRuleDto(
                             rule_id = "LEADING_ZERO_TRUNK_DIALING",
                             weight = 25,
                             meta = call.rawNumber.trim().take(4)
+                        )
+                    )
+                }
+
+                if (call.durationSec >= 10 && preservedFeedback != "CONFIRMED_SPAM" && !wasBlockedOrRejectedInSystem) {
+                    score = (score - 40).coerceAtLeast(0)
+                    triggered.add(
+                        TriggeredRuleDto(
+                            rule_id = "CONVERSATION_ANSWERED_BONUS",
+                            weight = -40,
+                            meta = "Conversa atendida (${call.durationSec}s)"
                         )
                     )
                 }
@@ -391,7 +402,18 @@ class CallHistoryAnalyzer @Inject constructor(
                 )
                 processedCount++
 
-                if (isSpam && norm.prefix7.length >= 6 && preservedFeedback != "FALSE_POSITIVE") {
+                val shouldQuarantinePrefix = isSpam &&
+                    norm.prefix7.length >= 6 &&
+                    preservedFeedback != "FALSE_POSITIVE" &&
+                    (distinctInCluster >= 2 ||
+                        resolvedLineType != "MOBILE" ||
+                        wasBlockedOrRejectedInSystem ||
+                        isPingCall ||
+                        preservedFeedback == "CONFIRMED_SPAM" ||
+                        PhoneNormalizer.isKnownChipeiraFarmPrefix5(norm.prefix7.take(5)) ||
+                        (norm.ddd.isNotEmpty() && norm.ddd != settings.userDdd))
+
+                if (shouldQuarantinePrefix) {
                     spamDetectedCount++
                     newlyQuarantinedPrefixes.add(norm.prefix7)
                     val allNumsInPrefix = prefixDistinctNumbers[norm.prefix7]?.toList() ?: listOf(norm.normalizedNumber)
@@ -409,6 +431,8 @@ class CallHistoryAnalyzer @Inject constructor(
                             expiresAt = now + SpamScoringEngine.QUARANTINE_DEFAULT_TTL_MS
                         )
                     )
+                } else if (isSpam) {
+                    spamDetectedCount++
                 }
             }
 
@@ -445,13 +469,59 @@ class CallHistoryAnalyzer @Inject constructor(
             runCatching { Regex(rule.pattern!!) to rule }.getOrNull()
         }
 
-        // 1. Atualizar tabela de quarentenas (prefix_quarantine)
+        val allTelemetry = dao.getAllTelemetry().sortedBy { it.timestamp }
+        val prefixDistinctNumbers = mutableMapOf<String, MutableSet<String>>()
+        val prefix6DistinctNumbers = mutableMapOf<String, MutableSet<String>>()
+        val confirmedOrRejectedPrefixes = mutableSetOf<String>()
+
+        for (row in allTelemetry) {
+            val norm = PhoneNormalizer.normalize(row.rawNumber, settings.userDdd)
+            val p7 = norm.prefix7.ifEmpty { row.prefix7 }
+            val e164 = norm.normalizedNumber.ifEmpty { row.normalizedNumber }
+            val dur = row.callDurationSec ?: 0
+            if (p7.isNotEmpty() && e164.isNotEmpty() && row.outcome != "ALLOWED_CONTACT" && dur < 10) {
+                prefixDistinctNumbers.getOrPut(p7) { mutableSetOf() }.add(e164)
+                if (p7.length >= 6) {
+                    prefix6DistinctNumbers.getOrPut(p7.take(6)) { mutableSetOf() }.add(e164)
+                }
+            }
+            if (row.userFeedback == "CONFIRMED_SPAM" ||
+                row.triggeredRulesJson.contains("SYSTEM_CALLLOG_BLOCKED") ||
+                row.triggeredRulesJson.contains("PING_CALL_PENALTY") ||
+                (dur in 1..4)
+            ) {
+                confirmedOrRejectedPrefixes.add(p7)
+            }
+        }
+
+        // 1. Limpar quarentenas "bola de neve" de número único móvel local sem evidência real de spam
+        // e normalizar operadoras nas quarentenas legítimas
+        val officialSeedPrefixes = setOf(
+            "3141011", "3141013", "3198780", "3197619", "3198633",
+            "3198621", "3198321", "3198586", "1191086", "1148581", "1150391"
+        )
         val allQuarantines = dao.getAllQuarantines()
         for (q in allQuarantines) {
             val isFixed = q.prefix7.drop(2).firstOrNull() in '2'..'5' ||
                 q.prefix7.startsWith("000") ||
                 q.prefix7.startsWith("030") ||
                 q.prefix7.startsWith("080")
+            val distinctCount = prefixDistinctNumbers[q.prefix7]?.size ?: 0
+            val isChipeira5 = PhoneNormalizer.isKnownChipeiraFarmPrefix5(q.prefix7.take(5))
+            val isExternalDdd = q.ddd.isNotEmpty() && q.ddd != settings.userDdd
+
+            val shouldKeepQuarantine = isFixed ||
+                distinctCount >= 2 ||
+                q.prefix7 in officialSeedPrefixes ||
+                q.prefix7 in confirmedOrRejectedPrefixes ||
+                isChipeira5 ||
+                isExternalDdd
+
+            if (!shouldKeepQuarantine) {
+                dao.deleteQuarantineByPrefix(q.prefix7)
+                continue
+            }
+
             val newCarrier = PhoneNormalizer.normalizeCarrierName(
                 rawCarrier = q.carrierGuess,
                 lineType = if (isFixed) "FIXED_OR_VOIP" else "MOBILE",
@@ -464,15 +534,6 @@ class CallHistoryAnalyzer @Inject constructor(
         }
 
         // 2. Reprocessar todas as chamadas em call_telemetry
-        val allTelemetry = dao.getAllTelemetry().sortedBy { it.timestamp }
-        val prefixDistinctNumbers = mutableMapOf<String, MutableSet<String>>()
-        for (row in allTelemetry) {
-            val norm = PhoneNormalizer.normalize(row.rawNumber, settings.userDdd)
-            if (norm.prefix7.isNotEmpty() && norm.normalizedNumber.isNotEmpty() && row.outcome != "ALLOWED_CONTACT") {
-                prefixDistinctNumbers.getOrPut(norm.prefix7) { mutableSetOf() }.add(norm.normalizedNumber)
-            }
-        }
-
         var updatedCount = 0
         for (row in allTelemetry) {
             val norm = PhoneNormalizer.normalize(row.rawNumber, settings.userDdd)
@@ -594,17 +655,18 @@ class CallHistoryAnalyzer @Inject constructor(
                 )
             } else if (effectivePrefix7.length >= 6) {
                 val prefix6 = effectivePrefix7.take(6)
+                val distinct6 = prefix6DistinctNumbers[prefix6]?.size ?: 0
                 val q6Count = dao.countActiveQuarantinesByPrefix6(prefix6, now)
-                if (q6Count > 0) {
-                    score += 50
-                    triggered.add(TriggeredRuleDto("PREFIX6_CLUSTER_HIT", 50, "Sub-bloco ${prefix6}x"))
+                if (distinct6 >= 2 || q6Count >= 2) {
+                    score += 45
+                    triggered.add(TriggeredRuleDto("PREFIX6_CLUSTER_HIT", 45, "Sub-bloco ${prefix6}x"))
                 }
             }
 
             val prefix5 = effectivePrefix7.take(5)
             if (prefix5.length == 5) {
                 val q5Count = dao.countActiveQuarantinesByPrefix5(prefix5, now)
-                if (q5Count >= 2 && activeQ == null) {
+                if ((PhoneNormalizer.isKnownChipeiraFarmPrefix5(prefix5) || q5Count >= 6) && activeQ == null) {
                     score += 35
                     triggered.add(TriggeredRuleDto("PREFIX5_CHIPEIRA_FARM", 35, "Bloco ${prefix5}xx"))
                 }
@@ -635,9 +697,21 @@ class CallHistoryAnalyzer @Inject constructor(
                 triggered.add(TriggeredRuleDto("EXTERNAL_DDD_UNKNOWN", 30, "DDD $effectiveDdd != ${settings.userDdd}"))
             }
 
-            if (row.rawNumber.trim().startsWith("0")) {
+            if (PhoneNormalizer.hasAbnormalTrunkOrCspHeader(row.rawNumber, settings.userDdd)) {
                 score += 25
                 triggered.add(TriggeredRuleDto("LEADING_ZERO_TRUNK_DIALING", 25, row.rawNumber.trim().take(4)))
+            }
+
+            val callDur = row.callDurationSec ?: 0
+            if (callDur >= 10 && row.userFeedback != "CONFIRMED_SPAM" && !wasSystemBlocked && resolvedLineType == "MOBILE") {
+                score = (score - 40).coerceAtLeast(0)
+                triggered.add(
+                    TriggeredRuleDto(
+                        rule_id = "CONVERSATION_ANSWERED_BONUS",
+                        weight = -40,
+                        meta = "Conversa atendida (${callDur}s)"
+                    )
+                )
             }
 
             if (row.userFeedback == "CONFIRMED_SPAM" && score < 100) {
@@ -677,7 +751,17 @@ class CallHistoryAnalyzer @Inject constructor(
                 updatedCount++
             }
 
-            if (isSpam && effectivePrefix7.length >= 6) {
+            val shouldQuarantineInReprocess = isSpam &&
+                effectivePrefix7.length >= 6 &&
+                (distinctInCluster >= 2 ||
+                    resolvedLineType != "MOBILE" ||
+                    wasSystemBlocked ||
+                    wasPingCall ||
+                    row.userFeedback == "CONFIRMED_SPAM" ||
+                    PhoneNormalizer.isKnownChipeiraFarmPrefix5(effectivePrefix7.take(5)) ||
+                    (effectiveDdd.isNotEmpty() && effectiveDdd != settings.userDdd))
+
+            if (shouldQuarantineInReprocess) {
                 val allNums = prefixDistinctNumbers[effectivePrefix7]?.toList() ?: listOf(effectiveNormalized)
                 val existingQ = dao.getActiveQuarantineForPrefix(effectivePrefix7, 0L)
                 if (existingQ == null || existingQ.carrierGuess != newCarrierGuess) {

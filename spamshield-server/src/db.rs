@@ -715,6 +715,43 @@ impl AppDatabase {
             )
             .await;
 
+        // 4. Clean up single-call "snowball" mobile quarantines in DDD 31 that were caused by
+        // penalizing standard 12-digit local operator CLI (`0319...`) with +25, and restore
+        // isolated local mobile calls or answered conversations (>= 10s) to ALLOWED_LOW_SCORE.
+        let _ = quarantine_coll
+            .delete_many(doc! {
+                "ddd": "31",
+                "hit_count": { "$lte": 1_i32 },
+                "prefix_7": {
+                    "$regex": "^319[24-9]",
+                    "$nin": [
+                        "3198780", "3197619", "3198633", "3198621",
+                        "3198321", "3198586", "3198864"
+                    ]
+                },
+                "distinct_numbers_seen.1": { "$exists": false }
+            })
+            .await;
+
+        // Restore answered local mobile conversations (>= 10s, not confirmed spam) to ALLOWED_LOW_SCORE
+        let _ = telemetry_coll
+            .update_many(
+                doc! {
+                    "call_details.line_type": "MOBILE",
+                    "decision_vector.call_duration_sec": { "$gte": 10_i32 },
+                    "audit.user_feedback": { "$ne": "CONFIRMED_SPAM" },
+                    "decision_vector.outcome": "BLOCKED"
+                },
+                doc! {
+                    "$set": {
+                        "decision_vector.outcome": "ALLOWED_LOW_SCORE",
+                        "decision_vector.category": "UNKNOWN_UNVERIFIED",
+                        "decision_vector.final_score": 45_i32,
+                    }
+                },
+            )
+            .await;
+
         Ok(())
     }
 }

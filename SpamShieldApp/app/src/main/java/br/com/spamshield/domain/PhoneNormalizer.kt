@@ -232,6 +232,54 @@ object PhoneNormalizer {
         return "Outros"
     }
 
+    /**
+     * Identifica se o número bruto apresenta cabeçalho de tronco/CSP anômalo de telemarketing:
+     * - CSP explícito de longa distância (041..., 015..., 021..., 13 a 15 dígitos) ou 00+CSP (004131...)
+     * - Prefixos não-geográficos 0300/0303/0800 ou códigos curtos de operadora (03110315, 005)
+     * - Discagem com zero para DDD externo (ex: 011... quando o usuário é DDD 31) ou linha fixa/VoIP (11 dígitos: 03141011230)
+     *
+     * NÃO penaliza o formato padrão de entrega CLI móvel local da operadora (ex: 031987381841, 12 dígitos no próprio DDD),
+     * evitando que chamadas móveis locais legítimas recebam +25 indevidamente.
+     */
+    fun hasAbnormalTrunkOrCspHeader(rawNumber: String, userDdd: String = "31"): Boolean {
+        val trimmed = rawNumber.trim()
+        if (!trimmed.startsWith("0")) return false
+        val digits = trimmed.filter { it.isDigit() }
+        if (digits.isEmpty()) return false
+
+        // 0300, 0303, 0800 ou 00+CSP
+        if (digits.startsWith("0300") || digits.startsWith("0303") || digits.startsWith("0800") || digits.startsWith("00")) {
+            return true
+        }
+        // Códigos curtos iniciados por 0 (ex: 03110315, 005)
+        if (digits.length < 11) {
+            return true
+        }
+        // Cabeçalho completo com CSP (0 + CSP(2) + DDD(2) + 8/9 dígitos = 13..15 dígitos, ex: 04111910862316)
+        if (digits.length >= 13) {
+            return true
+        }
+        // 11 ou 12 dígitos iniciados por 0 (0 + DDD + número)
+        val ddd = digits.substring(1, 3)
+        if (ddd != userDdd) {
+            // DDD externo com zero de tronco (ex: 01136586701)
+            return true
+        }
+        // No mesmo DDD: se tem 11 dígitos (031 + 8 dígitos fixo/VoIP) ou não começa com '9', é tronco fixo/VoIP
+        return digits.length == 11 || digits.getOrNull(3) != '9'
+    }
+
+    /**
+     * Identifica blocos /5 (DDD + 3 dígitos) que são faixas dedicadas de MVNO / telemarketing / chipeira GSM,
+     * sem penalizar blocos /5 móveis residenciais comuns (como 31987xx, 31999xx, 31984xx) a menos que tenham
+     * alta densidade de quarentenas.
+     */
+    fun isKnownChipeiraFarmPrefix5(prefix5: String): Boolean {
+        if (prefix5.length < 5) return false
+        val sub3 = prefix5.substring(2, 5)
+        return sub3 in setOf("937", "938", "939", "980", "910")
+    }
+
     fun normalizeCarrierName(
         rawCarrier: String?,
         lineType: String = "MOBILE",

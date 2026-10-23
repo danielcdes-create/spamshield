@@ -179,6 +179,9 @@ interface SpamShieldDao {
     @Query("SELECT * FROM prefix_quarantine")
     suspend fun getAllQuarantines(): List<PrefixQuarantineEntity>
 
+    @Query("DELETE FROM prefix_quarantine")
+    suspend fun clearAllQuarantines()
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertQuarantines(items: List<PrefixQuarantineEntity>)
 
