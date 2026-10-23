@@ -33,7 +33,37 @@ class FakeSpamShieldDao : SpamShieldDao {
     override suspend fun getTelemetryById(id: String): CallTelemetryEntity? = telemetries.find { it.id == id }
     override suspend fun getPendingTelemetry(): List<CallTelemetryEntity> = telemetries.filter { it.syncStatus == "PENDING" }
     override suspend fun markTelemetrySynced(ids: List<String>) {}
-    override suspend fun updateUserFeedback(id: String, feedback: String) {}
+    override suspend fun updateUserFeedback(id: String, feedback: String) {
+        val idx = telemetries.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            val cur = telemetries[idx]
+            telemetries[idx] = cur.copy(
+                userFeedback = feedback,
+                outcome = when (feedback) {
+                    "CONFIRMED_SPAM" -> "BLOCKED"
+                    "FALSE_POSITIVE" -> "ALLOWED_CONTACT"
+                    else -> cur.outcome
+                },
+                finalScore = when (feedback) {
+                    "CONFIRMED_SPAM" -> maxOf(cur.finalScore, 100)
+                    "FALSE_POSITIVE" -> 0
+                    else -> cur.finalScore
+                }
+            )
+        }
+    }
+
+    override suspend fun findRealTimeTelemetryNearTimestamp(
+        normalizedNumber: String,
+        minTs: Long,
+        maxTs: Long
+    ): CallTelemetryEntity? = telemetries.find {
+        it.normalizedNumber == normalizedNumber &&
+            it.deviceId != "s23-ultra-history" &&
+            it.timestamp in minTs..maxTs
+    }
+
+    override suspend fun deduplicateHistoryRecords() {}
 
     override suspend fun updateCallDurationAndCategory(id: String, durationSec: Int, category: String) {
         val idx = telemetries.indexOfFirst { it.id == id }
@@ -50,6 +80,12 @@ class FakeSpamShieldDao : SpamShieldDao {
 
     override suspend fun countDistinctNumbersInPrefix7Since(prefix7: String, sinceTimestamp: Long): Int =
         telemetries.filter { it.prefix7 == prefix7 && it.timestamp >= sinceTimestamp }
+            .map { it.normalizedNumber }
+            .distinct()
+            .size
+
+    override suspend fun countDistinctNumbersInPrefix6Since(prefix6: String, sinceTimestamp: Long): Int =
+        telemetries.filter { it.prefix7.startsWith(prefix6) && it.timestamp >= sinceTimestamp }
             .map { it.normalizedNumber }
             .distinct()
             .size
@@ -71,6 +107,12 @@ class FakeSpamShieldDao : SpamShieldDao {
 
     override suspend fun getActiveQuarantineForPrefix(prefix7: String, now: Long): PrefixQuarantineEntity? =
         quarantines.find { it.prefix7 == prefix7 && it.expiresAt > now }
+
+    override suspend fun countActiveQuarantinesByPrefix6(prefix6: String, now: Long): Int =
+        quarantines.count { it.prefix7.startsWith(prefix6) && it.expiresAt > now }
+
+    override suspend fun countActiveQuarantinesByPrefix5(prefix5: String, now: Long): Int =
+        quarantines.count { it.prefix7.startsWith(prefix5) && it.expiresAt > now }
 
     override fun observeActiveQuarantines(now: Long): Flow<List<PrefixQuarantineEntity>> =
         MutableStateFlow(quarantines.filter { it.expiresAt > now })
@@ -197,5 +239,45 @@ class SpamScoringEngineTest {
         val q = fakeDao.getActiveQuarantineForPrefix("3199123", now)
         assertTrue(q != null && q.penaltyWeight == 65)
         assertFalse(q == null)
+    }
+
+    @Test
+    fun `serializes CallTelemetryEntity to JSON for export and upgrades outcome on CONFIRMED_SPAM`() = runTest {
+        val fakeDao = FakeSpamShieldDao()
+        val now = 1_700_000_050_000L
+
+        val callEntity = CallTelemetryEntity(
+            id = "call-1136586701",
+            timestamp = now,
+            rawNumber = "01136586701",
+            normalizedNumber = "+551136586701",
+            ddd = "11",
+            prefix7 = "1136586",
+            carrierGuess = "VoIP / Fixo",
+            lineType = "FIXED_OR_VOIP",
+            stirShakenStatus = "NOT_VERIFIED",
+            finalScore = 45,
+            thresholdApplied = 70,
+            outcome = "ALLOWED_LOW_SCORE",
+            category = "UNKNOWN_UNVERIFIED",
+            processingLatencyMs = 1.5,
+            shadowModeActive = false,
+            triggeredRulesJson = "[]"
+        )
+        fakeDao.insertTelemetry(callEntity)
+
+        // Verify JSON serialization does not crash
+        val jsonStr = kotlinx.serialization.json.Json.encodeToString(
+            kotlinx.serialization.builtins.ListSerializer(CallTelemetryEntity.serializer()),
+            fakeDao.getAllTelemetry()
+        )
+        assertTrue(jsonStr.contains("+551136586701"))
+
+        // Verify CONFIRMED_SPAM upgrades outcome to BLOCKED and score >= 100
+        fakeDao.updateUserFeedback("call-1136586701", "CONFIRMED_SPAM")
+        val updated = fakeDao.getTelemetryById("call-1136586701")
+        assertEquals("CONFIRMED_SPAM", updated?.userFeedback)
+        assertEquals("BLOCKED", updated?.outcome)
+        assertEquals(100, updated?.finalScore)
     }
 }

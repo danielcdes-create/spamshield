@@ -100,6 +100,9 @@ class MainViewModel @Inject constructor(
     val apkUpdateState: StateFlow<ApkUpdateUiState> = _apkUpdateState.asStateFlow()
 
     init {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { dao.deduplicateHistoryRecords() }
+        }
         refreshTailscaleStatus()
     }
 

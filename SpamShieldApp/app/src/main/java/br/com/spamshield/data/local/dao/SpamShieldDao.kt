@@ -36,8 +36,59 @@ interface SpamShieldDao {
     @Query("UPDATE call_telemetry SET syncStatus = 'SYNCED' WHERE id IN (:ids)")
     suspend fun markTelemetrySynced(ids: List<String>)
 
-    @Query("UPDATE call_telemetry SET userFeedback = :feedback, syncStatus = 'PENDING' WHERE id = :id")
+    @Query(
+        """
+        UPDATE call_telemetry 
+        SET userFeedback = :feedback,
+            outcome = CASE 
+                WHEN :feedback = 'CONFIRMED_SPAM' THEN 'BLOCKED'
+                WHEN :feedback = 'FALSE_POSITIVE' THEN 'ALLOWED_CONTACT'
+                ELSE outcome
+            END,
+            category = CASE 
+                WHEN :feedback = 'CONFIRMED_SPAM' THEN 'ROBOCALL_PREFIX_CLUSTER'
+                WHEN :feedback = 'FALSE_POSITIVE' THEN 'LEGITIMATE'
+                ELSE category
+            END,
+            finalScore = CASE 
+                WHEN :feedback = 'CONFIRMED_SPAM' AND finalScore < 100 THEN 100
+                WHEN :feedback = 'FALSE_POSITIVE' THEN 0
+                ELSE finalScore
+            END,
+            syncStatus = 'PENDING' 
+        WHERE id = :id
+        """
+    )
     suspend fun updateUserFeedback(id: String, feedback: String)
+
+    @Query(
+        """
+        SELECT * FROM call_telemetry
+        WHERE normalizedNumber = :normalizedNumber
+          AND deviceId != 's23-ultra-history'
+          AND timestamp BETWEEN :minTs AND :maxTs
+        LIMIT 1
+        """
+    )
+    suspend fun findRealTimeTelemetryNearTimestamp(
+        normalizedNumber: String,
+        minTs: Long,
+        maxTs: Long
+    ): CallTelemetryEntity?
+
+    @Query(
+        """
+        DELETE FROM call_telemetry
+        WHERE deviceId = 's23-ultra-history'
+          AND EXISTS (
+              SELECT 1 FROM call_telemetry rt
+              WHERE rt.deviceId != 's23-ultra-history'
+                AND rt.normalizedNumber = call_telemetry.normalizedNumber
+                AND ABS(rt.timestamp - call_telemetry.timestamp) <= 15000
+          )
+        """
+    )
+    suspend fun deduplicateHistoryRecords()
 
     @Query(
         """
@@ -78,6 +129,15 @@ interface SpamShieldDao {
     )
     suspend fun countDistinctNumbersInPrefix7Since(prefix7: String, sinceTimestamp: Long): Int
 
+    @Query(
+        """
+        SELECT COUNT(DISTINCT normalizedNumber) FROM call_telemetry 
+        WHERE prefix7 LIKE :prefix6 || '%' 
+          AND timestamp >= :sinceTimestamp
+        """
+    )
+    suspend fun countDistinctNumbersInPrefix6Since(prefix6: String, sinceTimestamp: Long): Int
+
     // ========================================================================
     // 2. Active Rules
     // ========================================================================
@@ -106,6 +166,12 @@ interface SpamShieldDao {
 
     @Query("SELECT * FROM prefix_quarantine WHERE prefix7 = :prefix7 AND expiresAt > :now LIMIT 1")
     suspend fun getActiveQuarantineForPrefix(prefix7: String, now: Long): PrefixQuarantineEntity?
+
+    @Query("SELECT COUNT(*) FROM prefix_quarantine WHERE prefix7 LIKE :prefix6 || '%' AND expiresAt > :now")
+    suspend fun countActiveQuarantinesByPrefix6(prefix6: String, now: Long): Int
+
+    @Query("SELECT COUNT(*) FROM prefix_quarantine WHERE prefix7 LIKE :prefix5 || '%' AND expiresAt > :now")
+    suspend fun countActiveQuarantinesByPrefix5(prefix5: String, now: Long): Int
 
     @Query("SELECT * FROM prefix_quarantine WHERE expiresAt > :now ORDER BY hitCount DESC, lastSeenAt DESC")
     fun observeActiveQuarantines(now: Long): Flow<List<PrefixQuarantineEntity>>

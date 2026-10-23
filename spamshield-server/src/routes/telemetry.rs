@@ -110,6 +110,8 @@ pub async fn post_telemetry_batch(
             let id = call.id.clone();
             let fb = call.audit.user_feedback.as_str().to_string();
             let cat = call.decision_vector.category.as_str().to_string();
+            let outcome = call.decision_vector.outcome.as_str().to_string();
+            let score = call.decision_vector.final_score;
             let dur = call
                 .decision_vector
                 .call_duration_sec
@@ -123,6 +125,8 @@ pub async fn post_telemetry_batch(
                             "$set": {
                                 "audit.user_feedback": fb,
                                 "audit.synced_at": now_bson,
+                                "decision_vector.outcome": outcome,
+                                "decision_vector.final_score": score,
                                 "decision_vector.category": cat,
                                 "decision_vector.call_duration_sec": dur,
                             }
@@ -219,16 +223,26 @@ pub async fn patch_telemetry_feedback(
     let mut recalibrated_rules = Vec::new();
 
     if let Some(ref doc_val) = existing_doc {
+        let mut set_doc = doc! {
+            "audit.user_feedback": payload.user_feedback.as_str(),
+            "audit.synced_at": BsonDateTime::now(),
+        };
+        match payload.user_feedback {
+            UserFeedback::CONFIRMED_SPAM => {
+                set_doc.insert("decision_vector.outcome", "BLOCKED");
+                set_doc.insert("decision_vector.category", "ROBOCALL_PREFIX_CLUSTER");
+                set_doc.insert("decision_vector.final_score", 100_i32);
+            }
+            UserFeedback::FALSE_POSITIVE => {
+                set_doc.insert("decision_vector.outcome", "ALLOWED_CONTACT");
+                set_doc.insert("decision_vector.category", "LEGITIMATE");
+                set_doc.insert("decision_vector.final_score", 0_i32);
+            }
+            UserFeedback::UNRATED => {}
+        }
+
         telemetry_coll
-            .update_one(
-                doc! { "_id": &id },
-                doc! {
-                    "$set": {
-                        "audit.user_feedback": payload.user_feedback.as_str(),
-                        "audit.synced_at": BsonDateTime::now(),
-                    }
-                },
-            )
+            .update_one(doc! { "_id": &id }, doc! { "$set": set_doc })
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

@@ -12,6 +12,7 @@ data class TriggeredRuleDto(
     val meta: String? = null
 )
 
+@Serializable
 @Entity(
     tableName = "call_telemetry",
     indices = [
@@ -44,6 +45,7 @@ data class CallTelemetryEntity(
     val syncStatus: String = "PENDING" // PENDING | SYNCED
 )
 
+@Serializable
 @Entity(tableName = "active_rules")
 data class ActiveRuleEntity(
     @PrimaryKey
@@ -57,6 +59,7 @@ data class ActiveRuleEntity(
     val updatedAt: Long
 )
 
+@Serializable
 @Entity(tableName = "prefix_quarantine")
 data class PrefixQuarantineEntity(
     @PrimaryKey

@@ -1,5 +1,7 @@
 package br.com.spamshield.ui.screens
 
+import android.content.Intent
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -425,13 +427,39 @@ fun SettingsScreen(
                 Button(
                     onClick = {
                         scope.launch {
-                            val (jsonFile, csvFile) = onExportFiles()
-                            exportMessage = "Exportado com sucesso:\n• ${jsonFile.absolutePath}\n• ${csvFile.absolutePath}"
+                            runCatching {
+                                val (jsonFile, csvFile) = onExportFiles()
+                                exportMessage = "Exportado com sucesso (${csvFile.length() / 1024} KB):\n• ${jsonFile.name}\n• ${csvFile.name}"
+                                val jsonUri = FileProvider.getUriForFile(
+                                    context,
+                                    "${context.packageName}.fileprovider",
+                                    jsonFile
+                                )
+                                val csvUri = FileProvider.getUriForFile(
+                                    context,
+                                    "${context.packageName}.fileprovider",
+                                    csvFile
+                                )
+                                val shareIntent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                                    type = "*/*"
+                                    putParcelableArrayListExtra(
+                                        Intent.EXTRA_STREAM,
+                                        arrayListOf(jsonUri, csvUri)
+                                    )
+                                    putExtra(Intent.EXTRA_SUBJECT, "SpamShield BR - Telemetria (JSON & CSV)")
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(
+                                    Intent.createChooser(shareIntent, "Compartilhar / Salvar Telemetria")
+                                )
+                            }.onFailure { err ->
+                                exportMessage = "Erro ao exportar: ${err.localizedMessage ?: "Falha inesperada"}"
+                            }
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Exportar Banco Local (JSON / CSV)")
+                    Text("Exportar e Compartilhar Banco Local (JSON / CSV)")
                 }
                 if (exportMessage.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(4.dp))

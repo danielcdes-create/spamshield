@@ -163,6 +163,7 @@ class SyncRepository @Inject constructor(
             )
 
             val now = System.currentTimeMillis()
+            dao.deduplicateHistoryRecords()
             dao.purgeExpiredQuarantines(now)
             dao.purgeExpiredOutboundGrace(now)
 
@@ -243,24 +244,23 @@ class SyncRepository @Inject constructor(
         withContext(Dispatchers.IO) {
             dao.updateUserFeedback(telemetryId, feedback)
             if (feedback == "FALSE_POSITIVE" && prefix7.isNotEmpty()) {
-                dao.deleteQuarantineByPrefix(prefix7)
+                deleteManualQuarantine(prefix7)
             } else if (feedback == "CONFIRMED_SPAM" && prefix7.isNotEmpty()) {
                 val now = System.currentTimeMillis()
                 val existing = dao.getActiveQuarantineForPrefix(prefix7, now)
-                dao.upsertQuarantine(
-                    PrefixQuarantineEntity(
-                        prefix7 = prefix7,
-                        ddd = prefix7.take(2),
-                        carrierGuess = existing?.carrierGuess ?: "Confirmado pelo Usuário",
-                        distinctNumbersJson = existing?.distinctNumbersJson ?: "[]",
-                        hitCount = (existing?.hitCount ?: 1) + 1,
-                        penaltyWeight = 80,
-                        reason = "CONFIRMED_SPAM",
-                        firstSeenAt = existing?.firstSeenAt ?: now,
-                        lastSeenAt = now,
-                        expiresAt = now + 30L * 24 * 60 * 60 * 1000L
-                    )
+                val qEntity = PrefixQuarantineEntity(
+                    prefix7 = prefix7,
+                    ddd = prefix7.take(2),
+                    carrierGuess = existing?.carrierGuess ?: "Confirmado pelo Usuário",
+                    distinctNumbersJson = existing?.distinctNumbersJson ?: "[]",
+                    hitCount = (existing?.hitCount ?: 1) + 1,
+                    penaltyWeight = 85,
+                    reason = "CONFIRMED_SPAM",
+                    firstSeenAt = existing?.firstSeenAt ?: now,
+                    lastSeenAt = now,
+                    expiresAt = now + 30L * 24 * 60 * 60 * 1000L
                 )
+                saveManualQuarantine(qEntity)
             }
 
             try {

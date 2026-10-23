@@ -2,6 +2,7 @@ package br.com.spamshield.ui.screens
 
 import android.content.Intent
 import android.provider.ContactsContract
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -105,7 +106,11 @@ fun CallAuditScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column {
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = 8.dp)
+                                ) {
                                     Text(
                                         text = item.normalizedNumber.ifBlank { item.rawNumber },
                                         fontWeight = FontWeight.Bold,
@@ -154,29 +159,60 @@ fun CallAuditScreen(
                                 }
 
                                 Spacer(modifier = Modifier.height(8.dp))
+                                val feedbackLabel = when (item.userFeedback) {
+                                    "CONFIRMED_SPAM" -> "✓ SPAM CONFIRMADO PELO USUÁRIO (Prefixo ${item.prefix7} em Quarentena)"
+                                    "FALSE_POSITIVE" -> "✓ FALSO POSITIVO (Prefixo ${item.prefix7} Liberado)"
+                                    else -> "Ainda não avaliado (UNRATED)"
+                                }
+                                val feedbackColor = when (item.userFeedback) {
+                                    "CONFIRMED_SPAM" -> Color(0xFFEF4444)
+                                    "FALSE_POSITIVE" -> Color(0xFF22C55E)
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
                                 Text(
-                                    text = "Feedback Atual: ${item.userFeedback}",
-                                    style = MaterialTheme.typography.labelSmall
+                                    text = "Feedback: $feedbackLabel",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = feedbackColor
                                 )
 
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
+                                    val isAlreadySpam = item.userFeedback == "CONFIRMED_SPAM"
+                                    val isAlreadyLegit = item.userFeedback == "FALSE_POSITIVE"
+
                                     Button(
-                                        onClick = { onMarkFeedback(item, "CONFIRMED_SPAM") },
+                                        onClick = {
+                                            onMarkFeedback(item, "CONFIRMED_SPAM")
+                                            Toast.makeText(
+                                                context,
+                                                "Spam confirmado! Prefixo ${item.prefix7} adicionado à quarentena.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        },
                                         colors = ButtonDefaults.buttonColors(
-                                            containerColor = Color(0xFFDC2626)
+                                            containerColor = if (isAlreadySpam) Color(0xFF991B1B) else Color(0xFFDC2626),
+                                            contentColor = Color.White
                                         ),
                                         modifier = Modifier.weight(1f)
                                     ) {
-                                        Text("Confirmar Spam", fontSize = 12.sp)
+                                        Text(
+                                            text = if (isAlreadySpam) "✓ Spam Confirmado" else "Confirmar Spam",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
                                     }
 
                                     OutlinedButton(
                                         onClick = {
                                             onMarkFeedback(item, "FALSE_POSITIVE")
-                                            // Abre opção de salvar nos contatos
+                                            Toast.makeText(
+                                                context,
+                                                "Marcado como legítimo! Prefixo ${item.prefix7} removido da quarentena.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
                                             runCatching {
                                                 val insertIntent = Intent(ContactsContract.Intents.Insert.ACTION).apply {
                                                     type = ContactsContract.RawContacts.CONTENT_TYPE
@@ -187,7 +223,11 @@ fun CallAuditScreen(
                                         },
                                         modifier = Modifier.weight(1f)
                                     ) {
-                                        Text("Falso Positivo", fontSize = 12.sp)
+                                        Text(
+                                            text = if (isAlreadyLegit) "✓ Falso Positivo" else "Falso Positivo",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
                                     }
                                 }
                             }
@@ -201,20 +241,25 @@ fun CallAuditScreen(
 
 @Composable
 private fun OutcomeBadge(outcome: String, score: Int) {
-    val bgColor = when (outcome) {
-        "BLOCKED" -> Color(0xFFDC2626)
-        "SHADOW_BLOCKED" -> Color(0xFFD97706)
-        else -> Color(0xFF16A34A)
+    val (label, bgColor) = when (outcome) {
+        "BLOCKED" -> "BLOQUEADA" to Color(0xFFDC2626)
+        "SHADOW_BLOCKED" -> "SOMBRA" to Color(0xFFD97706)
+        "ALLOWED_CONTACT" -> "AGENDA" to Color(0xFF16A34A)
+        "ALLOWED_EMERGENCY_REPEAT" -> "2ª CHAMADA" to Color(0xFF16A34A)
+        "ALLOWED_OUTBOUND_GRACE" -> "RETORNO" to Color(0xFF16A34A)
+        else -> "PERMITIDA" to Color(0xFF16A34A)
     }
     Surface(
         color = bgColor.copy(alpha = 0.16f),
         shape = RoundedCornerShape(8.dp)
     ) {
         Text(
-            text = "$outcome ($score)",
+            text = "$label ($score)",
             color = bgColor,
             fontWeight = FontWeight.Bold,
             fontSize = 11.sp,
+            softWrap = false,
+            maxLines = 1,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
         )
     }

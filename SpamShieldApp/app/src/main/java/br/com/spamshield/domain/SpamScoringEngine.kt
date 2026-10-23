@@ -118,11 +118,15 @@ class SpamScoringEngine @Inject constructor(
                 prefix6 = normalized.prefix6,
                 now = nowMillis
             )
-            val callLogGrace = contactLookup.hasRecentOutgoingCall(
-                normalizedNumber = normalized.normalizedNumber,
-                prefix6 = normalized.prefix6,
-                sinceTimestampMs = nowMillis - OUTBOUND_GRACE_WINDOW_MS
-            )
+            val callLogGrace = if (dbGraceHits > 0) {
+                true
+            } else {
+                contactLookup.hasRecentOutgoingCall(
+                    normalizedNumber = normalized.normalizedNumber,
+                    prefix6 = normalized.prefix6,
+                    sinceTimestampMs = nowMillis - OUTBOUND_GRACE_WINDOW_MS
+                )
+            }
             if (dbGraceHits > 0 || callLogGrace) {
                 return buildShortCircuitResult(
                     normalized = normalized,
@@ -141,6 +145,9 @@ class SpamScoringEngine @Inject constructor(
             }
         }
 
+        // Reinicia cronômetro após consultas IPC externas (Contacts/CallLog) para medir a árvore vetorial pura
+        val engineStartNanos = safeElapsedNanos()
+
         // Passo 3: Cálculo Vetorial de Score (Penalidades Cumulativas)
         val enabledRules = dao.getEnabledRules().associateBy { it.ruleId }
         var score = 0
@@ -158,15 +165,16 @@ class SpamScoringEngine @Inject constructor(
                 score += w
                 triggeredRules.add(TriggeredRuleDto("STIR_SHAKEN_FAILED", w, "VERIFICATION_STATUS_FAILED"))
             }
-            "NOT_VERIFIED" -> {
+            "" , "NOT_VERIFIED" -> {
                 val w = enabledRules["STIR_SHAKEN_UNVERIFIED"]?.weight ?: 20
                 score += w
                 triggeredRules.add(TriggeredRuleDto("STIR_SHAKEN_UNVERIFIED", w, "VERIFICATION_STATUS_NOT_VERIFIED"))
             }
         }
 
-        // 3.3 Quarentena de Prefixo Ativa
+        // 3.3 Quarentena de Prefixo Ativa (/7 exato, /6 sub-bloco e /5 fazenda de chipeira)
         var activeQuarantine: PrefixQuarantineEntity? = null
+        var subBlockClusterTriggered = false
         if (normalized.prefix7.isNotEmpty()) {
             activeQuarantine = dao.getActiveQuarantineForPrefix(normalized.prefix7, nowMillis)
             if (activeQuarantine != null) {
@@ -178,10 +186,45 @@ class SpamScoringEngine @Inject constructor(
                         meta = "${normalized.prefix7} (${activeQuarantine.reason})"
                     )
                 )
+            } else if (normalized.prefix6.length >= 6) {
+                val q6Count = dao.countActiveQuarantinesByPrefix6(normalized.prefix6, nowMillis)
+                val distinct6In24h = dao.countDistinctNumbersInPrefix6Since(
+                    prefix6 = normalized.prefix6,
+                    sinceTimestamp = nowMillis - NEIGHBORHOOD_BURST_WINDOW_MS
+                )
+                if (q6Count > 0 || distinct6In24h >= 1) {
+                    val w6 = 50
+                    score += w6
+                    subBlockClusterTriggered = true
+                    triggeredRules.add(
+                        TriggeredRuleDto(
+                            rule_id = "PREFIX6_CLUSTER_HIT",
+                            weight = w6,
+                            meta = "Sub-bloco ${normalized.prefix6}x (q=$q6Count, 24h=$distinct6In24h)"
+                        )
+                    )
+                }
+            }
+
+            val prefix5 = normalized.prefix7.take(5)
+            if (prefix5.length == 5) {
+                val q5Count = dao.countActiveQuarantinesByPrefix5(prefix5, nowMillis)
+                if (q5Count >= 2) {
+                    val w5 = 35
+                    score += w5
+                    subBlockClusterTriggered = true
+                    triggeredRules.add(
+                        TriggeredRuleDto(
+                            rule_id = "PREFIX5_CHIPEIRA_FARM",
+                            weight = w5,
+                            meta = "Bloco ${prefix5}xx ($q5Count prefixos em quarentena)"
+                        )
+                    )
+                }
             }
         }
 
-        // 3.4 Detecção Dinâmica de Vizinhança (Neighborhood Burst nas últimas 24h)
+        // 3.4 Detecção Dinâmica de Vizinhança (Neighborhood Burst /7 nas últimas 24h)
         var neighborhoodBurstTriggered = false
         if (normalized.prefix7.isNotEmpty()) {
             val distinctIn24h = dao.countDistinctNumbersInPrefix7Since(
@@ -192,7 +235,6 @@ class SpamScoringEngine @Inject constructor(
                 normalizedNumber = normalized.normalizedNumber,
                 sinceTimestamp = nowMillis - NEIGHBORHOOD_BURST_WINDOW_MS
             )
-            // Total distinct numbers including the current incoming call
             val effectiveDistinctCount = if (prevCallForSameNumber == 0) distinctIn24h + 1 else distinctIn24h
             if (effectiveDistinctCount >= 2) {
                 val burstWeight = enabledRules["PREFIX_NEIGHBORHOOD_BURST"]?.weight ?: 60
@@ -205,24 +247,10 @@ class SpamScoringEngine @Inject constructor(
                         meta = "distinct_24h=$effectiveDistinctCount"
                     )
                 )
-                // Auto-insert/update prefix_quarantine with 7-day TTL
-                val updatedQuarantine = PrefixQuarantineEntity(
-                    prefix7 = normalized.prefix7,
-                    ddd = normalized.ddd,
-                    carrierGuess = carrierGuess ?: activeQuarantine?.carrierGuess ?: "Desconhecida",
-                    distinctNumbersJson = "[\"${normalized.nationalDigits}\"]",
-                    hitCount = (activeQuarantine?.hitCount ?: 1) + 1,
-                    penaltyWeight = maxOf(activeQuarantine?.penaltyWeight ?: 60, 60),
-                    reason = "ROBOCALL_PREFIX_CLUSTER",
-                    firstSeenAt = activeQuarantine?.firstSeenAt ?: nowMillis,
-                    lastSeenAt = nowMillis,
-                    expiresAt = nowMillis + QUARANTINE_DEFAULT_TTL_MS
-                )
-                dao.upsertQuarantine(updatedQuarantine)
             }
         }
 
-        // 3.5 Regras Regex e Plano Anatel
+        // 3.5 Regras Regex, Tronco Fixo/VoIP, DDD Externo e Discagem de Tronco com Zero (031/011)
         var regexMatchedRuleId: String? = null
         val regexRules = enabledRules.values.filter { it.ruleType == "REGEX_MATCH" && !it.pattern.isNullOrBlank() }
         for (rule in regexRules) {
@@ -237,19 +265,49 @@ class SpamScoringEngine @Inject constructor(
             }
         }
 
-        if (anatelInfo?.isCorporatePabxRange == true) {
+        if (resolvedLineType == "FIXED_OR_VOIP" ||
+            resolvedLineType == "TOLL_FREE_OR_SPECIAL" ||
+            anatelInfo?.isCorporatePabxRange == true
+        ) {
             val pabxWeight = 35
             score += pabxWeight
             triggeredRules.add(
                 TriggeredRuleDto(
                     rule_id = "ANATEL_PABX_VOIP_RANGE",
                     weight = pabxWeight,
-                    meta = anatelInfo.carrier
+                    meta = anatelInfo?.carrier ?: carrierGuess
                 )
             )
         }
 
-        // Passo 4: Veredito, Modo Sombra e Gravação
+        if (normalized.ddd.isNotEmpty() &&
+            normalized.ddd != "00" &&
+            normalized.ddd != settings.userDdd
+        ) {
+            val extDddWeight = 30
+            score += extDddWeight
+            triggeredRules.add(
+                TriggeredRuleDto(
+                    rule_id = "EXTERNAL_DDD_UNKNOWN",
+                    weight = extDddWeight,
+                    meta = "DDD ${normalized.ddd} != ${settings.userDdd}"
+                )
+            )
+        }
+
+        if (rawNumber.trim().startsWith("0")) {
+            val trunkZeroWeight = 25
+            score += trunkZeroWeight
+            triggeredRules.add(
+                TriggeredRuleDto(
+                    rule_id = "LEADING_ZERO_TRUNK_DIALING",
+                    weight = trunkZeroWeight,
+                    meta = rawNumber.trim().take(4)
+                )
+            )
+        }
+
+        // Passo 4: Veredito, Modo Sombra, Quarentena Automática e Gravação
         val threshold = settings.blockThresholdScore
         val isSpam = score >= threshold
         val outcome = when {
@@ -260,13 +318,29 @@ class SpamScoringEngine @Inject constructor(
 
         val category = when {
             stirShakenStatus == "FAILED" -> "SPOOFING_STIR_FAILED"
-            regexMatchedRuleId == "REGEX_TELEMARKETING_NATIONAL" -> "KNOWN_BLACKLIST"
-            activeQuarantine != null || neighborhoodBurstTriggered || regexMatchedRuleId != null -> "ROBOCALL_PREFIX_CLUSTER"
+            regexMatchedRuleId == "REGEX_TELEMARKETING_NATIONAL" || regexMatchedRuleId == "ANATEL_ATO_10413_0303" -> "KNOWN_BLACKLIST"
+            activeQuarantine != null || neighborhoodBurstTriggered || subBlockClusterTriggered || regexMatchedRuleId != null -> "ROBOCALL_PREFIX_CLUSTER"
             isSpam -> "ROBOCALL_PREFIX_CLUSTER"
             else -> "UNKNOWN_UNVERIFIED"
         }
 
-        val latencyMs = (safeElapsedNanos() - startNanos).coerceAtLeast(100_000L) / 1_000_000.0
+        if (isSpam && normalized.prefix7.length >= 6) {
+            val updatedQuarantine = PrefixQuarantineEntity(
+                prefix7 = normalized.prefix7,
+                ddd = normalized.ddd,
+                carrierGuess = carrierGuess,
+                distinctNumbersJson = "[\"${normalized.normalizedNumber}\"]",
+                hitCount = (activeQuarantine?.hitCount ?: 0) + 1,
+                penaltyWeight = maxOf(activeQuarantine?.penaltyWeight ?: 65, 65),
+                reason = category,
+                firstSeenAt = activeQuarantine?.firstSeenAt ?: nowMillis,
+                lastSeenAt = nowMillis,
+                expiresAt = nowMillis + QUARANTINE_DEFAULT_TTL_MS
+            )
+            dao.upsertQuarantine(updatedQuarantine)
+        }
+
+        val latencyMs = (safeElapsedNanos() - engineStartNanos).coerceAtLeast(100_000L) / 1_000_000.0
 
         val telemetryEntity = CallTelemetryEntity(
             id = UUID.randomUUID().toString(),

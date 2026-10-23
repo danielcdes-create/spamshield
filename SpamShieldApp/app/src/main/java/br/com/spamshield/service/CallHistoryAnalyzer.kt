@@ -109,6 +109,7 @@ class CallHistoryAnalyzer @Inject constructor(
             }
 
             val settings = settingsDataStore.getSnapshot()
+            dao.deduplicateHistoryRecords()
             val enabledRules = dao.getEnabledRules().associateBy { it.ruleId }
             val regexRules = enabledRules.values.filter {
                 it.ruleType == "REGEX_MATCH" && !it.pattern.isNullOrBlank()
@@ -162,13 +163,21 @@ class CallHistoryAnalyzer @Inject constructor(
                 // Measure pure engine evaluation latency (excluding batch ContentResolver IPC)
                 val startNanos = SystemClock.elapsedRealtimeNanos()
 
-                val deterministicId = UUID.nameUUIDFromBytes(
+                val realTimeMatch = dao.findRealTimeTelemetryNearTimestamp(
+                    normalizedNumber = norm.normalizedNumber,
+                    minTs = call.timestamp - 15_000L,
+                    maxTs = call.timestamp + 15_000L
+                )
+
+                val deterministicId = realTimeMatch?.id ?: UUID.nameUUIDFromBytes(
                     "calllog-${call.timestamp}-${norm.normalizedNumber}".toByteArray()
                 ).toString()
+                val effectiveTimestamp = realTimeMatch?.timestamp ?: call.timestamp
+                val effectiveDeviceId = realTimeMatch?.deviceId ?: "s23-ultra-history"
 
-                val existing = dao.getTelemetryById(deterministicId)
+                val existing = realTimeMatch ?: dao.getTelemetryById(deterministicId)
                 val preservedFeedback = existing?.userFeedback ?: "UNRATED"
-                val preservedSyncStatus = existing?.syncStatus ?: "PENDING"
+                val preservedSyncStatus = if (realTimeMatch != null) "PENDING" else (existing?.syncStatus ?: "PENDING")
 
                 val anatelInfo = if (norm.prefix7.isNotEmpty()) {
                     dao.getAnatelPrefix(norm.prefix7)
@@ -192,8 +201,8 @@ class CallHistoryAnalyzer @Inject constructor(
                     dao.insertTelemetry(
                         CallTelemetryEntity(
                             id = deterministicId,
-                            timestamp = call.timestamp,
-                            deviceId = "s23-ultra-history",
+                            timestamp = effectiveTimestamp,
+                            deviceId = effectiveDeviceId,
                             rawNumber = call.rawNumber,
                             normalizedNumber = norm.normalizedNumber,
                             ddd = norm.ddd,
@@ -301,7 +310,10 @@ class CallHistoryAnalyzer @Inject constructor(
                     }
                 }
 
-                if (resolvedLineType == "FIXED_OR_VOIP") {
+                if (resolvedLineType == "FIXED_OR_VOIP" ||
+                    resolvedLineType == "TOLL_FREE_OR_SPECIAL" ||
+                    anatelInfo?.isCorporatePabxRange == true
+                ) {
                     score += 35
                     triggered.add(
                         TriggeredRuleDto(
@@ -312,9 +324,38 @@ class CallHistoryAnalyzer @Inject constructor(
                     )
                 }
 
-                val isSpam = score >= settings.blockThresholdScore || wasBlockedOrRejectedInSystem || isPingCall
-                val outcome = if (isSpam) "BLOCKED" else "ALLOWED_LOW_SCORE"
+                if (norm.ddd.isNotEmpty() && norm.ddd != "00" && norm.ddd != settings.userDdd) {
+                    score += 30
+                    triggered.add(
+                        TriggeredRuleDto(
+                            rule_id = "EXTERNAL_DDD_UNKNOWN",
+                            weight = 30,
+                            meta = "DDD ${norm.ddd} != ${settings.userDdd}"
+                        )
+                    )
+                }
+
+                if (call.rawNumber.trim().startsWith("0")) {
+                    score += 25
+                    triggered.add(
+                        TriggeredRuleDto(
+                            rule_id = "LEADING_ZERO_TRUNK_DIALING",
+                            weight = 25,
+                            meta = call.rawNumber.trim().take(4)
+                        )
+                    )
+                }
+
+                val isSpam = preservedFeedback == "CONFIRMED_SPAM" ||
+                    (preservedFeedback != "FALSE_POSITIVE" &&
+                        (score >= settings.blockThresholdScore || wasBlockedOrRejectedInSystem || isPingCall))
+                val outcome = when {
+                    preservedFeedback == "FALSE_POSITIVE" -> "ALLOWED_CONTACT"
+                    isSpam -> "BLOCKED"
+                    else -> "ALLOWED_LOW_SCORE"
+                }
                 val category = when {
+                    preservedFeedback == "FALSE_POSITIVE" -> "LEGITIMATE"
                     isPingCall -> "PING_CALL_ROBOCALL"
                     matchedRegexId == "REGEX_TELEMARKETING_NATIONAL" || matchedRegexId == "ANATEL_ATO_10413_0303" -> "KNOWN_BLACKLIST"
                     isSpam -> "ROBOCALL_PREFIX_CLUSTER"
@@ -326,8 +367,8 @@ class CallHistoryAnalyzer @Inject constructor(
                 dao.insertTelemetry(
                     CallTelemetryEntity(
                         id = deterministicId,
-                        timestamp = call.timestamp,
-                        deviceId = "s23-ultra-history",
+                        timestamp = effectiveTimestamp,
+                        deviceId = effectiveDeviceId,
                         rawNumber = call.rawNumber,
                         normalizedNumber = norm.normalizedNumber,
                         ddd = norm.ddd,
@@ -335,7 +376,7 @@ class CallHistoryAnalyzer @Inject constructor(
                         carrierGuess = carrierGuess,
                         lineType = resolvedLineType,
                         stirShakenStatus = "NOT_VERIFIED",
-                        finalScore = score,
+                        finalScore = if (preservedFeedback == "CONFIRMED_SPAM") maxOf(score, 100) else score,
                         thresholdApplied = settings.blockThresholdScore,
                         outcome = outcome,
                         category = category,
