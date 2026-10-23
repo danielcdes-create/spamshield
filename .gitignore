@@ -1,0 +1,20 @@
+# Secrets & Local Environment Specs
+.env
+*.env
+!*.env.example
+ambiente-local.md
+spamshield_blueprint_especificao_tecnica.md
+
+# Rust / Cargo
+spamshield-server/target/
+
+# Android / Gradle
+SpamShieldApp/.gradle/
+SpamShieldApp/build/
+SpamShieldApp/app/build/
+SpamShieldApp/local.properties
+*.apk
+*.aab
+*.iml
+.idea/
+.DS_Store

@@ -1,0 +1,3 @@
+-keepattributes *Annotation*,InnerClasses,Signature
+-keep class br.com.spamshield.data.remote.** { *; }
+-keep class br.com.spamshield.data.local.entity.** { *; }
