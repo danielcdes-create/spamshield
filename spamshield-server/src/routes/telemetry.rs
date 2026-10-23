@@ -9,7 +9,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use bson::{doc, Bson, DateTime as BsonDateTime, Document};
+use bson::{doc, DateTime as BsonDateTime, Document};
 use chrono::{Duration, Utc};
 use futures::{future::join_all, TryStreamExt};
 use mongodb::options::{FindOptions, InsertManyOptions, UpdateOptions};
@@ -72,11 +72,7 @@ pub async fn post_telemetry_batch(
     for item in batch.iter_mut() {
         item.audit.synced_at = now_utc;
         if existing_ids.contains(&item.id) {
-            if item.audit.user_feedback != UserFeedback::UNRATED
-                || item.decision_vector.call_duration_sec.is_some()
-            {
-                updated_existing_calls.push(item);
-            }
+            updated_existing_calls.push(item);
         } else {
             new_calls.push(item);
         }
@@ -103,32 +99,25 @@ pub async fn post_telemetry_batch(
         info!("Inserted {} new telemetry records", new_calls.len());
     }
 
-    // 2. Sync offline updates (feedback / ping call duration) for existing documents concurrently
+    // 2. Sync offline updates (re-processed history, feedback, carrier separation, or ping call duration) for existing documents concurrently
     if !updated_existing_calls.is_empty() {
         let update_futs = updated_existing_calls.iter().map(|call| {
             let coll = telemetry_coll.clone();
             let id = call.id.clone();
+            let full_doc = call.to_bson_document();
+            let call_details = full_doc.get_document("call_details").cloned().unwrap_or_default();
+            let decision_vector = full_doc.get_document("decision_vector").cloned().unwrap_or_default();
             let fb = call.audit.user_feedback.as_str().to_string();
-            let cat = call.decision_vector.category.as_str().to_string();
-            let outcome = call.decision_vector.outcome.as_str().to_string();
-            let score = call.decision_vector.final_score;
-            let dur = call
-                .decision_vector
-                .call_duration_sec
-                .map(Bson::Int32)
-                .unwrap_or(Bson::Null);
             async move {
                 let _ = coll
                     .update_one(
                         doc! { "_id": id },
                         doc! {
                             "$set": {
+                                "call_details": call_details,
+                                "decision_vector": decision_vector,
                                 "audit.user_feedback": fb,
                                 "audit.synced_at": now_bson,
-                                "decision_vector.outcome": outcome,
-                                "decision_vector.final_score": score,
-                                "decision_vector.category": cat,
-                                "decision_vector.call_duration_sec": dur,
                             }
                         },
                     )

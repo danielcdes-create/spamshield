@@ -117,6 +117,8 @@ class FakeSpamShieldDao : SpamShieldDao {
     override fun observeActiveQuarantines(now: Long): Flow<List<PrefixQuarantineEntity>> =
         MutableStateFlow(quarantines.filter { it.expiresAt > now })
 
+    override suspend fun getAllQuarantines(): List<PrefixQuarantineEntity> = quarantines.toList()
+
     override suspend fun insertQuarantines(items: List<PrefixQuarantineEntity>) {
         quarantines.clear()
         quarantines.addAll(items)

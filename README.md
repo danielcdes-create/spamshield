@@ -1,32 +1,87 @@
-# SpamShield BR (`v1.2.1`)
+# SpamShield BR (`v1.2.3` — Build `7`)
 
-Ecossistema privado de defesa, telemetria e inteligência contra chamadas de spam/robocall no Brasil, composto por:
+Ecossistema privado de defesa em borda (`< 2 ms`), telemetria vetorial e inteligência contra chamadas de spam, robocall, chipeiras GSM e spoofing no Brasil (padrões Anatel RNPM / Ato nº 10.413 / STIR-SHAKEN).
 
-1. **Android Edge App (`SpamShieldApp`)** — 100% Kotlin + Jetpack Compose + Material 3 + Room SQLite (WAL):
-   - Interceptação nativa via `CallScreeningService` (`ROLE_CALL_SCREENING`) em **`< 2 ms`**.
-   - Normalização estrita de números brasileiros (`libphonenumber` + inferência de operadora por CSP e faixa RNPM Anatel: `TIM`, `Claro`, `Vivo`, `VoIP / Fixo`).
-   - Árvore de decisão híbrida determinística + heurística com suporte a **Modo Sombra**, **Whitelist de Contatos**, **Grace Period de Chamada Efetuada**, **Quarentena Dinâmica `/7`**, **Burst de Vizinhança (`PREFIX_NEIGHBORHOOD_BURST`)** e **Detector Pós-Chamada de Ping Call (`<= 4s`)**.
-   - **Analisador de Histórico (`CallHistoryAnalyzer`)**: importa e classifica retroativamente o histórico de chamadas do aparelho (`CallLog.Calls`).
-   - **Atualizador OTA integrado**: verifica, baixa e instala novas versões do APK diretamente do servidor via Tailscale.
-2. **Backend Rust (`spamshield-server`)** — `axum` + `tokio` + `mongodb`:
-   - Sincronização em lote idempotente (`POST /api/v1/telemetry/batch`) com agrupamento paralelo (`futures::future::join_all`).
-   - Recalibração automática de pesos em caso de `FALSE_POSITIVE` (`PATCH /api/v1/telemetry/:id/feedback`).
-   - Sincronização sob demanda e periódica de faixas **Anatel (Plano de Numeração + RGC `0303`)** e **Blacklists BR** (`POST /api/v1/providers/sync`).
-   - Servidor OTA de APK (`GET /api/v1/apk/info` e `GET /apk`).
+---
+
+## 1. Arquitetura do Sistema
+
+1. **Android Edge App (`SpamShieldApp`)** — 100% Kotlin + Jetpack Compose + Material 3 + Room SQLite (WAL) + Hilt + WorkManager:
+   - **Interceptação Nativa (`< 2 ms`):** `CallScreeningService` (`ROLE_CALL_SCREENING`) com bloqueio silencioso antes do toque (`setDisallowCall`, `setRejectCall`, `setSkipNotification`).
+   - **Normalização Telefônica Brasileira (`PhoneNormalizer`):**
+     - Tratamento de formato `E.164` (`+55`), prefixos de tronco com zero (`031...`, `011...`), Códigos de Seleção de Prestadora (`015`, `021`, `041`, `031`) e chamadas internacionais/duplo zero (`004131...`).
+     - **Separação Estrita entre `VoIP` e `Fixo`:**
+       - **`VoIP`:** Numeração não-geográfica (`0300`, `0303`, `0800`, `4004`, `3003`, `4003`), códigos curtos de telemarketing (`10315`, headers SIP curtos) e faixas de tronco PABX/SIP/DDR (`210x`–`212x`, `251x`–`255x`, `300x`–`319x`, `400x`–`419x`, `485x`, `502x`–`509x`). Prioridade absoluta sobre o CSP para impedir que chamadas VoIP discadas via CSP (`041 11 4004-3535`) sejam mascaradas como móveis.
+       - **`Fixo`:** Linhas fixas STFC geográficas tradicionais (`320x`–`399x`, ex.: `31 3287-xxxx`, `31 3500-xxxx`, `11 3658-xxxx`).
+     - **Inferência de Operadora Móvel (RNPM Anatel):** Mapeamento canônico para `Claro` (incluindo faixas MVNO/migradas `937`–`939` e `980`), `TIM`, `Vivo` e `Outros`.
+   - **Motor Heurístico Vetorial (`SpamScoringEngine`):**
+     - **Short-Circuits Seguros:**
+       - `CONTACT_WHITELIST` (`-1000`): Imunidade para contatos da agenda.
+       - `OUTBOUND_GRACE_PERIOD` (`-500`): Imunidade de 2h para retorno do mesmo número ou sub-bloco `/6` após chamada efetuada pelo usuário.
+       - `EMERGENCY_REPEATED_CALL` (`-500`): Blindada — concedida **exclusivamente** a linhas `MOBILE` sem falha `STIR_SHAKEN`, sem discagem de tronco com zero (`0xx`) e cujo prefixo `/7` ou `/6` não esteja em quarentena.
+     - **Regras Cumulativas de Pontuação (Threshold padrão `>= 70`):**
+       - `NOT_IN_CONTACTS` (`+25`)
+       - `STIR_SHAKEN_FAILED` (`+85`) / `STIR_SHAKEN_UNVERIFIED` (`+20`)
+       - `PREFIX_QUARANTINE_HIT` (`+60` a `+80`): Quarentena ativa no prefixo exato `/7`.
+       - `PREFIX6_CLUSTER_HIT` (`+50`): Sub-bloco `/6` (`DDD + 4 dígitos`) com atividade suspeita ou quarentena vizinha em 24h.
+       - `PREFIX5_CHIPEIRA_FARM` (`+35`): Fazenda de chipeira GSM no bloco `/5` (`DDD + 3 dígitos`, ex.: `31937xx`–`31939xx`, `31984xx`–`31989xx`) com múltiplos prefixos `/7` em quarentena.
+       - `PREFIX_NEIGHBORHOOD_BURST` (`+60`): Múltiplos números distintos do mesmo prefixo `/7` em 24h.
+       - `ANATEL_PABX_VOIP_RANGE` (`+35`): Linha `FIXED_OR_VOIP` / `TOLL_FREE_OR_SPECIAL` / PABX corporativo.
+       - `EXTERNAL_DDD_UNKNOWN` (`+30`): Chamada originada fora do DDD local do usuário sem contato na agenda.
+       - `LEADING_ZERO_TRUNK_DIALING` (`+25`): Discagem de tronco iniciada por `0` (`031...`, `041...`).
+       - `PING_CALL_PENALTY` (`+55`): Detector pós-chamada (`CallStateMonitor`) para chamadas mudas desligadas em `<= 4s`.
+       - Regras Regex (`ANATEL_ATO_10413_0303`, `BLACKLIST_MG_VOIP_PABX`, `BLACKLIST_SP_VOIP_ROBOCALL`, `REGEX_TELEMARKETING_NATIONAL`).
+   - **Analisador e Reprocessador Retroativo (`CallHistoryAnalyzer`):**
+     - Importa o histórico do sistema (`CallLog.Calls`), deduplica registros em tempo real (`android-edge-br`) vs histórico (`s23-ultra-history`) na janela de `±15s` e executa `reprocessAllStoredTelemetry()` para aplicar retroativamente todas as regras, classificações (`VoIP` vs `Fixo`) e correções de operadora em todo o banco SQLite local.
+   - **Exportação e Compartilhamento Nativo (`SettingsScreen` / `MainViewModel`):**
+     - Exportação completa da telemetria em JSON (`encodeDefaults = true`) e CSV com abertura imediata do Android Share Sheet (`FileProvider` + `Intent.ACTION_SEND_MULTIPLE`).
+   - **Atualizador OTA via Tailscale:** Verifica (`GET /api/v1/apk/info`), baixa (`GET /apk`) e instala novas versões do APK diretamente pelo app.
+
+2. **Backend Rust (`spamshield-server`)** — `axum` + `tokio` + `mongodb` + `rayon`:
+   - **Ingestão Idempotente e Atualização Retroativa (`POST /api/v1/telemetry/batch`):** Insere novos registros e atualiza integralmente (`call_details`, `decision_vector` e `audit`) registros existentes reprocessados ou auditados pelo usuário.
+   - **Migração Retroativa Automática (`AppDatabase::migrate_historical_records`):** Na inicialização do servidor, normaliza e reclassifica automaticamente todo o histórico no MongoDB Atlas (`call_telemetry`, `prefix_quarantine` e `anatel_numbering_plan`), separando `VoIP` de `Fixo` e corrigindo operadoras e chamadas legadas.
+   - **Feedback e Auto-Recalibração (`PATCH /api/v1/telemetry/:id/feedback`):**
+     - `CONFIRMED_SPAM`: Promove imediatamente `outcome = BLOCKED`, `category = ROBOCALL_PREFIX_CLUSTER`, `final_score >= 100` e insere o prefixo `/7` em quarentena (`+75`).
+     - `FALSE_POSITIVE`: Promove `outcome = ALLOWED_CONTACT`, `category = LEGITIMATE`, `final_score = 0`, remove o prefixo da quarentena e reduz automaticamente o peso das regras heurísticas em `15%` (piso `10`).
+   - **Sincronização Anatel e Blacklists BR (`POST /api/v1/providers/sync`):** Parser CSV paralelo em Rayon para planos de numeração Anatel, regras `0303` e clusters conhecidos de robocall.
+
 3. **MongoDB Atlas (`spam_shield_db`)**:
    - Coleções com JSON Schema Validation e índices compostos/TTL: `call_telemetry`, `prefix_quarantine`, `active_rules` e `anatel_numbering_plan`.
 
-## Como Executar
+---
 
-### 1. Servidor Rust (`spamshield-server`)
+## 2. Endpoints da API (`spamshield-server` — Porta `8080`)
+
+| Método | Rota | Descrição |
+| :--- | :--- | :--- |
+| `GET` | `/api/v1/health` | Status do servidor e latência do MongoDB Atlas |
+| `POST` | `/api/v1/telemetry/batch` | Recebe lote de telemetria e atualiza registros reprocessados |
+| `PATCH` | `/api/v1/telemetry/:id/feedback` | Registra `CONFIRMED_SPAM` ou `FALSE_POSITIVE` com recalibração |
+| `GET` | `/api/v1/sync/rules` | Retorna regras ativas, quarentenas `/7` e prefixos Anatel |
+| `POST` | `/api/v1/rules` | Cria ou atualiza regra customizada (Regex/Heurística) |
+| `DELETE` | `/api/v1/rules/:rule_id` | Remove regra customizada |
+| `POST` | `/api/v1/quarantine` | Adiciona prefixo `/7` manualmente na quarentena |
+| `DELETE` | `/api/v1/quarantine/:prefix7` | Remove prefixo `/7` da quarentena |
+| `POST` | `/api/v1/providers/sync` | Sincroniza base Anatel e Blacklists comunitárias BR |
+| `POST` | `/api/v1/anatel/sync` | Importa planilha CSV de numeração Anatel via Rayon |
+| `GET` | `/api/v1/apk/info` | Metadados da versão atual do APK disponível para OTA |
+| `GET` | `/apk` | Download direto do pacote `SpamShieldBR-debug.apk` |
+
+---
+
+## 3. Como Compilar e Executar
+
+### 3.1. Servidor Rust (`spamshield-server`)
 ```powershell
-cd spamshield-server
+cd C:\Users\danie\spamshield\spamshield-server
 Copy-Item .env.example .env
-# Preencha MONGODB_URI no arquivo .env
+# Configure MONGODB_URI e MONGODB_DIRECT_URI no arquivo .env
+cargo test
 cargo run
 ```
 
-### 2. Aplicativo Android (`SpamShieldApp`)
+### 3.2. Aplicativo Android (`SpamShieldApp`)
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\SpamShieldApp\build-android.ps1
+powershell -ExecutionPolicy Bypass -File C:\Users\danie\spamshield\SpamShieldApp\build-android.ps1
 ```
+O script executa os testes unitários (`testDebugUnitTest`), compila o APK (`assembleDebug`) e publica os artefatos em `SpamShieldApp\dist\SpamShieldBR-debug.apk` e `SpamShieldApp\dist\apk-info.json` para distribuição imediata via OTA no Tailscale (`http://100.83.253.15:8080/apk`).

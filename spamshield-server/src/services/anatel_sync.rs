@@ -130,10 +130,25 @@ pub fn parse_anatel_csv_parallel(csv_data: &str) -> Vec<AnatelNumberingPlanDoc> 
                         || prefix_7.contains("3003")
                         || prefix_7.contains("4004")));
 
+            let canonical_carrier = if line_type == LineType::FIXED_OR_VOIP || line_type == LineType::TOLL_FREE_OR_SPECIAL || is_pabx {
+                "VoIP".to_string()
+            } else {
+                let c_up = row.carrier.trim().to_uppercase();
+                if c_up.contains("CLARO") {
+                    "Claro".to_string()
+                } else if c_up.contains("TIM") {
+                    "TIM".to_string()
+                } else if c_up.contains("VIVO") || c_up.contains("TELEFONICA") {
+                    "Vivo".to_string()
+                } else {
+                    row.carrier.trim().to_string()
+                }
+            };
+
             Some(AnatelNumberingPlanDoc {
                 prefix_7,
                 ddd: ddd_digits,
-                carrier: row.carrier.trim().to_uppercase(),
+                carrier: canonical_carrier,
                 line_type,
                 is_corporate_pabx_range: is_pabx,
                 updated_at: now,
@@ -236,8 +251,8 @@ pub async fn sync_all_providers(
     // 3. Upsert known Brazilian spammer prefix clusters into prefix_quarantine
     let expires_at = BsonDateTime::from_chrono(Utc::now() + Duration::days(14));
     let known_clusters = vec![
-        ("3141011", "31", "VoIP / Fixo", 75_i32, "ROBOCALL_PREFIX_CLUSTER"),
-        ("3141013", "31", "VoIP / Fixo", 70_i32, "ROBOCALL_PREFIX_CLUSTER"),
+        ("3141011", "31", "VoIP", 75_i32, "ROBOCALL_PREFIX_CLUSTER"),
+        ("3141013", "31", "VoIP", 70_i32, "ROBOCALL_PREFIX_CLUSTER"),
         ("3198780", "31", "Claro", 65_i32, "ROBOCALL_PREFIX_CLUSTER"),
         ("3197619", "31", "TIM", 65_i32, "ROBOCALL_PREFIX_CLUSTER"),
         ("3198633", "31", "TIM", 65_i32, "ROBOCALL_PREFIX_CLUSTER"),
@@ -245,8 +260,8 @@ pub async fn sync_all_providers(
         ("3198321", "31", "TIM", 60_i32, "ROBOCALL_PREFIX_CLUSTER"),
         ("3198586", "31", "TIM", 60_i32, "ROBOCALL_PREFIX_CLUSTER"),
         ("1191086", "11", "TIM", 70_i32, "ROBOCALL_PREFIX_CLUSTER"),
-        ("1148581", "11", "VoIP / Fixo", 80_i32, " KNOWN_BLACKLIST"),
-        ("1150391", "11", "VoIP / Fixo", 80_i32, "KNOWN_BLACKLIST"),
+        ("1148581", "11", "VoIP", 80_i32, "KNOWN_BLACKLIST"),
+        ("1150391", "11", "VoIP", 80_i32, "KNOWN_BLACKLIST"),
     ];
 
     let q_coll = db.prefix_quarantine();

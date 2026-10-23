@@ -176,6 +176,9 @@ interface SpamShieldDao {
     @Query("SELECT * FROM prefix_quarantine WHERE expiresAt > :now ORDER BY hitCount DESC, lastSeenAt DESC")
     fun observeActiveQuarantines(now: Long): Flow<List<PrefixQuarantineEntity>>
 
+    @Query("SELECT * FROM prefix_quarantine")
+    suspend fun getAllQuarantines(): List<PrefixQuarantineEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertQuarantines(items: List<PrefixQuarantineEntity>)
 

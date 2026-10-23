@@ -133,7 +133,7 @@ abstract class AppDatabase : RoomDatabase() {
                 PrefixQuarantineEntity(
                     prefix7 = "3141011",
                     ddd = "31",
-                    carrierGuess = "Claro Fixo / VoIP",
+                    carrierGuess = "VoIP",
                     distinctNumbersJson = "[\"3141011230\"]",
                     hitCount = 2,
                     penaltyWeight = 70,
@@ -145,7 +145,7 @@ abstract class AppDatabase : RoomDatabase() {
                 PrefixQuarantineEntity(
                     prefix7 = "3141013",
                     ddd = "31",
-                    carrierGuess = "Claro Fixo / VoIP",
+                    carrierGuess = "VoIP",
                     distinctNumbersJson = "[\"3141013701\"]",
                     hitCount = 1,
                     penaltyWeight = 60,
@@ -194,11 +194,11 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         fun initialAnatelSeed(now: Long = System.currentTimeMillis()): List<AnatelPrefixEntity> = listOf(
-            AnatelPrefixEntity("3141011", "31", "CLARO S.A.", "FIXED_OR_VOIP", true, now),
-            AnatelPrefixEntity("3141013", "31", "CLARO S.A.", "FIXED_OR_VOIP", true, now),
-            AnatelPrefixEntity("3198621", "31", "TIM S.A.", "MOBILE", false, now),
-            AnatelPrefixEntity("3198321", "31", "TIM S.A.", "MOBILE", false, now),
-            AnatelPrefixEntity("3198586", "31", "TIM S.A.", "MOBILE", false, now)
+            AnatelPrefixEntity("3141011", "31", "VoIP", "FIXED_OR_VOIP", true, now),
+            AnatelPrefixEntity("3141013", "31", "VoIP", "FIXED_OR_VOIP", true, now),
+            AnatelPrefixEntity("3198621", "31", "TIM", "MOBILE", false, now),
+            AnatelPrefixEntity("3198321", "31", "TIM", "MOBILE", false, now),
+            AnatelPrefixEntity("3198586", "31", "TIM", "MOBILE", false, now)
         )
     }
 }

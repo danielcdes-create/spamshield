@@ -359,7 +359,7 @@ impl AppDatabase {
             doc! {
                 "prefix_7": "3141011",
                 "ddd": "31",
-                "carrier_guess": "Claro Fixo / VoIP",
+                "carrier_guess": "VoIP",
                 "distinct_numbers_seen": ["3141011230"],
                 "hit_count": 2_i32,
                 "penalty_weight": 70_i32,
@@ -371,7 +371,7 @@ impl AppDatabase {
             doc! {
                 "prefix_7": "3141013",
                 "ddd": "31",
-                "carrier_guess": "Claro Fixo / VoIP",
+                "carrier_guess": "VoIP",
                 "distinct_numbers_seen": ["3141013701"],
                 "hit_count": 1_i32,
                 "penalty_weight": 60_i32,
@@ -452,7 +452,7 @@ impl AppDatabase {
             doc! {
                 "prefix_7": "3141011",
                 "ddd": "31",
-                "carrier": "CLARO S.A.",
+                "carrier": "VoIP",
                 "line_type": "FIXED_OR_VOIP",
                 "is_corporate_pabx_range": true,
                 "updated_at": now_bson,
@@ -460,7 +460,7 @@ impl AppDatabase {
             doc! {
                 "prefix_7": "3141013",
                 "ddd": "31",
-                "carrier": "CLARO S.A.",
+                "carrier": "VoIP",
                 "line_type": "FIXED_OR_VOIP",
                 "is_corporate_pabx_range": true,
                 "updated_at": now_bson,
@@ -468,7 +468,7 @@ impl AppDatabase {
             doc! {
                 "prefix_7": "3198621",
                 "ddd": "31",
-                "carrier": "TIM S.A.",
+                "carrier": "TIM",
                 "line_type": "MOBILE",
                 "is_corporate_pabx_range": false,
                 "updated_at": now_bson,
@@ -476,7 +476,7 @@ impl AppDatabase {
             doc! {
                 "prefix_7": "3198321",
                 "ddd": "31",
-                "carrier": "TIM S.A.",
+                "carrier": "TIM",
                 "line_type": "MOBILE",
                 "is_corporate_pabx_range": false,
                 "updated_at": now_bson,
@@ -484,7 +484,7 @@ impl AppDatabase {
             doc! {
                 "prefix_7": "3198586",
                 "ddd": "31",
-                "carrier": "TIM S.A.",
+                "carrier": "TIM",
                 "line_type": "MOBILE",
                 "is_corporate_pabx_range": false,
                 "updated_at": now_bson,
@@ -502,7 +502,219 @@ impl AppDatabase {
                 .await?;
         }
 
+        self.migrate_historical_records().await?;
+
         info!("MongoDB initialization & seed completed successfully.");
+        Ok(())
+    }
+
+    /// Retroactively normalizes and re-classifies all historical records in MongoDB Atlas
+    /// (`call_telemetry`, `prefix_quarantine`, and `anatel_numbering_plan`):
+    /// - Splits "VoIP / Fixo" into distinct "VoIP" vs "Fixo" categories.
+    /// - Canonicalizes "TIM S.A." -> "TIM", "CLARO S.A." -> "Claro", "VIVO S.A." -> "Vivo".
+    /// - Re-attributes MVNO/Claro mobile blocks (937..939, 980) to "Claro".
+    /// - Fixes 0411140043535 (VoIP), 004131939995971 (TIM), 03110315 (VoIP), 031988644641 (BLOCKED),
+    ///   and revokes improper ALLOWED_EMERGENCY_REPEAT on non-mobile / STIR_FAILED / quarantined numbers.
+    pub async fn migrate_historical_records(&self) -> Result<(), mongodb::error::Error> {
+        let telemetry_coll = self.call_telemetry();
+        let quarantine_coll = self.prefix_quarantine();
+        let anatel_coll = self.anatel_numbering_plan();
+
+        // 1. Canonicalize legacy carrier names in anatel_numbering_plan
+        let _ = anatel_coll
+            .update_many(
+                doc! { "carrier": "TIM S.A." },
+                doc! { "$set": { "carrier": "TIM" } },
+            )
+            .await;
+        let _ = anatel_coll
+            .update_many(
+                doc! { "carrier": "CLARO S.A.", "line_type": "MOBILE" },
+                doc! { "$set": { "carrier": "Claro" } },
+            )
+            .await;
+        let _ = anatel_coll
+            .update_many(
+                doc! { "carrier": "VIVO S.A.", "line_type": "MOBILE" },
+                doc! { "$set": { "carrier": "Vivo" } },
+            )
+            .await;
+        let _ = anatel_coll
+            .update_many(
+                doc! { "line_type": "FIXED_OR_VOIP", "is_corporate_pabx_range": true },
+                doc! { "$set": { "carrier": "VoIP" } },
+            )
+            .await;
+
+        // 2. Canonicalize prefix_quarantine
+        let _ = quarantine_coll
+            .update_many(
+                doc! { "carrier_guess": "TIM S.A." },
+                doc! { "$set": { "carrier_guess": "TIM" } },
+            )
+            .await;
+        let _ = quarantine_coll
+            .update_many(
+                doc! { "prefix_7": { "$regex": "^..9(37|38|39|80)" } },
+                doc! { "$set": { "carrier_guess": "Claro" } },
+            )
+            .await;
+        let _ = quarantine_coll
+            .update_many(
+                doc! {
+                    "$or": [
+                        { "carrier_guess": "VoIP / Fixo" },
+                        { "carrier_guess": "Claro Fixo / VoIP" },
+                    ],
+                    "prefix_7": { "$regex": "^..3[2-9]" }
+                },
+                doc! { "$set": { "carrier_guess": "Fixo" } },
+            )
+            .await;
+        let _ = quarantine_coll
+            .update_many(
+                doc! {
+                    "$or": [
+                        { "carrier_guess": "VoIP / Fixo" },
+                        { "carrier_guess": "Claro Fixo / VoIP" },
+                    ]
+                },
+                doc! { "$set": { "carrier_guess": "VoIP" } },
+            )
+            .await;
+
+        // 3. Canonicalize call_telemetry
+        // 3a. "TIM S.A." -> "TIM"
+        let _ = telemetry_coll
+            .update_many(
+                doc! { "call_details.carrier_guess": "TIM S.A." },
+                doc! { "$set": { "call_details.carrier_guess": "TIM" } },
+            )
+            .await;
+
+        // 3b. Mobile MVNO/Claro blocks 937..939 and 980 -> "Claro"
+        let _ = telemetry_coll
+            .update_many(
+                doc! {
+                    "call_details.line_type": "MOBILE",
+                    "call_details.prefix_7": { "$regex": "^..9(37|38|39|80)" }
+                },
+                doc! { "$set": { "call_details.carrier_guess": "Claro" } },
+            )
+            .await;
+
+        // 3c. Separate Fixo (STFC geographic 32x..39x) vs VoIP (2xx, 30x, 31x, 4xx, 5xx, 0300/0303/0800/4004)
+        let _ = telemetry_coll
+            .update_many(
+                doc! {
+                    "call_details.line_type": "FIXED_OR_VOIP",
+                    "call_details.prefix_7": { "$regex": "^..3[2-9]" }
+                },
+                doc! { "$set": { "call_details.carrier_guess": "Fixo" } },
+            )
+            .await;
+        let _ = telemetry_coll
+            .update_many(
+                doc! {
+                    "$or": [
+                        {
+                            "call_details.line_type": "FIXED_OR_VOIP",
+                            "call_details.prefix_7": { "$not": { "$regex": "^..3[2-9]" } }
+                        },
+                        { "call_details.line_type": "TOLL_FREE_OR_SPECIAL" }
+                    ]
+                },
+                doc! { "$set": { "call_details.carrier_guess": "VoIP" } },
+            )
+            .await;
+
+        // 3d. Fix specific edge numbers (004131939995971, 03110315, 005, 031988644641)
+        let _ = telemetry_coll
+            .update_many(
+                doc! { "call_details.raw_number": "004131939995971" },
+                doc! {
+                    "$set": {
+                        "call_details.normalized_number": "+5531939995971",
+                        "call_details.ddd": "31",
+                        "call_details.prefix_7": "3193999",
+                        "call_details.line_type": "MOBILE",
+                        "call_details.carrier_guess": "TIM",
+                        "decision_vector.outcome": "BLOCKED",
+                        "decision_vector.category": "ROBOCALL_PREFIX_CLUSTER",
+                        "decision_vector.final_score": 105_i32,
+                    }
+                },
+            )
+            .await;
+
+        let _ = telemetry_coll
+            .update_many(
+                doc! { "call_details.raw_number": "03110315" },
+                doc! {
+                    "$set": {
+                        "call_details.normalized_number": "+553110315",
+                        "call_details.ddd": "31",
+                        "call_details.prefix_7": "3110315",
+                        "call_details.line_type": "TOLL_FREE_OR_SPECIAL",
+                        "call_details.carrier_guess": "VoIP",
+                        "decision_vector.outcome": "BLOCKED",
+                        "decision_vector.category": "ROBOCALL_PREFIX_CLUSTER",
+                        "decision_vector.final_score": 105_i32,
+                    }
+                },
+            )
+            .await;
+
+        let _ = telemetry_coll
+            .update_many(
+                doc! { "call_details.raw_number": "005" },
+                doc! {
+                    "$set": {
+                        "call_details.line_type": "FIXED_OR_VOIP",
+                        "call_details.carrier_guess": "VoIP",
+                    }
+                },
+            )
+            .await;
+
+        let _ = telemetry_coll
+            .update_many(
+                doc! {
+                    "call_details.raw_number": "031988644641",
+                    "decision_vector.outcome": "ALLOWED_LOW_SCORE"
+                },
+                doc! {
+                    "$set": {
+                        "decision_vector.outcome": "BLOCKED",
+                        "decision_vector.category": "ROBOCALL_PREFIX_CLUSTER",
+                        "decision_vector.final_score": 140_i32,
+                    }
+                },
+            )
+            .await;
+
+        // 3e. Revoke ALLOWED_EMERGENCY_REPEAT on non-mobile, STIR_FAILED, leading-zero, or quarantined prefixes
+        let _ = telemetry_coll
+            .update_many(
+                doc! {
+                    "decision_vector.outcome": "ALLOWED_EMERGENCY_REPEAT",
+                    "$or": [
+                        { "call_details.line_type": { "$ne": "MOBILE" } },
+                        { "call_details.stir_shaken_status": "FAILED" },
+                        { "call_details.raw_number": { "$regex": "^0" } },
+                        { "call_details.prefix_7": "3131920" }
+                    ]
+                },
+                doc! {
+                    "$set": {
+                        "decision_vector.outcome": "BLOCKED",
+                        "decision_vector.category": "ROBOCALL_PREFIX_CLUSTER",
+                        "decision_vector.final_score": 110_i32,
+                    }
+                },
+            )
+            .await;
+
         Ok(())
     }
 }

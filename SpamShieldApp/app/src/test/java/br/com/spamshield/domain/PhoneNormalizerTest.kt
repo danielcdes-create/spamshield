@@ -55,14 +55,37 @@ class PhoneNormalizerTest {
     }
 
     @Test
-    fun `classifies 0303 and 4004 as TOLL_FREE_OR_SPECIAL`() {
+    fun `classifies 0303 and 4004 as TOLL_FREE_OR_SPECIAL and separates VoIP from Fixo`() {
         val r0303 = PhoneNormalizer.normalize("03031234567")
         assertEquals("TOLL_FREE_OR_SPECIAL", r0303.lineType)
-        assertEquals("VoIP / Fixo", r0303.carrierHint)
+        assertEquals("VoIP", r0303.carrierHint)
 
         val r4004 = PhoneNormalizer.normalize("40041234")
         assertEquals("TOLL_FREE_OR_SPECIAL", r4004.lineType)
-        assertEquals("VoIP / Fixo", r4004.carrierHint)
+        assertEquals("VoIP", r4004.carrierHint)
+
+        val r0411140043535 = PhoneNormalizer.normalize("0411140043535")
+        assertEquals("+551140043535", r0411140043535.normalizedNumber)
+        assertEquals("FIXED_OR_VOIP", r0411140043535.lineType)
+        assertEquals("VoIP", r0411140043535.carrierHint)
+
+        val rFixo = PhoneNormalizer.normalize("03132873275")
+        assertEquals("+553132873275", rFixo.normalizedNumber)
+        assertEquals("FIXED_OR_VOIP", rFixo.lineType)
+        assertEquals("Fixo", rFixo.carrierHint)
+
+        val r0041 = PhoneNormalizer.normalize("004131939995971")
+        assertEquals("+5531939995971", r0041.normalizedNumber)
+        assertEquals("31", r0041.ddd)
+        assertEquals("3193999", r0041.prefix7)
+        assertEquals("TIM", r0041.carrierHint)
+
+        val r10315 = PhoneNormalizer.normalize("03110315")
+        assertEquals("+553110315", r10315.normalizedNumber)
+        assertEquals("31", r10315.ddd)
+        assertEquals("3110315", r10315.prefix7)
+        assertEquals("TOLL_FREE_OR_SPECIAL", r10315.lineType)
+        assertEquals("VoIP", r10315.carrierHint)
     }
 
     @Test
@@ -87,14 +110,20 @@ class PhoneNormalizerTest {
         assertEquals("+5531986333446", c4.normalizedNumber)
         assertEquals("3198633", c4.prefix7)
         assertEquals("TIM", c4.carrierHint)
+
+        val c5 = PhoneNormalizer.normalize("031939321258")
+        assertEquals("+5531939321258", c5.normalizedNumber)
+        assertEquals("3193932", c5.prefix7)
+        assertEquals("Claro", c5.carrierHint)
     }
 
     @Test
     fun `canonicalizes carrier names consistently across mobile and fixed prefixes`() {
         assertEquals("Claro", PhoneNormalizer.normalizeCarrierName("CLARO", "MOBILE", false))
-        assertEquals("VoIP / Fixo", PhoneNormalizer.normalizeCarrierName("CLARO / EMBRATEL (VOIP)", "FIXED_OR_VOIP", true))
+        assertEquals("VoIP", PhoneNormalizer.normalizeCarrierName("CLARO / EMBRATEL (VOIP)", "FIXED_OR_VOIP", true, "3141011"))
+        assertEquals("Fixo", PhoneNormalizer.normalizeCarrierName("Fixo", "FIXED_OR_VOIP", false, "3132873"))
         assertEquals("TIM", PhoneNormalizer.normalizeCarrierName("TIM S.A.", "MOBILE", false))
         assertEquals("Vivo", PhoneNormalizer.normalizeCarrierName("VIVO", "MOBILE", false))
-        assertEquals("VoIP / Fixo", PhoneNormalizer.normalizeCarrierName("ALGAR / VOIP MG", "FIXED_OR_VOIP", true))
+        assertEquals("VoIP", PhoneNormalizer.normalizeCarrierName("ALGAR / VOIP MG", "FIXED_OR_VOIP", true, "3131920"))
     }
 }

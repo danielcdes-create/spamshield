@@ -189,7 +189,8 @@ class CallHistoryAnalyzer @Inject constructor(
                     PhoneNormalizer.normalizeCarrierName(
                         anatelInfo.carrier,
                         resolvedLineType,
-                        anatelInfo.isCorporatePabxRange
+                        anatelInfo.isCorporatePabxRange,
+                        norm.prefix7
                     )
                 } else {
                     norm.carrierHint ?: "Outros"
@@ -411,6 +412,8 @@ class CallHistoryAnalyzer @Inject constructor(
                 }
             }
 
+            reprocessAllStoredTelemetry()
+
             if (processedCount > 0) {
                 SyncWorker.enqueueOneTimeSync(context)
             }
@@ -422,4 +425,283 @@ class CallHistoryAnalyzer @Inject constructor(
                 message = "Histórico processado: $processedCount chamadas, $spamDetectedCount spams e ${newlyQuarantinedPrefixes.size} prefixos em quarentena!"
             )
         }
+
+    /**
+     * Reprocessa retroativamente todo o histórico armazenado no SQLite (call_telemetry e prefix_quarantine),
+     * aplicando:
+     * 1. Separação estrita entre "VoIP" e "Fixo" (STFC geográfico vs PABX/SIP/Não-geográfico).
+     * 2. Correção de CSP sobrepondo números VoIP/Fixo (ex: 0411140043535 -> VoIP) e 00+CSP (004131939995971 -> TIM).
+     * 3. Normalização de operadoras legadas ("TIM S.A." -> "TIM", 937..939/980 -> "Claro", 03110315 -> "VoIP").
+     * 4. Reavaliação de chamadas que escaparam por ALLOWED_EMERGENCY_REPEAT indevido ou ALLOWED_LOW_SCORE antigo.
+     */
+    suspend fun reprocessAllStoredTelemetry(): Int = withContext(Dispatchers.IO) {
+        dao.deduplicateHistoryRecords()
+        val settings = settingsDataStore.getSnapshot()
+        val now = System.currentTimeMillis()
+        val enabledRules = dao.getEnabledRules().associateBy { it.ruleId }
+        val regexRules = enabledRules.values.filter {
+            it.ruleType == "REGEX_MATCH" && !it.pattern.isNullOrBlank()
+        }.mapNotNull { rule ->
+            runCatching { Regex(rule.pattern!!) to rule }.getOrNull()
+        }
+
+        // 1. Atualizar tabela de quarentenas (prefix_quarantine)
+        val allQuarantines = dao.getAllQuarantines()
+        for (q in allQuarantines) {
+            val isFixed = q.prefix7.drop(2).firstOrNull() in '2'..'5' ||
+                q.prefix7.startsWith("000") ||
+                q.prefix7.startsWith("030") ||
+                q.prefix7.startsWith("080")
+            val newCarrier = PhoneNormalizer.normalizeCarrierName(
+                rawCarrier = q.carrierGuess,
+                lineType = if (isFixed) "FIXED_OR_VOIP" else "MOBILE",
+                isCorporatePabx = false,
+                prefix7 = q.prefix7
+            )
+            if (newCarrier != q.carrierGuess) {
+                dao.upsertQuarantine(q.copy(carrierGuess = newCarrier))
+            }
+        }
+
+        // 2. Reprocessar todas as chamadas em call_telemetry
+        val allTelemetry = dao.getAllTelemetry().sortedBy { it.timestamp }
+        val prefixDistinctNumbers = mutableMapOf<String, MutableSet<String>>()
+        for (row in allTelemetry) {
+            val norm = PhoneNormalizer.normalize(row.rawNumber, settings.userDdd)
+            if (norm.prefix7.isNotEmpty() && norm.normalizedNumber.isNotEmpty() && row.outcome != "ALLOWED_CONTACT") {
+                prefixDistinctNumbers.getOrPut(norm.prefix7) { mutableSetOf() }.add(norm.normalizedNumber)
+            }
+        }
+
+        var updatedCount = 0
+        for (row in allTelemetry) {
+            val norm = PhoneNormalizer.normalize(row.rawNumber, settings.userDdd)
+            val effectiveNormalized = norm.normalizedNumber.ifEmpty { row.normalizedNumber }
+            val effectiveDdd = norm.ddd.ifEmpty { row.ddd }
+            val effectivePrefix7 = norm.prefix7.ifEmpty { row.prefix7 }
+
+            val anatelInfo = if (effectivePrefix7.isNotEmpty()) {
+                dao.getAnatelPrefix(effectivePrefix7)
+            } else {
+                null
+            }
+            val resolvedLineType = anatelInfo?.lineType ?: norm.lineType
+            val newCarrierGuess = when {
+                anatelInfo != null -> PhoneNormalizer.normalizeCarrierName(
+                    anatelInfo.carrier,
+                    resolvedLineType,
+                    anatelInfo.isCorporatePabxRange,
+                    effectivePrefix7
+                )
+                norm.carrierHint != null -> norm.carrierHint
+                else -> PhoneNormalizer.normalizeCarrierName(
+                    row.carrierGuess,
+                    resolvedLineType,
+                    false,
+                    effectivePrefix7
+                )
+            }
+
+            // Se é contato da agenda ou falso positivo ou grace period, apenas atualiza metadados normalizados
+            if (row.outcome == "ALLOWED_CONTACT" ||
+                row.outcome == "ALLOWED_OUTBOUND_GRACE" ||
+                row.userFeedback == "FALSE_POSITIVE"
+            ) {
+                val updatedRow = row.copy(
+                    normalizedNumber = effectiveNormalized,
+                    ddd = effectiveDdd,
+                    prefix7 = effectivePrefix7,
+                    carrierGuess = newCarrierGuess,
+                    lineType = resolvedLineType,
+                    outcome = if (row.userFeedback == "FALSE_POSITIVE") "ALLOWED_CONTACT" else row.outcome,
+                    category = "LEGITIMATE",
+                    finalScore = 0
+                )
+                if (updatedRow != row) {
+                    dao.insertTelemetry(updatedRow.copy(syncStatus = "PENDING"))
+                    updatedCount++
+                }
+                continue
+            }
+
+            // Verificar se a chamada precisa de recálculo completo de score/regras
+            val existingRules = runCatching {
+                json.decodeFromString<List<TriggeredRuleDto>>(row.triggeredRulesJson)
+            }.getOrDefault(emptyList())
+
+            val wasSystemBlocked = existingRules.any { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }
+            val wasPingCall = existingRules.any { it.rule_id == "PING_CALL_PENALTY" } ||
+                row.category == "PING_CALL_ROBOCALL"
+
+            var score = 0
+            val triggered = mutableListOf<TriggeredRuleDto>()
+
+            val notInContactsW = enabledRules["NOT_IN_CONTACTS"]?.weight ?: 25
+            score += notInContactsW
+            triggered.add(TriggeredRuleDto("NOT_IN_CONTACTS", notInContactsW, null))
+
+            when (row.stirShakenStatus) {
+                "FAILED" -> {
+                    val w = enabledRules["STIR_SHAKEN_FAILED"]?.weight ?: 85
+                    score += w
+                    triggered.add(TriggeredRuleDto("STIR_SHAKEN_FAILED", w, "VERIFICATION_STATUS_FAILED"))
+                }
+                "", "NOT_VERIFIED" -> {
+                    val w = enabledRules["STIR_SHAKEN_UNVERIFIED"]?.weight ?: 20
+                    score += w
+                    triggered.add(
+                        TriggeredRuleDto(
+                            "STIR_SHAKEN_UNVERIFIED",
+                            w,
+                            if (row.deviceId == "s23-ultra-history") "Histórico" else "VERIFICATION_STATUS_NOT_VERIFIED"
+                        )
+                    )
+                }
+            }
+
+            if (wasSystemBlocked) {
+                val sysRule = existingRules.firstOrNull { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }
+                val w = sysRule?.weight ?: 45
+                score += w
+                triggered.add(TriggeredRuleDto("SYSTEM_CALLLOG_BLOCKED", w, sysRule?.meta ?: "Rejeitado"))
+            }
+
+            if (wasPingCall) {
+                val pingW = enabledRules["PING_CALL_PENALTY"]?.weight ?: 55
+                score += pingW
+                triggered.add(TriggeredRuleDto("PING_CALL_PENALTY", pingW, "Duração ${row.callDurationSec}s"))
+            }
+
+            val activeQ = if (effectivePrefix7.isNotEmpty()) {
+                dao.getActiveQuarantineForPrefix(effectivePrefix7, now)
+            } else {
+                null
+            }
+            val distinctInCluster = prefixDistinctNumbers[effectivePrefix7]?.size ?: 0
+
+            if (activeQ != null) {
+                score += activeQ.penaltyWeight
+                triggered.add(TriggeredRuleDto("PREFIX_QUARANTINE_HIT", activeQ.penaltyWeight, effectivePrefix7))
+            } else if (distinctInCluster >= 2) {
+                val burstW = enabledRules["PREFIX_NEIGHBORHOOD_BURST"]?.weight ?: 60
+                score += burstW
+                triggered.add(
+                    TriggeredRuleDto(
+                        "PREFIX_NEIGHBORHOOD_BURST",
+                        burstW,
+                        "$distinctInCluster números no prefixo $effectivePrefix7"
+                    )
+                )
+            } else if (effectivePrefix7.length >= 6) {
+                val prefix6 = effectivePrefix7.take(6)
+                val q6Count = dao.countActiveQuarantinesByPrefix6(prefix6, now)
+                if (q6Count > 0) {
+                    score += 50
+                    triggered.add(TriggeredRuleDto("PREFIX6_CLUSTER_HIT", 50, "Sub-bloco ${prefix6}x"))
+                }
+            }
+
+            val prefix5 = effectivePrefix7.take(5)
+            if (prefix5.length == 5) {
+                val q5Count = dao.countActiveQuarantinesByPrefix5(prefix5, now)
+                if (q5Count >= 2 && activeQ == null) {
+                    score += 35
+                    triggered.add(TriggeredRuleDto("PREFIX5_CHIPEIRA_FARM", 35, "Bloco ${prefix5}xx"))
+                }
+            }
+
+            var matchedRegexId: String? = null
+            for ((rx, rule) in regexRules) {
+                if (rx.matches(row.rawNumber) ||
+                    rx.matches(effectiveNormalized) ||
+                    rx.matches(norm.nationalDigits)
+                ) {
+                    score += rule.weight
+                    matchedRegexId = rule.ruleId
+                    triggered.add(TriggeredRuleDto(rule.ruleId, rule.weight, rule.pattern))
+                }
+            }
+
+            if (resolvedLineType == "FIXED_OR_VOIP" ||
+                resolvedLineType == "TOLL_FREE_OR_SPECIAL" ||
+                anatelInfo?.isCorporatePabxRange == true
+            ) {
+                score += 35
+                triggered.add(TriggeredRuleDto("ANATEL_PABX_VOIP_RANGE", 35, newCarrierGuess))
+            }
+
+            if (effectiveDdd.isNotEmpty() && effectiveDdd != "00" && effectiveDdd != settings.userDdd) {
+                score += 30
+                triggered.add(TriggeredRuleDto("EXTERNAL_DDD_UNKNOWN", 30, "DDD $effectiveDdd != ${settings.userDdd}"))
+            }
+
+            if (row.rawNumber.trim().startsWith("0")) {
+                score += 25
+                triggered.add(TriggeredRuleDto("LEADING_ZERO_TRUNK_DIALING", 25, row.rawNumber.trim().take(4)))
+            }
+
+            if (row.userFeedback == "CONFIRMED_SPAM" && score < 100) {
+                score = 100
+            }
+
+            val isSpam = row.userFeedback == "CONFIRMED_SPAM" ||
+                score >= settings.blockThresholdScore ||
+                wasSystemBlocked ||
+                wasPingCall
+
+            val newOutcome = if (isSpam) "BLOCKED" else "ALLOWED_LOW_SCORE"
+            val newCategory = when {
+                row.stirShakenStatus == "FAILED" -> "SPOOFING_STIR_FAILED"
+                wasPingCall -> "PING_CALL_ROBOCALL"
+                matchedRegexId == "REGEX_TELEMARKETING_NATIONAL" || matchedRegexId == "ANATEL_ATO_10413_0303" -> "KNOWN_BLACKLIST"
+                isSpam -> "ROBOCALL_PREFIX_CLUSTER"
+                else -> "UNKNOWN_UNVERIFIED"
+            }
+
+            val newRulesJson = json.encodeToString(triggered)
+
+            val updatedRow = row.copy(
+                normalizedNumber = effectiveNormalized,
+                ddd = effectiveDdd,
+                prefix7 = effectivePrefix7,
+                carrierGuess = newCarrierGuess,
+                lineType = resolvedLineType,
+                finalScore = score,
+                outcome = newOutcome,
+                category = newCategory,
+                triggeredRulesJson = newRulesJson
+            )
+
+            if (updatedRow != row) {
+                dao.insertTelemetry(updatedRow.copy(syncStatus = "PENDING"))
+                updatedCount++
+            }
+
+            if (isSpam && effectivePrefix7.length >= 6) {
+                val allNums = prefixDistinctNumbers[effectivePrefix7]?.toList() ?: listOf(effectiveNormalized)
+                val existingQ = dao.getActiveQuarantineForPrefix(effectivePrefix7, 0L)
+                if (existingQ == null || existingQ.carrierGuess != newCarrierGuess) {
+                    dao.upsertQuarantine(
+                        PrefixQuarantineEntity(
+                            prefix7 = effectivePrefix7,
+                            ddd = effectiveDdd,
+                            carrierGuess = newCarrierGuess,
+                            distinctNumbersJson = json.encodeToString(allNums),
+                            hitCount = maxOf((existingQ?.hitCount ?: 0), allNums.size, 1),
+                            penaltyWeight = existingQ?.penaltyWeight ?: if (wasPingCall) 65 else 70,
+                            reason = newCategory,
+                            firstSeenAt = minOf(existingQ?.firstSeenAt ?: row.timestamp, row.timestamp),
+                            lastSeenAt = maxOf(existingQ?.lastSeenAt ?: row.timestamp, row.timestamp),
+                            expiresAt = maxOf(existingQ?.expiresAt ?: 0L, now + SpamScoringEngine.QUARANTINE_DEFAULT_TTL_MS)
+                        )
+                    )
+                }
+            }
+        }
+
+        if (updatedCount > 0) {
+            SyncWorker.enqueueOneTimeSync(context)
+        }
+        updatedCount
+    }
 }

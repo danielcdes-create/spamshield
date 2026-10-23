@@ -71,6 +71,7 @@ class MainViewModel @Inject constructor(
     private val json = Json {
         prettyPrint = true
         ignoreUnknownKeys = true
+        encodeDefaults = true
     }
 
     val telemetryList: StateFlow<List<CallTelemetryEntity>> = dao
@@ -101,7 +102,13 @@ class MainViewModel @Inject constructor(
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { dao.deduplicateHistoryRecords() }
+            runCatching {
+                dao.deduplicateHistoryRecords()
+                val updated = callHistoryAnalyzer.reprocessAllStoredTelemetry()
+                if (updated > 0) {
+                    syncRepository.performFullSync()
+                }
+            }
         }
         refreshTailscaleStatus()
     }
@@ -316,7 +323,8 @@ class MainViewModel @Inject constructor(
             val normalizedCarrier = br.com.spamshield.domain.PhoneNormalizer.normalizeCarrierName(
                 rawCarrier = carrierGuess.ifBlank { null },
                 lineType = if (isFixed) "FIXED_OR_VOIP" else "MOBILE",
-                isCorporatePabx = false
+                isCorporatePabx = false,
+                prefix7 = cleanPrefix
             )
             syncRepository.saveManualQuarantine(
                 PrefixQuarantineEntity(
@@ -363,6 +371,7 @@ class MainViewModel @Inject constructor(
     }
 
     suspend fun exportTelemetryFiles(): Pair<File, File> = withContext(Dispatchers.IO) {
+        runCatching { callHistoryAnalyzer.reprocessAllStoredTelemetry() }
         val all = dao.getAllTelemetry()
         val exportDir = File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, "exports")
         exportDir.mkdirs()

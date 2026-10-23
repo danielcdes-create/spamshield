@@ -60,7 +60,8 @@ class SpamScoringEngine @Inject constructor(
             PhoneNormalizer.normalizeCarrierName(
                 anatelInfo.carrier,
                 resolvedLineType,
-                anatelInfo.isCorporatePabxRange
+                anatelInfo.isCorporatePabxRange,
+                normalized.prefix7
             )
         } else {
             normalized.carrierHint ?: "Outros"
@@ -87,27 +88,35 @@ class SpamScoringEngine @Inject constructor(
             )
         }
 
-        // 2.2 Repetição de Emergência (mesmo normalizedNumber nos últimos 3 minutos)
-        if (normalized.normalizedNumber.isNotEmpty()) {
-            val recentSameNumberCount = dao.countRecentCallsFromNumber(
-                normalizedNumber = normalized.normalizedNumber,
-                sinceTimestamp = nowMillis - EMERGENCY_REPEAT_WINDOW_MS
-            )
-            if (recentSameNumberCount >= 1) {
-                return buildShortCircuitResult(
-                    normalized = normalized,
-                    carrierGuess = carrierGuess,
-                    lineType = resolvedLineType,
-                    stirShakenStatus = stirShakenStatus,
-                    finalScore = -100,
-                    threshold = settings.blockThresholdScore,
-                    shadowMode = settings.shadowModeEnabled,
-                    outcome = "ALLOWED_EMERGENCY_REPEAT",
-                    ruleId = "EMERGENCY_REPEATED_CALL",
-                    ruleWeight = -500,
-                    startNanos = startNanos,
-                    nowMillis = nowMillis
+        // 2.2 Repetição de Emergência (apenas MOBILE local sem quarentena ativa e sem falha STIR/SHAKEN)
+        if (normalized.normalizedNumber.isNotEmpty() &&
+            resolvedLineType == "MOBILE" &&
+            stirShakenStatus != "FAILED" &&
+            !rawNumber.trim().startsWith("0")
+        ) {
+            val activeQ7 = dao.getActiveQuarantineForPrefix(normalized.prefix7, nowMillis)
+            val activeQ6Count = dao.countActiveQuarantinesByPrefix6(normalized.prefix6, nowMillis)
+            if (activeQ7 == null && activeQ6Count == 0) {
+                val recentSameNumberCount = dao.countRecentCallsFromNumber(
+                    normalizedNumber = normalized.normalizedNumber,
+                    sinceTimestamp = nowMillis - EMERGENCY_REPEAT_WINDOW_MS
                 )
+                if (recentSameNumberCount >= 1) {
+                    return buildShortCircuitResult(
+                        normalized = normalized,
+                        carrierGuess = carrierGuess,
+                        lineType = resolvedLineType,
+                        stirShakenStatus = stirShakenStatus,
+                        finalScore = -100,
+                        threshold = settings.blockThresholdScore,
+                        shadowMode = settings.shadowModeEnabled,
+                        outcome = "ALLOWED_EMERGENCY_REPEAT",
+                        ruleId = "EMERGENCY_REPEATED_CALL",
+                        ruleWeight = -500,
+                        startNanos = startNanos,
+                        nowMillis = nowMillis
+                    )
+                }
             }
         }
 
@@ -275,7 +284,7 @@ class SpamScoringEngine @Inject constructor(
                 TriggeredRuleDto(
                     rule_id = "ANATEL_PABX_VOIP_RANGE",
                     weight = pabxWeight,
-                    meta = anatelInfo?.carrier ?: carrierGuess
+                    meta = carrierGuess
                 )
             )
         }

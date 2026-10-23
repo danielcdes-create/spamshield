@@ -302,10 +302,18 @@ fun DashboardScreen(
 }
 
 private fun classifyCarrierLabel(item: CallTelemetryEntity): String {
-    val c = item.carrierGuess?.uppercase() ?: ""
+    val c = item.carrierGuess?.uppercase()?.trim() ?: ""
     return when {
-        item.lineType == "FIXED_OR_VOIP" || item.lineType == "TOLL_FREE_OR_SPECIAL" ||
-            c.contains("VOIP") || c.contains("FIXO") || c.contains("PABX") -> "VoIP / Fixo"
+        c == "FIXO" -> "Fixo"
+        c == "VOIP" -> "VoIP"
+        item.lineType == "TOLL_FREE_OR_SPECIAL" || c.contains("PABX") -> "VoIP"
+        item.lineType == "FIXED_OR_VOIP" || c.contains("VOIP") || c.contains("FIXO") -> {
+            if (br.com.spamshield.domain.PhoneNormalizer.isVoipPrefixOrSubscriber(item.prefix7)) {
+                "VoIP"
+            } else {
+                "Fixo"
+            }
+        }
         c.contains("CLARO") -> "Claro"
         c.contains("TIM") -> "TIM"
         c.contains("VIVO") -> "Vivo"
@@ -438,9 +446,10 @@ private fun CarrierDonutChartCard(telemetryList: List<CallTelemetryEntity>) {
     val carrierGroups = telemetryList.groupBy { classifyCarrierLabel(it) }
     val slices = listOf(
         Triple("Claro", carrierGroups["Claro"]?.size ?: 0, Color(0xFFEF4444)),
-        Triple("VoIP / Fixo", carrierGroups["VoIP / Fixo"]?.size ?: 0, Color(0xFFF59E0B)),
+        Triple("VoIP", carrierGroups["VoIP"]?.size ?: 0, Color(0xFFF59E0B)),
         Triple("TIM", carrierGroups["TIM"]?.size ?: 0, Color(0xFF3B82F6)),
         Triple("Vivo", carrierGroups["Vivo"]?.size ?: 0, Color(0xFF8B5CF6)),
+        Triple("Fixo", carrierGroups["Fixo"]?.size ?: 0, Color(0xFF06B6D4)),
         Triple("Outros", carrierGroups["Outros"]?.size ?: 0, Color(0xFF10B981))
     )
     val total = slices.sumOf { it.second }.coerceAtLeast(1)
