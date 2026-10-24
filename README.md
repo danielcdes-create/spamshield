@@ -18,21 +18,22 @@ Ecossistema privado de defesa em borda (`< 2 ms`), telemetria vetorial e intelig
      - **Short-Circuits Seguros:**
        - `CONTACT_WHITELIST` (`-1000`): Imunidade para contatos da agenda.
        - `OUTBOUND_GRACE_PERIOD` (`-500`): Imunidade de 2h para retorno do mesmo número ou sub-bloco `/6` após chamada efetuada pelo usuário.
-       - `EMERGENCY_REPEATED_CALL` (`-500`): Blindada — concedida **exclusivamente** a linhas `MOBILE` sem falha `STIR_SHAKEN`, sem discagem de tronco com zero (`0xx`) e cujo prefixo `/7` ou `/6` não esteja em quarentena.
+       - `EMERGENCY_REPEATED_CALL` (`-500`): Blindada — concedida **exclusivamente** a linhas `MOBILE` sem falha `STIR_SHAKEN`, sem cabeçalho CSP/tronco anômalo (`hasAbnormalTrunkOrCspHeader`) e cujo prefixo `/7` ou `/6` não esteja em quarentena.
      - **Regras Cumulativas de Pontuação (Threshold padrão `>= 70`):**
        - `NOT_IN_CONTACTS` (`+25`)
        - `STIR_SHAKEN_FAILED` (`+85`) / `STIR_SHAKEN_UNVERIFIED` (`+20`)
        - `PREFIX_QUARANTINE_HIT` (`+60` a `+80`): Quarentena ativa no prefixo exato `/7`.
-       - `PREFIX6_CLUSTER_HIT` (`+50`): Sub-bloco `/6` (`DDD + 4 dígitos`) com atividade suspeita ou quarentena vizinha em 24h.
-       - `PREFIX5_CHIPEIRA_FARM` (`+35`): Fazenda de chipeira GSM no bloco `/5` (`DDD + 3 dígitos`, ex.: `31937xx`–`31939xx`, `31984xx`–`31989xx`) com múltiplos prefixos `/7` em quarentena.
-       - `PREFIX_NEIGHBORHOOD_BURST` (`+60`): Múltiplos números distintos do mesmo prefixo `/7` em 24h.
+       - `PREFIX6_CLUSTER_HIT` (`+45`): Sub-bloco `/6` (`DDD + 4 dígitos`) com `>= 2` números distintos ou `>= 2` quarentenas ativas em 24h.
+       - `PREFIX5_CHIPEIRA_FARM` (`+35`): Fazenda de chipeira GSM dedicada no bloco `/5` (`937`–`939`, `980`, `910`) ou alta densidade (`>= 6` prefixos `/7` em quarentena no mesmo `/5`).
+       - `PREFIX_NEIGHBORHOOD_BURST` (`+60`): Múltiplos números distintos (`>= 2`) do mesmo prefixo `/7` em 24h.
        - `ANATEL_PABX_VOIP_RANGE` (`+35`): Linha `FIXED_OR_VOIP` / `TOLL_FREE_OR_SPECIAL` / PABX corporativo.
        - `EXTERNAL_DDD_UNKNOWN` (`+30`): Chamada originada fora do DDD local do usuário sem contato na agenda.
-       - `LEADING_ZERO_TRUNK_DIALING` (`+25`): Discagem de tronco iniciada por `0` (`031...`, `041...`).
+       - `LEADING_ZERO_TRUNK_DIALING` (`+25`): Dispara apenas em cabeçalhos de tronco/CSP anômalos (`04111...`, `015...`, `004131...`, `0300`/`0303`/`0800`, códigos curtos `03110315`/`005`, DDD externo ou linha fixa/VoIP `0314101...`). **Não penaliza** o formato padrão de entrega CLI móvel local da operadora (`0319xxxxxxxx` de 12 dígitos no próprio DDD), garantindo que números móveis locais desconhecidos fiquem com score base `45` (`ALLOWED_LOW_SCORE`).
+       - `CONVERSATION_ANSWERED_BONUS` (`-40`): Bônus de legitimidade no histórico para chamadas móveis atendidas com duração `>= 10s`.
        - `PING_CALL_PENALTY` (`+55`): Detector pós-chamada (`CallStateMonitor`) para chamadas mudas desligadas em `<= 4s`.
        - Regras Regex (`ANATEL_ATO_10413_0303`, `BLACKLIST_MG_VOIP_PABX`, `BLACKLIST_SP_VOIP_ROBOCALL`, `REGEX_TELEMARKETING_NATIONAL`).
    - **Analisador e Reprocessador Retroativo (`CallHistoryAnalyzer`):**
-     - Importa o histórico do sistema (`CallLog.Calls`), deduplica registros em tempo real (`android-edge-br`) vs histórico (`s23-ultra-history`) na janela de `±15s` e executa `reprocessAllStoredTelemetry()` para aplicar retroativamente todas as regras, classificações (`VoIP` vs `Fixo`) e correções de operadora em todo o banco SQLite local.
+     - Importa o histórico do sistema (`CallLog.Calls`), deduplica registros em tempo real (`android-edge-br`) vs histórico (`s23-ultra-history`) na janela de `±15s`, expurga quarentenas de chamada única sem evidência de cluster e executa `reprocessAllStoredTelemetry()` para aplicar retroativamente todas as regras, classificações (`VoIP` vs `Fixo`) e correções de operadora em todo o banco SQLite local.
    - **Exportação e Compartilhamento Nativo (`SettingsScreen` / `MainViewModel`):**
      - Exportação completa da telemetria em JSON (`encodeDefaults = true`) e CSV com abertura imediata do Android Share Sheet (`FileProvider` + `Intent.ACTION_SEND_MULTIPLE`).
    - **Atualizador OTA via Tailscale:** Verifica (`GET /api/v1/apk/info`), baixa (`GET /apk`) e instala novas versões do APK diretamente pelo app.
