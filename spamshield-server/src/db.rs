@@ -722,6 +722,7 @@ impl AppDatabase {
             .delete_many(doc! {
                 "ddd": "31",
                 "hit_count": { "$lte": 1_i32 },
+                "reason": { "$nin": ["SYSTEM_CALLLOG_BLOCKED", "DIALER_REJECTED", "CONFIRMED_SPAM"] },
                 "prefix_7": {
                     "$regex": "^319[24-9]",
                     "$nin": [

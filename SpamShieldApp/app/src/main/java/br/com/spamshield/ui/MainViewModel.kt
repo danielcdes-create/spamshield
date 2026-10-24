@@ -105,7 +105,8 @@ class MainViewModel @Inject constructor(
             runCatching {
                 dao.deduplicateHistoryRecords()
                 val updated = callHistoryAnalyzer.reprocessAllStoredTelemetry()
-                if (updated > 0) {
+                val reconciled = callHistoryAnalyzer.reconcileRecentCallsWithCallLog(50)
+                if (updated > 0 || reconciled > 0) {
                     syncRepository.performFullSync()
                 }
             }
@@ -134,6 +135,9 @@ class MainViewModel @Inject constructor(
                 isSyncing = true,
                 lastSyncMessage = "Sincronizando via Tailscale..."
             )
+            withContext(Dispatchers.IO) {
+                runCatching { callHistoryAnalyzer.reconcileRecentCallsWithCallLog(50) }
+            }
             val outcome = syncRepository.performFullSync()
             val vpn = TailscaleNetworkHelper.isVpnActive(appContext)
             val ip = TailscaleNetworkHelper.detectLocalTailscaleIp() ?: "100.83.253.15"
@@ -371,7 +375,10 @@ class MainViewModel @Inject constructor(
     }
 
     suspend fun exportTelemetryFiles(): Pair<File, File> = withContext(Dispatchers.IO) {
-        runCatching { callHistoryAnalyzer.reprocessAllStoredTelemetry() }
+        runCatching {
+            callHistoryAnalyzer.reconcileRecentCallsWithCallLog(50)
+            callHistoryAnalyzer.reprocessAllStoredTelemetry()
+        }
         val all = dao.getAllTelemetry()
         val exportDir = File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, "exports")
         exportDir.mkdirs()

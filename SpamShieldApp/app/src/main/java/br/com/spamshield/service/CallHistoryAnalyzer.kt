@@ -44,7 +44,8 @@ class CallHistoryAnalyzer @Inject constructor(
     @ApplicationContext private val context: Context,
     private val dao: SpamShieldDao,
     private val settingsDataStore: SettingsDataStore,
-    private val contactLookup: ContactAndCallLogLookup
+    private val contactLookup: ContactAndCallLogLookup,
+    private val spamScoringEngine: SpamScoringEngine
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -787,5 +788,67 @@ class CallHistoryAnalyzer @Inject constructor(
             SyncWorker.enqueueOneTimeSync(context)
         }
         updatedCount
+    }
+
+    /**
+     * Reconcilia chamadas recentes gravadas em call_telemetry com o CallLog do sistema.
+     * Se uma chamada permitida em tempo real foi posteriormente rejeitada ou bloqueada pelo discador
+     * (ex: Google Phone flagged as Spam), atualiza a chamada para BLOCKED (+45) e quarentena o prefixo.
+     */
+    suspend fun reconcileRecentCallsWithCallLog(maxRecords: Int = 100): Int = withContext(Dispatchers.IO) {
+        val hasPerm = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_CALL_LOG
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasPerm) return@withContext 0
+
+        var reconciledCount = 0
+        try {
+            context.contentResolver.query(
+                CallLog.Calls.CONTENT_URI,
+                null,
+                null,
+                null,
+                "${CallLog.Calls.DATE} DESC"
+            )?.use { cursor ->
+                val numIdx = cursor.getColumnIndex(CallLog.Calls.NUMBER)
+                val typeIdx = cursor.getColumnIndex(CallLog.Calls.TYPE)
+                val durIdx = cursor.getColumnIndex(CallLog.Calls.DURATION)
+                val blockReasonIdx = cursor.getColumnIndex("block_reason")
+                if (numIdx < 0 || typeIdx < 0 || durIdx < 0) return@use
+
+                val now = System.currentTimeMillis()
+                var readCount = 0
+
+                while (cursor.moveToNext() && readCount < maxRecords) {
+                    readCount++
+                    val rawNumber = cursor.getString(numIdx) ?: continue
+                    val callType = cursor.getInt(typeIdx)
+                    val durationSec = cursor.getInt(durIdx)
+                    val isSystemBlocked = if (blockReasonIdx >= 0) cursor.getInt(blockReasonIdx) != 0 else false
+
+                    val norm = PhoneNormalizer.normalize(rawNumber)
+                    if (norm.normalizedNumber.isEmpty()) continue
+
+                    val changed = spamScoringEngine.evaluatePostCallLogVerdict(
+                        normalizedNumber = norm.normalizedNumber,
+                        callType = callType,
+                        callDurationSec = durationSec,
+                        isSystemBlocked = isSystemBlocked,
+                        nowMillis = now
+                    )
+                    if (changed) {
+                        reconciledCount++
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("CallHistoryAnalyzer", "Reconcile with CallLog failed: ${e.message}")
+        }
+
+        if (reconciledCount > 0) {
+            SyncWorker.enqueueOneTimeSync(context)
+        }
+        reconciledCount
     }
 }

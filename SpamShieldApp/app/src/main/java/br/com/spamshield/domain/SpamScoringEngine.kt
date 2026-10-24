@@ -212,6 +212,17 @@ class SpamScoringEngine @Inject constructor(
                             meta = "Sub-bloco ${normalized.prefix6}x (q=$q6Count, 24h=$distinct6In24h)"
                         )
                     )
+                } else if (q6Count == 1) {
+                    val w6 = 25
+                    score += w6
+                    subBlockClusterTriggered = true
+                    triggeredRules.add(
+                        TriggeredRuleDto(
+                            rule_id = "PREFIX6_NEIGHBOR_WARNING",
+                            weight = w6,
+                            meta = "Vizinho do sub-bloco ${normalized.prefix6}x em quarentena"
+                        )
+                    )
                 }
             }
 
@@ -424,6 +435,136 @@ class SpamScoringEngine @Inject constructor(
             )
         }
         return true
+    }
+
+    /**
+     * Passo 6: Aprendizado Ativo Pós-Chamada (Reconciliação com Veredito do Sistema/Discador e Chamadas Perdidas)
+     * Quando o CallStateBroadcastReceiver ou a reconciliação do histórico detecta:
+     * 1. Chamada REJEITADA pelo usuário/discador (REJECTED_TYPE) ou BLOQUEADA pelo sistema (BLOCKED_TYPE):
+     *    - Promove a chamada para BLOCKED (+45, regra SYSTEM_CALLLOG_BLOCKED)
+     *    - Quarentena imediatamente o prefix7 (+70) para que qualquer próxima chamada do prefixo seja barrada antes de tocar.
+     * 2. PING CALL (atendida e durou 1..4s):
+     *    - Classifica como PING_CALL_ROBOCALL e quarentena (+65).
+     * 3. Chamada PERDIDA/NÃO ATENDIDA (MISSED_TYPE ou duration == 0) de número desconhecido:
+     *    - Registra durationSec = 0.
+     *    - Se o número ou prefixo já possui repetição não atendida nas últimas 24h sem retorno de saída:
+     *      coloca o prefixo em quarentena preventiva (+65).
+     */
+    suspend fun evaluatePostCallLogVerdict(
+        normalizedNumber: String,
+        callType: Int,
+        callDurationSec: Int,
+        isSystemBlocked: Boolean = false,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        val latest = dao.getLatestTelemetryForNumber(normalizedNumber) ?: return false
+        val currentDuration = latest.callDurationSec
+
+        // Se é contato da agenda ou chamada de saída protegida por grace, apenas atualiza duração
+        if (latest.outcome == "ALLOWED_CONTACT" || latest.outcome == "ALLOWED_OUTBOUND_GRACE") {
+            if (currentDuration == null && callDurationSec >= 0) {
+                dao.updateCallDurationAndCategory(latest.id, callDurationSec, latest.category)
+            }
+            return false
+        }
+
+        val wasBlockedOrRejectedInSystem = isSystemBlocked ||
+            callType == android.provider.CallLog.Calls.BLOCKED_TYPE ||
+            callType == android.provider.CallLog.Calls.REJECTED_TYPE
+
+        // 1. Rejeição no Discador ou Bloqueio no Sistema (ex: Google Dialer Spam Flag)
+        if (wasBlockedOrRejectedInSystem) {
+            val existingRules = runCatching {
+                json.decodeFromString<List<TriggeredRuleDto>>(latest.triggeredRulesJson)
+            }.getOrDefault(emptyList()).toMutableList()
+
+            if (existingRules.none { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }) {
+                val metaDesc = if (callType == android.provider.CallLog.Calls.BLOCKED_TYPE) {
+                    "Bloqueado no Sistema"
+                } else {
+                    "Rejeitado no Discador"
+                }
+                existingRules.add(TriggeredRuleDto("SYSTEM_CALLLOG_BLOCKED", 45, metaDesc))
+            }
+
+            val updatedScore = maxOf(latest.finalScore + 45, 85)
+            val updatedTelemetry = latest.copy(
+                outcome = "BLOCKED",
+                category = "ROBOCALL_PREFIX_CLUSTER",
+                finalScore = updatedScore,
+                callDurationSec = callDurationSec,
+                triggeredRulesJson = json.encodeToString(existingRules),
+                syncStatus = "PENDING"
+            )
+            dao.insertTelemetry(updatedTelemetry)
+
+            if (latest.prefix7.isNotEmpty()) {
+                val existingQ = dao.getActiveQuarantineForPrefix(latest.prefix7, nowMillis)
+                dao.upsertQuarantine(
+                    PrefixQuarantineEntity(
+                        prefix7 = latest.prefix7,
+                        ddd = latest.ddd,
+                        carrierGuess = latest.carrierGuess ?: "Outros",
+                        distinctNumbersJson = "[\"${latest.normalizedNumber}\"]",
+                        hitCount = (existingQ?.hitCount ?: 0) + 1,
+                        penaltyWeight = 70,
+                        reason = if (callType == android.provider.CallLog.Calls.BLOCKED_TYPE) "SYSTEM_CALLLOG_BLOCKED" else "DIALER_REJECTED",
+                        firstSeenAt = existingQ?.firstSeenAt ?: nowMillis,
+                        lastSeenAt = nowMillis,
+                        expiresAt = nowMillis + QUARANTINE_DEFAULT_TTL_MS
+                    )
+                )
+            }
+            return true
+        }
+
+        // 2. Ping Call (1..4s atendida)
+        if (callType == android.provider.CallLog.Calls.INCOMING_TYPE && callDurationSec in 1..4) {
+            return evaluatePostCallPingDetector(normalizedNumber, callDurationSec, nowMillis)
+        }
+
+        // 3. Chamada Perdida / Não Atendida (MISSED_TYPE ou duration == 0)
+        val isUnanswered = callType == android.provider.CallLog.Calls.MISSED_TYPE ||
+            (callType == android.provider.CallLog.Calls.INCOMING_TYPE && callDurationSec == 0)
+
+        if (isUnanswered && latest.outcome == "ALLOWED_LOW_SCORE") {
+            dao.updateCallDurationAndCategory(latest.id, 0, latest.category)
+
+            val recentCallsInPrefix = if (latest.prefix7.isNotEmpty()) {
+                dao.countDistinctNumbersInPrefix7Since(latest.prefix7, nowMillis - NEIGHBORHOOD_BURST_WINDOW_MS)
+            } else {
+                1
+            }
+            val recentCallsSameNum = dao.countRecentCallsFromNumber(latest.normalizedNumber, nowMillis - NEIGHBORHOOD_BURST_WINDOW_MS)
+
+            if (recentCallsSameNum >= 2 || recentCallsInPrefix >= 2) {
+                if (latest.prefix7.isNotEmpty()) {
+                    val existingQ = dao.getActiveQuarantineForPrefix(latest.prefix7, nowMillis)
+                    dao.upsertQuarantine(
+                        PrefixQuarantineEntity(
+                            prefix7 = latest.prefix7,
+                            ddd = latest.ddd,
+                            carrierGuess = latest.carrierGuess ?: "Outros",
+                            distinctNumbersJson = "[\"${latest.normalizedNumber}\"]",
+                            hitCount = (existingQ?.hitCount ?: 0) + 1,
+                            penaltyWeight = 65,
+                            reason = "UNANSWERED_SPAM_BURST",
+                            firstSeenAt = existingQ?.firstSeenAt ?: nowMillis,
+                            lastSeenAt = nowMillis,
+                            expiresAt = nowMillis + QUARANTINE_DEFAULT_TTL_MS
+                        )
+                    )
+                    return true
+                }
+            }
+        }
+
+        // 4. Conversa atendida normal (>= 10s)
+        if (callDurationSec >= 10 && currentDuration == null) {
+            dao.updateCallDurationAndCategory(latest.id, callDurationSec, latest.category)
+        }
+
+        return false
     }
 
     private suspend fun buildShortCircuitResult(

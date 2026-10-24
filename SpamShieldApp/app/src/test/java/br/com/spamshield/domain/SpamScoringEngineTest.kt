@@ -286,4 +286,57 @@ class SpamScoringEngineTest {
         assertEquals("BLOCKED", updated?.outcome)
         assertEquals(100, updated?.finalScore)
     }
+
+    @Test
+    fun `evaluatePostCallLogVerdict upgrades ALLOWED_LOW_SCORE call to BLOCKED and quarantines prefix when rejected or blocked in CallLog`() = runTest {
+        val fakeDao = FakeSpamShieldDao()
+        val now = 1_700_000_100_000L
+
+        // Call originally allowed in real-time as ALLOWED_LOW_SCORE (score 40)
+        val initialCall = CallTelemetryEntity(
+            id = "call-031981100234",
+            timestamp = now - 10_000L,
+            rawNumber = "031981100234",
+            normalizedNumber = "+5531981100234",
+            ddd = "31",
+            prefix7 = "3198110",
+            carrierGuess = "TIM",
+            lineType = "MOBILE",
+            stirShakenStatus = "NOT_VERIFIED",
+            finalScore = 40,
+            thresholdApplied = 70,
+            outcome = "ALLOWED_LOW_SCORE",
+            category = "UNKNOWN_UNVERIFIED",
+            processingLatencyMs = 1.6,
+            shadowModeActive = false,
+            triggeredRulesJson = "[]"
+        )
+        fakeDao.insertTelemetry(initialCall)
+
+        // Mock settings data store
+        val settingsStore = br.com.spamshield.data.local.SettingsDataStore()
+        val lookup = FakeContactLookup()
+        val engine = SpamScoringEngine(fakeDao, settingsStore, lookup)
+
+        // Simulate CallLog reporting REJECTED_TYPE (5) from Google Dialer / user rejection
+        val changed = engine.evaluatePostCallLogVerdict(
+            normalizedNumber = "+5531981100234",
+            callType = android.provider.CallLog.Calls.REJECTED_TYPE,
+            callDurationSec = 0,
+            nowMillis = now
+        )
+        assertTrue(changed)
+
+        // Verify call was upgraded to BLOCKED (score >= 85) with SYSTEM_CALLLOG_BLOCKED
+        val updated = fakeDao.getTelemetryById("call-031981100234")
+        assertNotNull(updated)
+        assertEquals("BLOCKED", updated?.outcome)
+        assertTrue(updated!!.finalScore >= 85)
+        assertTrue(updated.triggeredRulesJson.contains("SYSTEM_CALLLOG_BLOCKED"))
+
+        // Verify prefix 3198110 was immediately quarantined
+        val q = fakeDao.getActiveQuarantineForPrefix("3198110", now)
+        assertNotNull(q)
+        assertEquals(70, q?.penaltyWeight)
+    }
 }

@@ -70,27 +70,37 @@ class CallStateBroadcastReceiver : BroadcastReceiver() {
 
         context.contentResolver.query(
             CallLog.Calls.CONTENT_URI,
-            arrayOf(
-                CallLog.Calls.NUMBER,
-                CallLog.Calls.TYPE,
-                CallLog.Calls.DURATION,
-                CallLog.Calls.DATE
-            ),
+            null,
             null,
             null,
             "${CallLog.Calls.DATE} DESC"
         )?.use { cursor ->
-            if (!cursor.moveToFirst()) return
-            val rawNumber = cursor.getString(0) ?: return
-            val callType = cursor.getInt(1)
-            val durationSec = cursor.getInt(2)
+            val numIdx = cursor.getColumnIndex(CallLog.Calls.NUMBER)
+            val typeIdx = cursor.getColumnIndex(CallLog.Calls.TYPE)
+            val durIdx = cursor.getColumnIndex(CallLog.Calls.DURATION)
+            val dateIdx = cursor.getColumnIndex(CallLog.Calls.DATE)
+            val blockReasonIdx = cursor.getColumnIndex("block_reason")
+
+            if (numIdx < 0 || typeIdx < 0 || durIdx < 0 || dateIdx < 0) return
+
             val now = System.currentTimeMillis()
+            var count = 0
+            var anyQuarantineTriggered = false
 
-            val normalized = PhoneNormalizer.normalize(rawNumber)
-            if (normalized.normalizedNumber.isEmpty()) return
+            while (cursor.moveToNext() && count < 3) {
+                count++
+                val rawNumber = cursor.getString(numIdx) ?: continue
+                val callType = cursor.getInt(typeIdx)
+                val durationSec = cursor.getInt(durIdx)
+                val callDate = cursor.getLong(dateIdx)
+                val isSystemBlocked = if (blockReasonIdx >= 0) cursor.getInt(blockReasonIdx) != 0 else false
 
-            when (callType) {
-                CallLog.Calls.OUTGOING_TYPE -> {
+                if (callDate < now - 120_000L) break
+
+                val normalized = PhoneNormalizer.normalize(rawNumber)
+                if (normalized.normalizedNumber.isEmpty()) continue
+
+                if (callType == CallLog.Calls.OUTGOING_TYPE) {
                     dao.upsertOutboundGrace(
                         OutboundGraceEntity(
                             normalizedNumber = normalized.normalizedNumber,
@@ -99,24 +109,27 @@ class CallStateBroadcastReceiver : BroadcastReceiver() {
                         )
                     )
                     Log.d(TAG, "Registered Outbound Grace (2h) for ${normalized.normalizedNumber} (prefix6=${normalized.prefix6})")
-                }
-                CallLog.Calls.INCOMING_TYPE -> {
-                    if (durationSec in 1..4) {
-                        val flagged = spamScoringEngine.evaluatePostCallPingDetector(
-                            normalizedNumber = normalized.normalizedNumber,
-                            callDurationSec = durationSec,
-                            nowMillis = now
+                } else {
+                    val changed = spamScoringEngine.evaluatePostCallLogVerdict(
+                        normalizedNumber = normalized.normalizedNumber,
+                        callType = callType,
+                        callDurationSec = durationSec,
+                        isSystemBlocked = isSystemBlocked,
+                        nowMillis = now
+                    )
+                    if (changed) {
+                        anyQuarantineTriggered = true
+                        Log.d(
+                            TAG,
+                            "Post-call verdict updated for ${normalized.normalizedNumber}: " +
+                                "type=$callType, dur=${durationSec}s, isBlocked=$isSystemBlocked. Prefix ${normalized.prefix7} quarantined."
                         )
-                        if (flagged) {
-                            Log.d(
-                                TAG,
-                                "Ping Call detected (${durationSec}s) from ${normalized.normalizedNumber}! " +
-                                    "Prefix ${normalized.prefix7} quarantined (+65)."
-                            )
-                            SyncWorker.enqueueOneTimeSync(context)
-                        }
                     }
                 }
+            }
+
+            if (anyQuarantineTriggered) {
+                SyncWorker.enqueueOneTimeSync(context)
             }
         }
     }
