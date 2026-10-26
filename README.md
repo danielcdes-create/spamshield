@@ -1,4 +1,4 @@
-# SpamShield BR (`v1.2.5` — Build `9`)
+# SpamShield BR (`v1.2.6` — Build `10`)
 
 Ecossistema privado de defesa em borda (`< 2 ms`), telemetria vetorial e inteligência contra chamadas de spam, robocall, chipeiras GSM e spoofing no Brasil (padrões Anatel RNPM / Ato nº 10.413 / STIR-SHAKEN).
 
@@ -8,10 +8,15 @@ Ecossistema privado de defesa em borda (`< 2 ms`), telemetria vetorial e intelig
 
 1. **Android Edge App (`SpamShieldApp`)** — 100% Kotlin + Jetpack Compose + Material 3 + Room SQLite (WAL) + Hilt + WorkManager:
    - **Interceptação Nativa (`< 2 ms`):** `CallScreeningService` (`ROLE_CALL_SCREENING`) com bloqueio silencioso antes do toque (`setDisallowCall`, `setRejectCall`, `setSkipNotification`).
+   - **Quarentena Granular com 1 Dígito a Mais (`/8` — 1.000 números):**
+     - Em vez de quarentenar blocos amplos de 10.000 números (`/7`, ex.: `3198204`), o motor agora adota **8 dígitos** (`/8`, ex.: `31982042`), restringindo a quarentena ao milhar específico utilizado pela chipeira/robocall (`3198204-2000` a `3198204-2999`).
+     - Reduz a restritividade em 10 vezes, blindando contra falso-positivos em vizinhos da mesma central telefônica, mantendo total retrocompatibilidade com quarentenas e troncos legados (`/7`).
+   - **Transparência Visual no Histórico e Aprendizado Ativo:**
+     - Distinção transparente entre chamadas bloqueadas na chegada em tempo real (`BLOQUEADA`) vs chamadas que tocaram por ser a 1ª vez e foram quarentenadas após rejeição no discador (`APRENDIDA (Score)` com indicador explícito: *"🔔 Tocou na chegada (Score inicial 45) ➔ Quarentenada pós-rejeição"*).
    - **Aprendizado Ativo via CallLog do Sistema (`evaluatePostCallLogVerdict`):**
-     - O Android CallScreening executa antes do discador tocar. Quando uma chamada desconhecida toca e é marcada como spam ou bloqueada/rejeitada pelo usuário ou pelo discador nativo (ex: Google Phone com `BLOCKED_TYPE` ou `REJECTED_TYPE`), o `CallStateBroadcastReceiver` intercepta o evento pós-chamada no `CallLog`.
-     - O `SpamScoringEngine` reavalia o veredito via `evaluatePostCallLogVerdict()`, elevando o score para `85` (`BLOQUEADA`), registrando `SYSTEM_CALLLOG_BLOCKED` (`+45`) ou `DIALER_REJECTED` (`+45`) e inserindo imediatamente o prefixo `/7` na tabela `prefix_quarantine` com bônus de quarentena ativa (`+70`).
-     - Novas chamadas do mesmo prefixo ou de vizinhos no mesmo bloco são bloqueadas na borda antes de qualquer toque.
+     - O Android CallScreening executa antes do discador tocar. Quando uma chamada desconhecida toca e é rejeitada ou bloqueada pelo usuário/discador (Google Phone com `BLOCKED_TYPE` ou `REJECTED_TYPE`), o `CallStateBroadcastReceiver` intercepta o evento pós-chamada no `CallLog`.
+     - O `SpamScoringEngine` reavalia o veredito via `evaluatePostCallLogVerdict()`, elevando o score para `85` (`APRENDIDA`), registrando `SYSTEM_CALLLOG_BLOCKED` (`+45`) ou `DIALER_REJECTED` (`+45`) e inserindo o milhar `/8` na tabela `prefix_quarantine` com bônus de quarentena ativa (`+70`).
+     - Novas chamadas do mesmo milhar ou vizinhos são bloqueadas na borda antes de qualquer toque.
    - **Normalização Telefônica Brasileira (`PhoneNormalizer`):**
      - Tratamento de formato `E.164` (`+55`), prefixos de tronco com zero (`031...`, `011...`), Códigos de Seleção de Prestadora (`015`, `021`, `041`, `031`) e chamadas internacionais/duplo zero (`004131...`).
      - **Separação Estrita entre `VoIP` e `Fixo`:**

@@ -164,6 +164,17 @@ interface SpamShieldDao {
     // 3. Prefix Quarantine
     // ========================================================================
 
+    @Query(
+        """
+        SELECT * FROM prefix_quarantine 
+        WHERE (prefix7 = :prefix8 OR prefix7 = :prefix7) 
+          AND expiresAt > :now 
+        ORDER BY LENGTH(prefix7) DESC 
+        LIMIT 1
+        """
+    )
+    suspend fun getActiveQuarantineForPrefix(prefix8: String, prefix7: String, now: Long): PrefixQuarantineEntity?
+
     @Query("SELECT * FROM prefix_quarantine WHERE prefix7 = :prefix7 AND expiresAt > :now LIMIT 1")
     suspend fun getActiveQuarantineForPrefix(prefix7: String, now: Long): PrefixQuarantineEntity?
 

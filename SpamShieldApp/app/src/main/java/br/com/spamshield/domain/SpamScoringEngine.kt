@@ -94,7 +94,7 @@ class SpamScoringEngine @Inject constructor(
             stirShakenStatus != "FAILED" &&
             !PhoneNormalizer.hasAbnormalTrunkOrCspHeader(rawNumber, settings.userDdd)
         ) {
-            val activeQ7 = dao.getActiveQuarantineForPrefix(normalized.prefix7, nowMillis)
+            val activeQ7 = dao.getActiveQuarantineForPrefix(normalized.prefix8, normalized.prefix7, nowMillis)
             val activeQ6Count = dao.countActiveQuarantinesByPrefix6(normalized.prefix6, nowMillis)
             if (activeQ7 == null && activeQ6Count == 0) {
                 val recentSameNumberCount = dao.countRecentCallsFromNumber(
@@ -185,14 +185,18 @@ class SpamScoringEngine @Inject constructor(
         var activeQuarantine: PrefixQuarantineEntity? = null
         var subBlockClusterTriggered = false
         if (normalized.prefix7.isNotEmpty()) {
-            activeQuarantine = dao.getActiveQuarantineForPrefix(normalized.prefix7, nowMillis)
+            activeQuarantine = dao.getActiveQuarantineForPrefix(
+                prefix8 = normalized.prefix8,
+                prefix7 = normalized.prefix7,
+                now = nowMillis
+            )
             if (activeQuarantine != null) {
                 score += activeQuarantine.penaltyWeight
                 triggeredRules.add(
                     TriggeredRuleDto(
                         rule_id = "PREFIX_QUARANTINE_HIT",
                         weight = activeQuarantine.penaltyWeight,
-                        meta = "${normalized.prefix7} (${activeQuarantine.reason})"
+                        meta = "${activeQuarantine.prefix7} (${activeQuarantine.reason})"
                     )
                 )
             } else if (normalized.prefix6.length >= 6) {
@@ -213,9 +217,8 @@ class SpamScoringEngine @Inject constructor(
                         )
                     )
                 } else if (q6Count == 1) {
-                    val w6 = 25
+                    val w6 = 15
                     score += w6
-                    subBlockClusterTriggered = true
                     triggeredRules.add(
                         TriggeredRuleDto(
                             rule_id = "PREFIX6_NEIGHBOR_WARNING",
@@ -244,11 +247,12 @@ class SpamScoringEngine @Inject constructor(
             }
         }
 
-        // 3.4 Detecção Dinâmica de Vizinhança (Neighborhood Burst /7 nas últimas 24h)
+        // 3.4 Detecção Dinâmica de Vizinhança (Neighborhood Burst com prefixo 8 dígitos nas últimas 24h)
         var neighborhoodBurstTriggered = false
-        if (normalized.prefix7.isNotEmpty()) {
+        val burstPrefix = if (normalized.prefix8.length == 8) normalized.prefix8 else normalized.prefix7
+        if (burstPrefix.isNotEmpty()) {
             val distinctIn24h = dao.countDistinctNumbersInPrefix7Since(
-                prefix7 = normalized.prefix7,
+                prefix7 = burstPrefix,
                 sinceTimestamp = nowMillis - NEIGHBORHOOD_BURST_WINDOW_MS
             )
             val prevCallForSameNumber = dao.countRecentCallsFromNumber(
@@ -264,7 +268,7 @@ class SpamScoringEngine @Inject constructor(
                     TriggeredRuleDto(
                         rule_id = "PREFIX_NEIGHBORHOOD_BURST",
                         weight = burstWeight,
-                        meta = "distinct_24h=$effectiveDistinctCount"
+                        meta = "distinct_24h=$effectiveDistinctCount ($burstPrefix)"
                     )
                 )
             }
@@ -345,8 +349,9 @@ class SpamScoringEngine @Inject constructor(
         }
 
         if (isSpam && normalized.prefix7.length >= 6) {
+            val qPrefix = if (normalized.prefix8.length == 8) normalized.prefix8 else normalized.prefix7
             val updatedQuarantine = PrefixQuarantineEntity(
-                prefix7 = normalized.prefix7,
+                prefix7 = qPrefix,
                 ddd = normalized.ddd,
                 carrierGuess = carrierGuess,
                 distinctNumbersJson = "[\"${normalized.normalizedNumber}\"]",
@@ -369,7 +374,7 @@ class SpamScoringEngine @Inject constructor(
             rawNumber = normalized.rawNumber,
             normalizedNumber = normalized.normalizedNumber,
             ddd = normalized.ddd,
-            prefix7 = normalized.prefix7,
+            prefix7 = if (normalized.prefix8.length == 8) normalized.prefix8 else normalized.prefix7,
             carrierGuess = carrierGuess,
             lineType = resolvedLineType,
             stirShakenStatus = stirShakenStatus,
@@ -397,10 +402,16 @@ class SpamScoringEngine @Inject constructor(
         )
     }
 
+    fun extractQuarantinePrefix(normalizedNumber: String, fallbackPrefix7: String): String {
+        val digits = normalizedNumber.filter { it.isDigit() }
+        val nat = if (digits.startsWith("55") && digits.length in 12..13) digits.substring(2) else digits
+        return if (nat.length >= 8) nat.take(8) else fallbackPrefix7
+    }
+
     /**
      * Passo 5: Detector de "Ping Call" (Chamada Muda Pós-Atendimento)
      * Se uma chamada desconhecida com score < threshold (ALLOWED_LOW_SCORE) foi atendida
-     * e durou entre 1 e 4 segundos, classifica como PING_CALL_ROBOCALL e quarentena o prefix7 (+65).
+     * e durou entre 1 e 4 segundos, classifica como PING_CALL_ROBOCALL e quarentena o prefixo (+65).
      */
     suspend fun evaluatePostCallPingDetector(
         normalizedNumber: String,
@@ -417,11 +428,16 @@ class SpamScoringEngine @Inject constructor(
             category = "PING_CALL_ROBOCALL"
         )
 
-        if (latest.prefix7.isNotEmpty()) {
-            val existing = dao.getActiveQuarantineForPrefix(latest.prefix7, nowMillis)
+        val qPrefix = extractQuarantinePrefix(latest.normalizedNumber, latest.prefix7)
+        if (qPrefix.isNotEmpty()) {
+            val existing = dao.getActiveQuarantineForPrefix(
+                prefix8 = qPrefix,
+                prefix7 = latest.prefix7,
+                now = nowMillis
+            )
             dao.upsertQuarantine(
                 PrefixQuarantineEntity(
-                    prefix7 = latest.prefix7,
+                    prefix7 = qPrefix,
                     ddd = latest.ddd,
                     carrierGuess = latest.carrierGuess ?: "Desconhecida",
                     distinctNumbersJson = "[\"${latest.normalizedNumber}\"]",
@@ -442,7 +458,7 @@ class SpamScoringEngine @Inject constructor(
      * Quando o CallStateBroadcastReceiver ou a reconciliação do histórico detecta:
      * 1. Chamada REJEITADA pelo usuário/discador (REJECTED_TYPE) ou BLOQUEADA pelo sistema (BLOCKED_TYPE):
      *    - Promove a chamada para BLOCKED (+45, regra SYSTEM_CALLLOG_BLOCKED)
-     *    - Quarentena imediatamente o prefix7 (+70) para que qualquer próxima chamada do prefixo seja barrada antes de tocar.
+     *    - Quarentena imediatamente o prefixo 8 dígitos (+70) para que qualquer próxima chamada do bloco seja barrada antes de tocar.
      * 2. PING CALL (atendida e durou 1..4s):
      *    - Classifica como PING_CALL_ROBOCALL e quarentena (+65).
      * 3. Chamada PERDIDA/NÃO ATENDIDA (MISSED_TYPE ou duration == 0) de número desconhecido:
@@ -487,6 +503,7 @@ class SpamScoringEngine @Inject constructor(
                 existingRules.add(TriggeredRuleDto("SYSTEM_CALLLOG_BLOCKED", 45, metaDesc))
             }
 
+            val qPrefix = extractQuarantinePrefix(latest.normalizedNumber, latest.prefix7)
             val updatedScore = maxOf(latest.finalScore + 45, 85)
             val updatedTelemetry = latest.copy(
                 outcome = "BLOCKED",
@@ -498,11 +515,15 @@ class SpamScoringEngine @Inject constructor(
             )
             dao.insertTelemetry(updatedTelemetry)
 
-            if (latest.prefix7.isNotEmpty()) {
-                val existingQ = dao.getActiveQuarantineForPrefix(latest.prefix7, nowMillis)
+            if (qPrefix.isNotEmpty()) {
+                val existingQ = dao.getActiveQuarantineForPrefix(
+                    prefix8 = qPrefix,
+                    prefix7 = latest.prefix7,
+                    now = nowMillis
+                )
                 dao.upsertQuarantine(
                     PrefixQuarantineEntity(
-                        prefix7 = latest.prefix7,
+                        prefix7 = qPrefix,
                         ddd = latest.ddd,
                         carrierGuess = latest.carrierGuess ?: "Outros",
                         distinctNumbersJson = "[\"${latest.normalizedNumber}\"]",
@@ -538,11 +559,16 @@ class SpamScoringEngine @Inject constructor(
             val recentCallsSameNum = dao.countRecentCallsFromNumber(latest.normalizedNumber, nowMillis - NEIGHBORHOOD_BURST_WINDOW_MS)
 
             if (recentCallsSameNum >= 2 || recentCallsInPrefix >= 2) {
-                if (latest.prefix7.isNotEmpty()) {
-                    val existingQ = dao.getActiveQuarantineForPrefix(latest.prefix7, nowMillis)
+                val qPrefix = extractQuarantinePrefix(latest.normalizedNumber, latest.prefix7)
+                if (qPrefix.isNotEmpty()) {
+                    val existingQ = dao.getActiveQuarantineForPrefix(
+                        prefix8 = qPrefix,
+                        prefix7 = latest.prefix7,
+                        now = nowMillis
+                    )
                     dao.upsertQuarantine(
                         PrefixQuarantineEntity(
-                            prefix7 = latest.prefix7,
+                            prefix7 = qPrefix,
                             ddd = latest.ddd,
                             carrierGuess = latest.carrierGuess ?: "Outros",
                             distinctNumbersJson = "[\"${latest.normalizedNumber}\"]",
@@ -590,7 +616,7 @@ class SpamScoringEngine @Inject constructor(
             rawNumber = normalized.rawNumber,
             normalizedNumber = normalized.normalizedNumber,
             ddd = normalized.ddd,
-            prefix7 = normalized.prefix7,
+            prefix7 = if (normalized.prefix8.length == 8) normalized.prefix8 else normalized.prefix7,
             carrierGuess = carrierGuess,
             lineType = lineType,
             stirShakenStatus = stirShakenStatus,

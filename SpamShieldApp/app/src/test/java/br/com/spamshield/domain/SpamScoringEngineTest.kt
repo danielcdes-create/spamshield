@@ -105,6 +105,10 @@ class FakeSpamShieldDao : SpamShieldDao {
     }
     override suspend fun countRules(): Int = rules.size
 
+    override suspend fun getActiveQuarantineForPrefix(prefix8: String, prefix7: String, now: Long): PrefixQuarantineEntity? =
+        quarantines.filter { (it.prefix7 == prefix8 || it.prefix7 == prefix7) && it.expiresAt > now }
+            .maxByOrNull { it.prefix7.length }
+
     override suspend fun getActiveQuarantineForPrefix(prefix7: String, now: Long): PrefixQuarantineEntity? =
         quarantines.find { it.prefix7 == prefix7 && it.expiresAt > now }
 
@@ -334,9 +338,55 @@ class SpamScoringEngineTest {
         assertTrue(updated!!.finalScore >= 85)
         assertTrue(updated.triggeredRulesJson.contains("SYSTEM_CALLLOG_BLOCKED"))
 
-        // Verify prefix 3198110 was immediately quarantined
-        val q = fakeDao.getActiveQuarantineForPrefix("3198110", now)
+        // Verify 8-digit prefix 31981100 was quarantined (1 digit more for granular protection)
+        val q = fakeDao.getActiveQuarantineForPrefix(prefix8 = "31981100", prefix7 = "3198110", now = now)
         assertNotNull(q)
+        assertEquals("31981100", q?.prefix7)
         assertEquals(70, q?.penaltyWeight)
+    }
+
+    @Test
+    fun `8-digit quarantine blocks same milhar 31982042xxx but spares neighboring milhar 31982041xxx`() = runTest {
+        val fakeDao = FakeSpamShieldDao()
+        val now = 1_700_000_100_000L
+        val settingsStore = br.com.spamshield.data.local.SettingsDataStore()
+        val lookup = FakeContactLookup()
+        val engine = SpamScoringEngine(fakeDao, settingsStore, lookup)
+
+        // Add 8-digit quarantine for 31982042
+        fakeDao.upsertQuarantine(
+            PrefixQuarantineEntity(
+                prefix7 = "31982042",
+                ddd = "31",
+                carrierGuess = "TIM",
+                hitCount = 1,
+                penaltyWeight = 70,
+                reason = "DIALER_REJECTED",
+                firstSeenAt = now,
+                lastSeenAt = now,
+                expiresAt = now + SpamScoringEngine.QUARANTINE_DEFAULT_TTL_MS
+            )
+        )
+
+        // Incoming call from same milhar 031982042364
+        val resultSameMilhar = engine.evaluateIncomingCall(
+            rawNumber = "031982042364",
+            stirShakenStatus = "NOT_VERIFIED",
+            nowMillis = now
+        )
+        // Score: NOT_IN_CONTACTS(25) + STIR_SHAKEN_UNVERIFIED(20) + PREFIX_QUARANTINE_HIT(70) = 115 >= 70
+        assertEquals("BLOCKED", resultSameMilhar.telemetry.outcome)
+        assertTrue(resultSameMilhar.shouldDisallowAndReject)
+        assertTrue(resultSameMilhar.telemetry.triggeredRulesJson.contains("31982042"))
+
+        // Incoming call from different milhar 031982041999 (same /7 prefix, but different /8)
+        val resultDiffMilhar = engine.evaluateIncomingCall(
+            rawNumber = "031982041999",
+            stirShakenStatus = "NOT_VERIFIED",
+            nowMillis = now
+        )
+        // Should NOT trigger 8-digit quarantine hit
+        assertEquals("ALLOWED_LOW_SCORE", resultDiffMilhar.telemetry.outcome)
+        assertFalse(resultDiffMilhar.shouldDisallowAndReject)
     }
 }

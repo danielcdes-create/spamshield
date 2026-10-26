@@ -123,11 +123,12 @@ fun QuarantineRulesScreen(
         }
 
         items(quarantines, key = { it.prefix7 }) { q ->
-            val formattedPrefix = if (q.prefix7.length == 7) {
-                "${q.prefix7.substring(0, 2)} ${q.prefix7.substring(2, 6)}-${q.prefix7.substring(6)}*"
-            } else {
-                "${q.prefix7}*"
+            val formattedPrefix = when (q.prefix7.length) {
+                8 -> "${q.prefix7.substring(0, 2)} ${q.prefix7.substring(2, 7)}-${q.prefix7.substring(7)}*"
+                7 -> "${q.prefix7.substring(0, 2)} ${q.prefix7.substring(2, 6)}-${q.prefix7.substring(6)}*"
+                else -> "${q.prefix7}*"
             }
+            val blockScope = if (q.prefix7.length >= 8) "Milhar (1.000 nums)" else "Bloco (10.000 nums)"
             val remainingHours = ((q.expiresAt - now).coerceAtLeast(0L)) / (1000L * 3600L)
             val remainingDays = remainingHours / 24
             val remHoursMod = remainingHours % 24
@@ -150,7 +151,7 @@ fun QuarantineRulesScreen(
                             fontSize = 15.sp
                         )
                         Text(
-                            text = "Hits: ${q.hitCount} • Operadora: ${q.carrierGuess ?: "N/D"} • TTL: ${remainingDays}d ${remHoursMod}h",
+                            text = "Hits: ${q.hitCount} • $blockScope • Operadora: ${q.carrierGuess ?: "N/D"} • TTL: ${remainingDays}d ${remHoursMod}h",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

@@ -414,13 +414,16 @@ class CallHistoryAnalyzer @Inject constructor(
                         PhoneNormalizer.isKnownChipeiraFarmPrefix5(norm.prefix7.take(5)) ||
                         (norm.ddd.isNotEmpty() && norm.ddd != settings.userDdd))
 
+                val qPrefix = if (norm.prefix8.length == 8) norm.prefix8 else norm.prefix7
                 if (shouldQuarantinePrefix) {
                     spamDetectedCount++
-                    newlyQuarantinedPrefixes.add(norm.prefix7)
-                    val allNumsInPrefix = prefixDistinctNumbers[norm.prefix7]?.toList() ?: listOf(norm.normalizedNumber)
+                    newlyQuarantinedPrefixes.add(qPrefix)
+                    val allNumsInPrefix = prefixDistinctNumbers[qPrefix]?.toList()
+                        ?: prefixDistinctNumbers[norm.prefix7]?.toList()
+                        ?: listOf(norm.normalizedNumber)
                     dao.upsertQuarantine(
                         PrefixQuarantineEntity(
-                            prefix7 = norm.prefix7,
+                            prefix7 = qPrefix,
                             ddd = norm.ddd,
                             carrierGuess = carrierGuess,
                             distinctNumbersJson = json.encodeToString(allNumsInPrefix),
@@ -477,11 +480,15 @@ class CallHistoryAnalyzer @Inject constructor(
 
         for (row in allTelemetry) {
             val norm = PhoneNormalizer.normalize(row.rawNumber, settings.userDdd)
+            val p8 = norm.prefix8
             val p7 = norm.prefix7.ifEmpty { row.prefix7 }
             val e164 = norm.normalizedNumber.ifEmpty { row.normalizedNumber }
             val dur = row.callDurationSec ?: 0
             if (p7.isNotEmpty() && e164.isNotEmpty() && row.outcome != "ALLOWED_CONTACT" && dur < 10) {
                 prefixDistinctNumbers.getOrPut(p7) { mutableSetOf() }.add(e164)
+                if (p8.length == 8) {
+                    prefixDistinctNumbers.getOrPut(p8) { mutableSetOf() }.add(e164)
+                }
                 if (p7.length >= 6) {
                     prefix6DistinctNumbers.getOrPut(p7.take(6)) { mutableSetOf() }.add(e164)
                 }
@@ -492,6 +499,9 @@ class CallHistoryAnalyzer @Inject constructor(
                 (dur in 1..4)
             ) {
                 confirmedOrRejectedPrefixes.add(p7)
+                if (p8.length == 8) {
+                    confirmedOrRejectedPrefixes.add(p8)
+                }
             }
         }
 
@@ -510,13 +520,15 @@ class CallHistoryAnalyzer @Inject constructor(
             val distinctCount = prefixDistinctNumbers[q.prefix7]?.size ?: 0
             val isChipeira5 = PhoneNormalizer.isKnownChipeiraFarmPrefix5(q.prefix7.take(5))
             val isExternalDdd = q.ddd.isNotEmpty() && q.ddd != settings.userDdd
+            val isTargeted8Digit = q.prefix7.length >= 8
 
             val shouldKeepQuarantine = isFixed ||
                 distinctCount >= 2 ||
                 q.prefix7 in officialSeedPrefixes ||
                 q.prefix7 in confirmedOrRejectedPrefixes ||
                 isChipeira5 ||
-                isExternalDdd
+                isExternalDdd ||
+                isTargeted8Digit
 
             if (!shouldKeepQuarantine) {
                 dao.deleteQuarantineByPrefix(q.prefix7)
@@ -635,7 +647,7 @@ class CallHistoryAnalyzer @Inject constructor(
             }
 
             val activeQ = if (effectivePrefix7.isNotEmpty()) {
-                dao.getActiveQuarantineForPrefix(effectivePrefix7, now)
+                dao.getActiveQuarantineForPrefix(prefix8 = norm.prefix8, prefix7 = effectivePrefix7, now = now)
             } else {
                 null
             }
@@ -643,7 +655,7 @@ class CallHistoryAnalyzer @Inject constructor(
 
             if (activeQ != null) {
                 score += activeQ.penaltyWeight
-                triggered.add(TriggeredRuleDto("PREFIX_QUARANTINE_HIT", activeQ.penaltyWeight, effectivePrefix7))
+                triggered.add(TriggeredRuleDto("PREFIX_QUARANTINE_HIT", activeQ.penaltyWeight, activeQ.prefix7))
             } else if (distinctInCluster >= 2) {
                 val burstW = enabledRules["PREFIX_NEIGHBORHOOD_BURST"]?.weight ?: 60
                 score += burstW

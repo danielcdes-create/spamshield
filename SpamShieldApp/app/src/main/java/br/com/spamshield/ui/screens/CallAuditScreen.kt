@@ -101,6 +101,10 @@ fun CallAuditScreen(
                             modifier = Modifier.padding(14.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
+                            val wasLearnedFromDialer = rules.any { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }
+                            val quarantineRule = rules.firstOrNull { it.rule_id == "PREFIX_QUARANTINE_HIT" }
+                            val displayPrefix = quarantineRule?.meta?.split(' ')?.firstOrNull() ?: item.prefix7
+
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -117,17 +121,60 @@ fun CallAuditScreen(
                                         fontSize = 16.sp
                                     )
                                     Text(
-                                        text = "${dateFormat.format(Date(item.timestamp))} • Prefixo ${item.prefix7} • ${item.carrierGuess ?: item.lineType}",
+                                        text = "${dateFormat.format(Date(item.timestamp))} • Prefixo $displayPrefix • ${item.carrierGuess ?: item.lineType}",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
 
-                                OutcomeBadge(outcome = item.outcome, score = item.finalScore)
+                                OutcomeBadge(
+                                    outcome = item.outcome,
+                                    score = item.finalScore,
+                                    wasLearnedFromDialer = wasLearnedFromDialer
+                                )
+                            }
+
+                            if (wasLearnedFromDialer) {
+                                Surface(
+                                    color = Color(0xFFEA580C).copy(alpha = 0.12f),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = "🔔 Tocou na chegada (Score inicial 45) ➔ Quarentenada pós-rejeição",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFFEA580C),
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
                             }
 
                             if (expanded) {
                                 HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
+
+                                if (wasLearnedFromDialer) {
+                                    Surface(
+                                        color = Color(0xFFEA580C).copy(alpha = 0.10f),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
+                                    ) {
+                                        Column(modifier = Modifier.padding(8.dp)) {
+                                            Text(
+                                                text = "ℹ️ Transparência de Aprendizado Ativo",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFEA580C)
+                                            )
+                                            Text(
+                                                text = "Esta chamada tocou em tempo real porque foi a 1ª vez do prefixo (score 45 < limite 70). Após ser rejeitada no discador, o SpamShield aprendeu o padrão e quarentenou o bloco de 1.000 números ($displayPrefix). Novas chamadas deste bloco serão bloqueadas em < 2 ms antes de tocar.",
+                                                fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+
                                 Text(
                                     text = "Árvore de Decisão Vetorial",
                                     fontWeight = FontWeight.Bold,
@@ -240,13 +287,14 @@ fun CallAuditScreen(
 }
 
 @Composable
-private fun OutcomeBadge(outcome: String, score: Int) {
-    val (label, bgColor) = when (outcome) {
-        "BLOCKED" -> "BLOQUEADA" to Color(0xFFDC2626)
-        "SHADOW_BLOCKED" -> "SOMBRA" to Color(0xFFD97706)
-        "ALLOWED_CONTACT" -> "AGENDA" to Color(0xFF16A34A)
-        "ALLOWED_EMERGENCY_REPEAT" -> "2ª CHAMADA" to Color(0xFF16A34A)
-        "ALLOWED_OUTBOUND_GRACE" -> "RETORNO" to Color(0xFF16A34A)
+private fun OutcomeBadge(outcome: String, score: Int, wasLearnedFromDialer: Boolean = false) {
+    val (label, bgColor) = when {
+        wasLearnedFromDialer -> "APRENDIDA" to Color(0xFFEA580C)
+        outcome == "BLOCKED" -> "BLOQUEADA" to Color(0xFFDC2626)
+        outcome == "SHADOW_BLOCKED" -> "SOMBRA" to Color(0xFFD97706)
+        outcome == "ALLOWED_CONTACT" -> "AGENDA" to Color(0xFF16A34A)
+        outcome == "ALLOWED_EMERGENCY_REPEAT" -> "2ª CHAMADA" to Color(0xFF16A34A)
+        outcome == "ALLOWED_OUTBOUND_GRACE" -> "RETORNO" to Color(0xFF16A34A)
         else -> "PERMITIDA" to Color(0xFF16A34A)
     }
     Surface(

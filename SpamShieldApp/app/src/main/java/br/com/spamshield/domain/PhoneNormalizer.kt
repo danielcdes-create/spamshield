@@ -8,7 +8,8 @@ data class NormalizedPhone(
     val normalizedNumber: String, // E.164 format e.g. +553141011230
     val nationalDigits: String,   // e.g. 3141011230
     val ddd: String,              // e.g. 31
-    val prefix7: String,          // e.g. 3141011 or 3198621
+    val prefix7: String,          // e.g. 3141011 or 3198621 (7 dígitos, bloco de 10.000 números)
+    val prefix8: String = nationalDigits.take(8), // e.g. 31982042 (8 dígitos, bloco de 1.000 números)
     val prefix6: String,          // e.g. 314101 or 319862
     val lineType: String,         // MOBILE | FIXED_OR_VOIP | TOLL_FREE_OR_SPECIAL | UNKNOWN
     val carrierHint: String? = null // TIM | Claro | Vivo | VoIP / Fixo | Outros
@@ -41,6 +42,7 @@ object PhoneNormalizer {
                 nationalDigits = "",
                 ddd = "",
                 prefix7 = "",
+                prefix8 = "",
                 prefix6 = "",
                 lineType = "UNKNOWN",
                 carrierHint = null
@@ -120,6 +122,7 @@ object PhoneNormalizer {
             "+55$fullNational"
         }
 
+        val prefix8 = fullNational.take(8)
         val prefix7 = fullNational.take(7)
         val prefix6 = fullNational.take(6)
         val lineType = classifyLineType(subscriber)
@@ -135,6 +138,7 @@ object PhoneNormalizer {
             nationalDigits = fullNational,
             ddd = ddd,
             prefix7 = prefix7,
+            prefix8 = prefix8,
             prefix6 = prefix6,
             lineType = lineType,
             carrierHint = carrierHint
