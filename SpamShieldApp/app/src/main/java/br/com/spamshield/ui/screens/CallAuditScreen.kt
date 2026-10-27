@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
+import br.com.spamshield.domain.PhoneNormalizer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -102,11 +103,36 @@ fun CallAuditScreen(
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             val sysBlockedRule = rules.firstOrNull { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }
-                            val baseScoreWithoutSys = item.finalScore - (sysBlockedRule?.weight ?: 0)
-                            val wasLearnedAfterRing = sysBlockedRule != null && baseScoreWithoutSys < item.thresholdApplied
+                            val pingRule = rules.firstOrNull { it.rule_id == "PING_CALL_PENALTY" }
+                            val arrivalRules = rules.filter {
+                                it.rule_id != "SYSTEM_CALLLOG_BLOCKED" &&
+                                    it.rule_id != "PING_CALL_PENALTY" &&
+                                    it.rule_id != "CONVERSATION_ANSWERED_BONUS"
+                            }
+                            val arrivalScore = if (arrivalRules.isNotEmpty()) {
+                                arrivalRules.sumOf { it.weight }
+                            } else {
+                                item.finalScore - (sysBlockedRule?.weight ?: 0) - (pingRule?.weight ?: 0)
+                            }
+                            val wasLearnedAfterRing = item.outcome == "BLOCKED" &&
+                                arrivalScore < item.thresholdApplied &&
+                                (sysBlockedRule != null ||
+                                    pingRule != null ||
+                                    item.category == "PING_CALL_ROBOCALL" ||
+                                    item.userFeedback == "CONFIRMED_SPAM")
                             val isBlockedAtEdge = item.outcome == "BLOCKED" && !wasLearnedAfterRing
                             val quarantineRule = rules.firstOrNull { it.rule_id == "PREFIX_QUARANTINE_HIT" }
-                            val displayPrefix = quarantineRule?.meta?.split(' ')?.firstOrNull() ?: item.prefix7
+                            val displayPrefix = remember(item.prefix7, item.rawNumber, item.normalizedNumber, wasLearnedAfterRing) {
+                                if (wasLearnedAfterRing && item.prefix7.length < 8) {
+                                    val n = PhoneNormalizer.normalize(
+                                        item.rawNumber.ifBlank { item.normalizedNumber },
+                                        item.ddd.ifBlank { "31" }
+                                    )
+                                    if (n.prefix8.length == 8) n.prefix8 else item.prefix7
+                                } else {
+                                    quarantineRule?.meta?.split(' ')?.firstOrNull() ?: item.prefix7
+                                }
+                            }
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -152,13 +178,21 @@ fun CallAuditScreen(
                                     )
                                 }
                             } else if (wasLearnedAfterRing) {
+                                val postRingBanner = when {
+                                    pingRule != null || item.category == "PING_CALL_ROBOCALL" ->
+                                        "🔔 Chamada muda (${item.callDurationSec ?: 1}s • Score inicial $arrivalScore) ➔ Quarentenada"
+                                    sysBlockedRule != null ->
+                                        "🔔 Tocou na chegada (Score inicial $arrivalScore) ➔ Quarentenada pós-rejeição"
+                                    else ->
+                                        "🔔 Tocou na chegada (Score inicial $arrivalScore) ➔ Quarentenada pelo usuário"
+                                }
                                 Surface(
                                     color = Color(0xFFEA580C).copy(alpha = 0.12f),
                                     shape = RoundedCornerShape(8.dp),
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Text(
-                                        text = "🔔 Tocou na chegada (Score inicial $baseScoreWithoutSys) ➔ Quarentenada pós-rejeição",
+                                        text = postRingBanner,
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = Color(0xFFEA580C),
@@ -218,7 +252,7 @@ fun CallAuditScreen(
                                                 color = Color(0xFFEA580C)
                                             )
                                             Text(
-                                                text = "Esta chamada tocou em tempo real porque foi a 1ª vez do prefixo (score $baseScoreWithoutSys < limite ${item.thresholdApplied}). Após ser rejeitada no discador, o SpamShield aprendeu o padrão e quarentenou o bloco de 1.000 números ($displayPrefix). Novas chamadas deste bloco serão bloqueadas em < 2 ms antes de tocar.",
+                                                text = "Esta chamada tocou em tempo real porque foi a 1ª vez do prefixo (score $arrivalScore < limite ${item.thresholdApplied}). Após ser rejeitada no discador, o SpamShield aprendeu o padrão e quarentenou o bloco de 1.000 números ($displayPrefix). Novas chamadas deste bloco serão bloqueadas em < 2 ms antes de tocar.",
                                                 fontSize = 11.sp,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
@@ -258,8 +292,8 @@ fun CallAuditScreen(
 
                                 Spacer(modifier = Modifier.height(8.dp))
                                 val feedbackLabel = when (item.userFeedback) {
-                                    "CONFIRMED_SPAM" -> "✓ SPAM CONFIRMADO PELO USUÁRIO (Prefixo ${item.prefix7} em Quarentena)"
-                                    "FALSE_POSITIVE" -> "✓ FALSO POSITIVO (Prefixo ${item.prefix7} Liberado)"
+                                    "CONFIRMED_SPAM" -> "✓ SPAM CONFIRMADO PELO USUÁRIO (Prefixo $displayPrefix em Quarentena)"
+                                    "FALSE_POSITIVE" -> "✓ FALSO POSITIVO (Prefixo $displayPrefix Liberado)"
                                     else -> "Ainda não avaliado (UNRATED)"
                                 }
                                 val feedbackColor = when (item.userFeedback) {
@@ -286,7 +320,7 @@ fun CallAuditScreen(
                                             onMarkFeedback(item, "CONFIRMED_SPAM")
                                             Toast.makeText(
                                                 context,
-                                                "Spam confirmado! Prefixo ${item.prefix7} adicionado à quarentena.",
+                                                "Spam confirmado! Prefixo $displayPrefix adicionado à quarentena.",
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         },
@@ -308,7 +342,7 @@ fun CallAuditScreen(
                                             onMarkFeedback(item, "FALSE_POSITIVE")
                                             Toast.makeText(
                                                 context,
-                                                "Marcado como legítimo! Prefixo ${item.prefix7} removido da quarentena.",
+                                                "Marcado como legítimo! Prefixo $displayPrefix removido da quarentena.",
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                             runCatching {

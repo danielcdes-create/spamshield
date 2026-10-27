@@ -201,15 +201,14 @@ class SpamScoringEngineTest {
         val fakeDao = FakeSpamShieldDao()
         val now = 1_700_000_050_000L
 
-        // Insert a low-score allowed call from an unknown prefix 31991234567
         val callEntity = CallTelemetryEntity(
             id = "call-1",
             timestamp = now - 5_000L,
             rawNumber = "31991234567",
             normalizedNumber = "+5531991234567",
             ddd = "31",
-            prefix7 = "3199123",
-            carrierGuess = "VIVO",
+            prefix7 = "31991234",
+            carrierGuess = "Vivo",
             lineType = "MOBILE",
             stirShakenStatus = "PASSED",
             finalScore = 25,
@@ -218,37 +217,25 @@ class SpamScoringEngineTest {
             category = "UNKNOWN_UNVERIFIED",
             processingLatencyMs = 1.8,
             shadowModeActive = false,
-            triggeredRulesJson = "[]"
+            triggeredRulesJson = """[{"rule_id":"NOT_IN_CONTACTS","weight":25}]"""
         )
         fakeDao.insertTelemetry(callEntity)
 
-        // Simulate Ping Call post-call evaluation logic (duration = 3s <= 4s)
-        val latest = fakeDao.getLatestTelemetryForNumber("+5531991234567")
-        assertNotNull(latest)
-        assertEquals("ALLOWED_LOW_SCORE", latest?.outcome)
+        val settingsStore = br.com.spamshield.data.local.SettingsDataStore()
+        val lookup = FakeContactLookup()
+        val engine = SpamScoringEngine(fakeDao, settingsStore, lookup)
 
-        fakeDao.updateCallDurationAndCategory(latest!!.id, 3, "PING_CALL_ROBOCALL")
-        fakeDao.upsertQuarantine(
-            PrefixQuarantineEntity(
-                prefix7 = latest.prefix7,
-                ddd = latest.ddd,
-                carrierGuess = latest.carrierGuess,
-                hitCount = 1,
-                penaltyWeight = 65,
-                reason = "PING_CALL_ROBOCALL",
-                firstSeenAt = now,
-                lastSeenAt = now,
-                expiresAt = now + SpamScoringEngine.QUARANTINE_DEFAULT_TTL_MS
-            )
-        )
+        val changed = engine.evaluatePostCallPingDetector("+5531991234567", 3, now)
+        assertTrue(changed)
 
         val updated = fakeDao.getTelemetryById("call-1")
         assertEquals("PING_CALL_ROBOCALL", updated?.category)
+        assertEquals("BLOCKED", updated?.outcome)
         assertEquals(3, updated?.callDurationSec)
+        assertTrue(updated!!.triggeredRulesJson.contains("PING_CALL_PENALTY"))
 
-        val q = fakeDao.getActiveQuarantineForPrefix("3199123", now)
+        val q = fakeDao.getActiveQuarantineForPrefix("31991234", "3199123", now)
         assertTrue(q != null && q.penaltyWeight == 65)
-        assertFalse(q == null)
     }
 
     @Test
@@ -276,14 +263,12 @@ class SpamScoringEngineTest {
         )
         fakeDao.insertTelemetry(callEntity)
 
-        // Verify JSON serialization does not crash
         val jsonStr = kotlinx.serialization.json.Json.encodeToString(
             kotlinx.serialization.builtins.ListSerializer(CallTelemetryEntity.serializer()),
             fakeDao.getAllTelemetry()
         )
         assertTrue(jsonStr.contains("+551136586701"))
 
-        // Verify CONFIRMED_SPAM upgrades outcome to BLOCKED and score >= 100
         fakeDao.updateUserFeedback("call-1136586701", "CONFIRMED_SPAM")
         val updated = fakeDao.getTelemetryById("call-1136586701")
         assertEquals("CONFIRMED_SPAM", updated?.userFeedback)
@@ -296,14 +281,13 @@ class SpamScoringEngineTest {
         val fakeDao = FakeSpamShieldDao()
         val now = 1_700_000_100_000L
 
-        // Call originally allowed in real-time as ALLOWED_LOW_SCORE (score 40)
         val initialCall = CallTelemetryEntity(
             id = "call-031981100234",
             timestamp = now - 10_000L,
             rawNumber = "031981100234",
             normalizedNumber = "+5531981100234",
             ddd = "31",
-            prefix7 = "3198110",
+            prefix7 = "31981100",
             carrierGuess = "TIM",
             lineType = "MOBILE",
             stirShakenStatus = "NOT_VERIFIED",
@@ -313,16 +297,14 @@ class SpamScoringEngineTest {
             category = "UNKNOWN_UNVERIFIED",
             processingLatencyMs = 1.6,
             shadowModeActive = false,
-            triggeredRulesJson = "[]"
+            triggeredRulesJson = """[{"rule_id":"NOT_IN_CONTACTS","weight":25},{"rule_id":"STIR_SHAKEN_UNVERIFIED","weight":15}]"""
         )
         fakeDao.insertTelemetry(initialCall)
 
-        // Mock settings data store
         val settingsStore = br.com.spamshield.data.local.SettingsDataStore()
         val lookup = FakeContactLookup()
         val engine = SpamScoringEngine(fakeDao, settingsStore, lookup)
 
-        // Simulate CallLog reporting REJECTED_TYPE (5) from Google Dialer / user rejection
         val changed = engine.evaluatePostCallLogVerdict(
             normalizedNumber = "+5531981100234",
             callType = android.provider.CallLog.Calls.REJECTED_TYPE,
@@ -331,18 +313,72 @@ class SpamScoringEngineTest {
         )
         assertTrue(changed)
 
-        // Verify call was upgraded to BLOCKED (score >= 85) with SYSTEM_CALLLOG_BLOCKED
         val updated = fakeDao.getTelemetryById("call-031981100234")
         assertNotNull(updated)
         assertEquals("BLOCKED", updated?.outcome)
-        assertTrue(updated!!.finalScore >= 85)
-        assertTrue(updated.triggeredRulesJson.contains("SYSTEM_CALLLOG_BLOCKED"))
+        assertEquals(85, updated?.finalScore)
+        assertTrue(updated!!.triggeredRulesJson.contains("SYSTEM_CALLLOG_BLOCKED"))
 
-        // Verify 8-digit prefix 31981100 was quarantined (1 digit more for granular protection)
         val q = fakeDao.getActiveQuarantineForPrefix(prefix8 = "31981100", prefix7 = "3198110", now = now)
         assertNotNull(q)
         assertEquals("31981100", q?.prefix7)
         assertEquals(70, q?.penaltyWeight)
+    }
+
+    @Test
+    fun `recover 18h27 call 031982042364 that was corrupted by PREFIX6_CLUSTER_HIT back to APRENDIDA with SYSTEM_CALLLOG_BLOCKED`() = runTest {
+        val fakeDao = FakeSpamShieldDao()
+        val now = 1_793_050_040_000L
+
+        // Simulate the exact corrupted record of 031982042364 from Build 11 where PREFIX6_CLUSTER_HIT replaced SYSTEM_CALLLOG_BLOCKED
+        val corrupted1827Call = CallTelemetryEntity(
+            id = "f3312a4f-7c99-48ce-9b44-a36712383592",
+            timestamp = 1_793_050_034_726L,
+            deviceId = "android-edge-br",
+            rawNumber = "031982042364",
+            normalizedNumber = "+5531982042364",
+            ddd = "31",
+            prefix7 = "3198204",
+            carrierGuess = "TIM",
+            lineType = "MOBILE",
+            stirShakenStatus = "NOT_VERIFIED",
+            finalScore = 85,
+            thresholdApplied = 70,
+            outcome = "BLOCKED",
+            category = "ROBOCALL_PREFIX_CLUSTER",
+            processingLatencyMs = 1.21698,
+            shadowModeActive = false,
+            callDurationSec = 0,
+            triggeredRulesJson = """[{"rule_id":"NOT_IN_CONTACTS","weight":25},{"rule_id":"STIR_SHAKEN_UNVERIFIED","weight":15,"meta":"VERIFICATION_STATUS_NOT_VERIFIED"},{"rule_id":"PREFIX6_CLUSTER_HIT","weight":45,"meta":"Sub-bloco 319820x"}]"""
+        )
+        fakeDao.insertTelemetry(corrupted1827Call)
+
+        val settingsStore = br.com.spamshield.data.local.SettingsDataStore()
+        val lookup = FakeContactLookup()
+        val engine = SpamScoringEngine(fakeDao, settingsStore, lookup)
+
+        // Reconciling with CallLog REJECTED_TYPE (5) must strip PREFIX6_CLUSTER_HIT, restore SYSTEM_CALLLOG_BLOCKED, and set 8-digit prefix 31982042
+        val changed = engine.evaluatePostCallLogVerdict(
+            normalizedNumber = "+5531982042364",
+            callType = android.provider.CallLog.Calls.REJECTED_TYPE,
+            callDurationSec = 0,
+            callTimestampMs = 1_793_050_035_000L,
+            nowMillis = now
+        )
+        assertTrue(changed)
+
+        val recovered = fakeDao.getTelemetryById("f3312a4f-7c99-48ce-9b44-a36712383592")
+        assertNotNull(recovered)
+        assertEquals("31982042", recovered?.prefix7)
+        assertEquals("BLOCKED", recovered?.outcome)
+        assertEquals(85, recovered?.finalScore)
+        assertTrue(recovered!!.triggeredRulesJson.contains("SYSTEM_CALLLOG_BLOCKED"))
+        assertFalse(recovered.triggeredRulesJson.contains("PREFIX6_CLUSTER_HIT"))
+
+        val q8 = fakeDao.getActiveQuarantineForPrefix("31982042", "3198204", now)
+        assertNotNull(q8)
+        assertEquals("31982042", q8?.prefix7)
+        assertEquals(70, q8?.penaltyWeight)
     }
 
     @Test
@@ -353,7 +389,6 @@ class SpamScoringEngineTest {
         val lookup = FakeContactLookup()
         val engine = SpamScoringEngine(fakeDao, settingsStore, lookup)
 
-        // Add 8-digit quarantine for 31982042
         fakeDao.upsertQuarantine(
             PrefixQuarantineEntity(
                 prefix7 = "31982042",
@@ -368,24 +403,20 @@ class SpamScoringEngineTest {
             )
         )
 
-        // Incoming call from same milhar 031982042364
         val resultSameMilhar = engine.evaluateIncomingCall(
             rawNumber = "031982042364",
             stirShakenStatus = "NOT_VERIFIED",
             nowMillis = now
         )
-        // Score: NOT_IN_CONTACTS(25) + STIR_SHAKEN_UNVERIFIED(20) + PREFIX_QUARANTINE_HIT(70) = 115 >= 70
         assertEquals("BLOCKED", resultSameMilhar.telemetry.outcome)
         assertTrue(resultSameMilhar.shouldDisallowAndReject)
         assertTrue(resultSameMilhar.telemetry.triggeredRulesJson.contains("31982042"))
 
-        // Incoming call from different milhar 031982041999 (same /7 prefix, but different /8)
         val resultDiffMilhar = engine.evaluateIncomingCall(
             rawNumber = "031982041999",
             stirShakenStatus = "NOT_VERIFIED",
             nowMillis = now
         )
-        // Should NOT trigger 8-digit quarantine hit
         assertEquals("ALLOWED_LOW_SCORE", resultDiffMilhar.telemetry.outcome)
         assertFalse(resultDiffMilhar.shouldDisallowAndReject)
     }
@@ -395,25 +426,24 @@ class SpamScoringEngineTest {
         val fakeDao = FakeSpamShieldDao()
         val now = 1_700_000_100_000L
 
-        // Call originally blocked at edge (e.g. score 170 from 03136150224)
         val initialCall = CallTelemetryEntity(
             id = "call-03136150224",
             timestamp = now - 10_000L,
             rawNumber = "03136150224",
             normalizedNumber = "+553136150224",
             ddd = "31",
-            prefix7 = "3136150",
-            carrierGuess = "Algar Telecom",
+            prefix7 = "31361502",
+            carrierGuess = "Fixo",
             lineType = "FIXED_OR_VOIP",
             stirShakenStatus = "NOT_VERIFIED",
-            finalScore = 170,
+            finalScore = 165,
             thresholdApplied = 70,
             outcome = "BLOCKED",
             category = "ROBOCALL_PREFIX_CLUSTER",
             processingLatencyMs = 1.22,
             shadowModeActive = false,
             callDurationSec = null,
-            triggeredRulesJson = """[{"rule_id":"NOT_IN_CONTACTS","weight":25},{"rule_id":"PREFIX_QUARANTINE_HIT","weight":70}]"""
+            triggeredRulesJson = """[{"rule_id":"NOT_IN_CONTACTS","weight":25},{"rule_id":"STIR_SHAKEN_UNVERIFIED","weight":15},{"rule_id":"PREFIX_QUARANTINE_HIT","weight":65},{"rule_id":"ANATEL_PABX_VOIP_RANGE","weight":35},{"rule_id":"LEADING_ZERO_TRUNK_DIALING","weight":25}]"""
         )
         fakeDao.insertTelemetry(initialCall)
 
@@ -421,7 +451,6 @@ class SpamScoringEngineTest {
         val lookup = FakeContactLookup()
         val engine = SpamScoringEngine(fakeDao, settingsStore, lookup)
 
-        // Telecom reports BLOCKED_TYPE (6) because SpamShield screened and rejected it
         val changed = engine.evaluatePostCallLogVerdict(
             normalizedNumber = "+553136150224",
             callType = android.provider.CallLog.Calls.BLOCKED_TYPE,
@@ -430,11 +459,10 @@ class SpamScoringEngineTest {
         )
         assertFalse(changed)
 
-        // Verify call was NOT mutated, score was not inflated, and SYSTEM_CALLLOG_BLOCKED was NOT added
         val tele = fakeDao.getTelemetryById("call-03136150224")
         assertNotNull(tele)
         assertEquals("BLOCKED", tele?.outcome)
-        assertEquals(170, tele?.finalScore)
+        assertEquals(165, tele?.finalScore)
         assertEquals(0, tele?.callDurationSec)
         assertFalse(tele!!.triggeredRulesJson.contains("SYSTEM_CALLLOG_BLOCKED"))
     }

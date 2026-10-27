@@ -104,8 +104,8 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 dao.deduplicateHistoryRecords()
+                val reconciled = callHistoryAnalyzer.reconcileRecentCallsWithCallLog(100)
                 val updated = callHistoryAnalyzer.reprocessAllStoredTelemetry()
-                val reconciled = callHistoryAnalyzer.reconcileRecentCallsWithCallLog(50)
                 if (updated > 0 || reconciled > 0) {
                     syncRepository.performFullSync()
                 }
@@ -136,7 +136,10 @@ class MainViewModel @Inject constructor(
                 lastSyncMessage = "Sincronizando via Tailscale..."
             )
             withContext(Dispatchers.IO) {
-                runCatching { callHistoryAnalyzer.reconcileRecentCallsWithCallLog(50) }
+                runCatching {
+                    callHistoryAnalyzer.reconcileRecentCallsWithCallLog(100)
+                    callHistoryAnalyzer.reprocessAllStoredTelemetry()
+                }
             }
             val outcome = syncRepository.performFullSync()
             val vpn = TailscaleNetworkHelper.isVpnActive(appContext)
@@ -290,7 +293,11 @@ class MainViewModel @Inject constructor(
 
     fun markCallFeedback(telemetry: CallTelemetryEntity, feedback: String) {
         viewModelScope.launch {
-            syncRepository.submitFeedback(telemetry.id, feedback, telemetry.prefix7)
+            val targetPrefix = spamScoringEngine.extractQuarantinePrefix(
+                telemetry.normalizedNumber,
+                telemetry.prefix7
+            )
+            syncRepository.submitFeedback(telemetry.id, feedback, targetPrefix)
         }
     }
 
@@ -318,9 +325,9 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun addManualQuarantinePrefix(prefix7: String, carrierGuess: String, weight: Int) {
+    fun addManualQuarantinePrefix(prefixInput: String, carrierGuess: String, weight: Int) {
         viewModelScope.launch {
-            val cleanPrefix = prefix7.filter { it.isDigit() }.take(7)
+            val cleanPrefix = prefixInput.filter { it.isDigit() }.take(8)
             if (cleanPrefix.length < 5) return@launch
             val now = System.currentTimeMillis()
             val isFixed = cleanPrefix.drop(2).firstOrNull() in '2'..'5'
@@ -328,7 +335,7 @@ class MainViewModel @Inject constructor(
                 rawCarrier = carrierGuess.ifBlank { null },
                 lineType = if (isFixed) "FIXED_OR_VOIP" else "MOBILE",
                 isCorporatePabx = false,
-                prefix7 = cleanPrefix
+                prefix7 = cleanPrefix.take(7)
             )
             syncRepository.saveManualQuarantine(
                 PrefixQuarantineEntity(
@@ -376,7 +383,7 @@ class MainViewModel @Inject constructor(
 
     suspend fun exportTelemetryFiles(): Pair<File, File> = withContext(Dispatchers.IO) {
         runCatching {
-            callHistoryAnalyzer.reconcileRecentCallsWithCallLog(50)
+            callHistoryAnalyzer.reconcileRecentCallsWithCallLog(100)
             callHistoryAnalyzer.reprocessAllStoredTelemetry()
         }
         val all = dao.getAllTelemetry()

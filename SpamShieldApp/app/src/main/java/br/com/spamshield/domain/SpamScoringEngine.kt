@@ -94,9 +94,8 @@ class SpamScoringEngine @Inject constructor(
             stirShakenStatus != "FAILED" &&
             !PhoneNormalizer.hasAbnormalTrunkOrCspHeader(rawNumber, settings.userDdd)
         ) {
-            val activeQ7 = dao.getActiveQuarantineForPrefix(normalized.prefix8, normalized.prefix7, nowMillis)
-            val activeQ6Count = dao.countActiveQuarantinesByPrefix6(normalized.prefix6, nowMillis)
-            if (activeQ7 == null && activeQ6Count == 0) {
+            val activeQ = dao.getActiveQuarantineForPrefix(normalized.prefix8, normalized.prefix7, nowMillis)
+            if (activeQ == null) {
                 val recentSameNumberCount = dao.countRecentCallsFromNumber(
                     normalizedNumber = normalized.normalizedNumber,
                     sinceTimestamp = nowMillis - EMERGENCY_REPEAT_WINDOW_MS
@@ -174,14 +173,14 @@ class SpamScoringEngine @Inject constructor(
                 score += w
                 triggeredRules.add(TriggeredRuleDto("STIR_SHAKEN_FAILED", w, "VERIFICATION_STATUS_FAILED"))
             }
-            "" , "NOT_VERIFIED" -> {
+            "", "NOT_VERIFIED" -> {
                 val w = enabledRules["STIR_SHAKEN_UNVERIFIED"]?.weight ?: 20
                 score += w
                 triggeredRules.add(TriggeredRuleDto("STIR_SHAKEN_UNVERIFIED", w, "VERIFICATION_STATUS_NOT_VERIFIED"))
             }
         }
 
-        // 3.3 Quarentena de Prefixo Ativa (/7 exato, /6 sub-bloco e /5 fazenda de chipeira)
+        // 3.3 Quarentena de Prefixo Ativa (/8 milhar prioritário, fallback /7 legado e /5 fazenda de chipeira)
         var activeQuarantine: PrefixQuarantineEntity? = null
         var subBlockClusterTriggered = false
         if (normalized.prefix7.isNotEmpty()) {
@@ -200,23 +199,10 @@ class SpamScoringEngine @Inject constructor(
                     )
                 )
             } else if (normalized.prefix6.length >= 6) {
+                // Alerta leve (+15) se houver quarentenas vizinhas no mesmo sub-bloco /6,
+                // sem bloquear falsos-positivos de outros milhares (25 + 20 + 15 = 60 < 70).
                 val q6Count = dao.countActiveQuarantinesByPrefix6(normalized.prefix6, nowMillis)
-                val distinct6In24h = dao.countDistinctNumbersInPrefix6Since(
-                    prefix6 = normalized.prefix6,
-                    sinceTimestamp = nowMillis - NEIGHBORHOOD_BURST_WINDOW_MS
-                )
-                if (q6Count >= 2 || distinct6In24h >= 2) {
-                    val w6 = 45
-                    score += w6
-                    subBlockClusterTriggered = true
-                    triggeredRules.add(
-                        TriggeredRuleDto(
-                            rule_id = "PREFIX6_CLUSTER_HIT",
-                            weight = w6,
-                            meta = "Sub-bloco ${normalized.prefix6}x (q=$q6Count, 24h=$distinct6In24h)"
-                        )
-                    )
-                } else if (q6Count == 1) {
+                if (q6Count >= 1) {
                     val w6 = 15
                     score += w6
                     triggeredRules.add(
@@ -247,7 +233,7 @@ class SpamScoringEngine @Inject constructor(
             }
         }
 
-        // 3.4 Detecção Dinâmica de Vizinhança (Neighborhood Burst com prefixo 8 dígitos nas últimas 24h)
+        // 3.4 Detecção Dinâmica de Vizinhança (Neighborhood Burst estrito no milhar /8 nas últimas 24h)
         var neighborhoodBurstTriggered = false
         val burstPrefix = if (normalized.prefix8.length == 8) normalized.prefix8 else normalized.prefix7
         if (burstPrefix.isNotEmpty()) {
@@ -331,7 +317,7 @@ class SpamScoringEngine @Inject constructor(
             )
         }
 
-        // Passo 4: Veredito, Modo Sombra, Quarentena Automática e Gravação
+        // Passo 4: Veredito, Modo Sombra, Quarentena Automática (/8) e Gravação
         val threshold = settings.blockThresholdScore
         val isSpam = score >= threshold
         val outcome = when {
@@ -348,10 +334,11 @@ class SpamScoringEngine @Inject constructor(
             else -> "UNKNOWN_UNVERIFIED"
         }
 
-        if (isSpam && normalized.prefix7.length >= 6) {
-            val qPrefix = if (normalized.prefix8.length == 8) normalized.prefix8 else normalized.prefix7
+        val storagePrefix = if (normalized.prefix8.length == 8) normalized.prefix8 else normalized.prefix7
+
+        if (isSpam && storagePrefix.length >= 6) {
             val updatedQuarantine = PrefixQuarantineEntity(
-                prefix7 = qPrefix,
+                prefix7 = storagePrefix,
                 ddd = normalized.ddd,
                 carrierGuess = carrierGuess,
                 distinctNumbersJson = "[\"${normalized.normalizedNumber}\"]",
@@ -374,7 +361,7 @@ class SpamScoringEngine @Inject constructor(
             rawNumber = normalized.rawNumber,
             normalizedNumber = normalized.normalizedNumber,
             ddd = normalized.ddd,
-            prefix7 = if (normalized.prefix8.length == 8) normalized.prefix8 else normalized.prefix7,
+            prefix7 = storagePrefix,
             carrierGuess = carrierGuess,
             lineType = resolvedLineType,
             stirShakenStatus = stirShakenStatus,
@@ -411,7 +398,7 @@ class SpamScoringEngine @Inject constructor(
     /**
      * Passo 5: Detector de "Ping Call" (Chamada Muda Pós-Atendimento)
      * Se uma chamada desconhecida com score < threshold (ALLOWED_LOW_SCORE) foi atendida
-     * e durou entre 1 e 4 segundos, classifica como PING_CALL_ROBOCALL e quarentena o prefixo (+65).
+     * e durou entre 1 e 4 segundos, classifica como PING_CALL_ROBOCALL e quarentena o prefixo /8 (+65).
      */
     suspend fun evaluatePostCallPingDetector(
         normalizedNumber: String,
@@ -422,13 +409,26 @@ class SpamScoringEngine @Inject constructor(
         val latest = dao.getLatestTelemetryForNumber(normalizedNumber) ?: return false
         if (latest.outcome != "ALLOWED_LOW_SCORE") return false
 
-        dao.updateCallDurationAndCategory(
-            id = latest.id,
-            durationSec = callDurationSec,
-            category = "PING_CALL_ROBOCALL"
-        )
+        val existingRules = runCatching {
+            json.decodeFromString<List<TriggeredRuleDto>>(latest.triggeredRulesJson)
+        }.getOrDefault(emptyList()).toMutableList()
+
+        if (existingRules.none { it.rule_id == "PING_CALL_PENALTY" }) {
+            existingRules.add(TriggeredRuleDto("PING_CALL_PENALTY", 55, "Duração ${callDurationSec}s"))
+        }
 
         val qPrefix = extractQuarantinePrefix(latest.normalizedNumber, latest.prefix7)
+        val updatedTelemetry = latest.copy(
+            prefix7 = qPrefix.ifEmpty { latest.prefix7 },
+            outcome = "BLOCKED",
+            category = "PING_CALL_ROBOCALL",
+            finalScore = latest.finalScore + 55,
+            callDurationSec = callDurationSec,
+            triggeredRulesJson = json.encodeToString(existingRules),
+            syncStatus = "PENDING"
+        )
+        dao.insertTelemetry(updatedTelemetry)
+
         if (qPrefix.isNotEmpty()) {
             val existing = dao.getActiveQuarantineForPrefix(
                 prefix8 = qPrefix,
@@ -455,25 +455,31 @@ class SpamScoringEngine @Inject constructor(
 
     /**
      * Passo 6: Aprendizado Ativo Pós-Chamada (Reconciliação com Veredito do Sistema/Discador e Chamadas Perdidas)
-     * Quando o CallStateBroadcastReceiver ou a reconciliação do histórico detecta:
-     * 1. Chamada REJEITADA pelo usuário/discador (REJECTED_TYPE) ou BLOQUEADA pelo sistema (BLOCKED_TYPE):
-     *    - Promove a chamada para BLOCKED (+45, regra SYSTEM_CALLLOG_BLOCKED)
-     *    - Quarentena imediatamente o prefixo 8 dígitos (+70) para que qualquer próxima chamada do bloco seja barrada antes de tocar.
-     * 2. PING CALL (atendida e durou 1..4s):
-     *    - Classifica como PING_CALL_ROBOCALL e quarentena (+65).
-     * 3. Chamada PERDIDA/NÃO ATENDIDA (MISSED_TYPE ou duration == 0) de número desconhecido:
-     *    - Registra durationSec = 0.
-     *    - Se o número ou prefixo já possui repetição não atendida nas últimas 24h sem retorno de saída:
-     *      coloca o prefixo em quarentena preventiva (+65).
+     * Distingue com precisão:
+     * - BLOCKED_TYPE (6) gerado pelo próprio bloqueio de borda do SpamShield (score inicial >= threshold):
+     *   NÃO altera score nem adiciona SYSTEM_CALLLOG_BLOCKED (a chamada não tocou).
+     * - REJECTED_TYPE (5) (chamada tocou e usuário rejeitou manualmente no discador) ou chamada com score inicial < threshold
+     *   rejeitada/bloqueada no discador:
+     *   Promove para BLOCKED (+45, regra SYSTEM_CALLLOG_BLOCKED — exibida como APRENDIDA na UI) e quarentena o prefixo /8 (+70).
      */
     suspend fun evaluatePostCallLogVerdict(
         normalizedNumber: String,
         callType: Int,
         callDurationSec: Int,
         isSystemBlocked: Boolean = false,
+        callTimestampMs: Long? = null,
         nowMillis: Long = System.currentTimeMillis()
     ): Boolean {
-        val latest = dao.getLatestTelemetryForNumber(normalizedNumber) ?: return false
+        val latest = if (callTimestampMs != null) {
+            dao.findRealTimeTelemetryNearTimestamp(
+                normalizedNumber = normalizedNumber,
+                minTs = callTimestampMs - 60_000L,
+                maxTs = callTimestampMs + 60_000L
+            ) ?: dao.getLatestTelemetryForNumber(normalizedNumber)
+        } else {
+            dao.getLatestTelemetryForNumber(normalizedNumber)
+        } ?: return false
+
         val currentDuration = latest.callDurationSec
 
         // Se é contato da agenda ou chamada de saída protegida por grace, apenas atualiza duração
@@ -484,9 +490,29 @@ class SpamScoringEngine @Inject constructor(
             return false
         }
 
-        // Se a chamada já foi bloqueada na borda em tempo real pelo SpamShield,
-        // o Telecom grava BLOCKED_TYPE porque nós a rejeitamos! Não inflacionar score nem rotular como aprendizado.
-        if (latest.outcome == "BLOCKED" || latest.outcome == "SHADOW_BLOCKED") {
+        val existingRules = runCatching {
+            json.decodeFromString<List<TriggeredRuleDto>>(latest.triggeredRulesJson)
+        }.getOrDefault(emptyList())
+
+        // Calcula o score limpo de chegada na borda (sem regras pós-chamada e sem o antigo falso-positivo de /6)
+        val cleanArrivalRules = existingRules.filter {
+            it.rule_id != "SYSTEM_CALLLOG_BLOCKED" &&
+                it.rule_id != "PING_CALL_PENALTY" &&
+                it.rule_id != "CONVERSATION_ANSWERED_BONUS" &&
+                it.rule_id != "PREFIX6_CLUSTER_HIT"
+        }
+        val cleanArrivalScore = if (cleanArrivalRules.isNotEmpty()) {
+            cleanArrivalRules.sumOf { it.weight }
+        } else {
+            latest.finalScore
+        }
+
+        // Uma chamada foi genuinamente bloqueada na borda se o score de chegada já era >= threshold.
+        // Nesse caso, o Telecom grava BLOCKED_TYPE (6) porque nós a rejeitamos antes de tocar.
+        val wasTrulyBlockedAtEdge = (latest.outcome == "BLOCKED" || latest.outcome == "SHADOW_BLOCKED") &&
+            cleanArrivalScore >= latest.thresholdApplied
+
+        if (wasTrulyBlockedAtEdge) {
             if (currentDuration == null && callDurationSec >= 0) {
                 dao.updateCallDurationAndCategory(latest.id, callDurationSec, latest.category)
             }
@@ -497,32 +523,36 @@ class SpamScoringEngine @Inject constructor(
             callType == android.provider.CallLog.Calls.BLOCKED_TYPE ||
             callType == android.provider.CallLog.Calls.REJECTED_TYPE
 
-        // 1. Rejeição no Discador ou Bloqueio no Sistema (ex: Google Dialer Spam Flag) em chamada que tocou (ALLOWED_LOW_SCORE)
-        if (wasBlockedOrRejectedInSystem && latest.outcome == "ALLOWED_LOW_SCORE") {
-            val existingRules = runCatching {
-                json.decodeFromString<List<TriggeredRuleDto>>(latest.triggeredRulesJson)
-            }.getOrDefault(emptyList()).toMutableList()
-
-            if (existingRules.none { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }) {
-                val metaDesc = if (callType == android.provider.CallLog.Calls.BLOCKED_TYPE) {
-                    "Bloqueado no Sistema"
-                } else {
-                    "Rejeitado no Discador"
-                }
-                existingRules.add(TriggeredRuleDto("SYSTEM_CALLLOG_BLOCKED", 45, metaDesc))
+        // 1. Rejeição no Discador pelo usuário (REJECTED_TYPE) ou Bloqueio no Discador em chamada que tocou (cleanArrivalScore < threshold)
+        if (wasBlockedOrRejectedInSystem && cleanArrivalScore < latest.thresholdApplied) {
+            val updatedRules = cleanArrivalRules.toMutableList()
+            val metaDesc = if (callType == android.provider.CallLog.Calls.BLOCKED_TYPE && !isSystemBlocked) {
+                "Bloqueado no Sistema"
+            } else {
+                "Rejeitado no Discador"
             }
+            updatedRules.add(TriggeredRuleDto("SYSTEM_CALLLOG_BLOCKED", 45, metaDesc))
 
             val qPrefix = extractQuarantinePrefix(latest.normalizedNumber, latest.prefix7)
-            val updatedScore = maxOf(latest.finalScore + 45, 85)
+            val updatedScore = maxOf(cleanArrivalScore + 45, 85)
             val updatedTelemetry = latest.copy(
+                prefix7 = qPrefix.ifEmpty { latest.prefix7 },
                 outcome = "BLOCKED",
                 category = "ROBOCALL_PREFIX_CLUSTER",
                 finalScore = updatedScore,
                 callDurationSec = callDurationSec,
-                triggeredRulesJson = json.encodeToString(existingRules),
+                triggeredRulesJson = json.encodeToString(updatedRules),
                 syncStatus = "PENDING"
             )
-            dao.insertTelemetry(updatedTelemetry)
+
+            val rulesChanged = updatedTelemetry.triggeredRulesJson != latest.triggeredRulesJson ||
+                updatedTelemetry.finalScore != latest.finalScore ||
+                updatedTelemetry.outcome != latest.outcome ||
+                updatedTelemetry.prefix7 != latest.prefix7
+
+            if (rulesChanged || currentDuration != callDurationSec) {
+                dao.insertTelemetry(updatedTelemetry)
+            }
 
             if (qPrefix.isNotEmpty()) {
                 val existingQ = dao.getActiveQuarantineForPrefix(
@@ -530,6 +560,9 @@ class SpamScoringEngine @Inject constructor(
                     prefix7 = latest.prefix7,
                     now = nowMillis
                 )
+                if (qPrefix.length == 8 && latest.prefix7.length == 7 && latest.prefix7 != qPrefix) {
+                    dao.deleteQuarantineByPrefix(latest.prefix7)
+                }
                 dao.upsertQuarantine(
                     PrefixQuarantineEntity(
                         prefix7 = qPrefix,
@@ -545,7 +578,7 @@ class SpamScoringEngine @Inject constructor(
                     )
                 )
             }
-            return true
+            return rulesChanged
         }
 
         // 2. Ping Call (1..4s atendida)
@@ -557,18 +590,18 @@ class SpamScoringEngine @Inject constructor(
         val isUnanswered = callType == android.provider.CallLog.Calls.MISSED_TYPE ||
             (callType == android.provider.CallLog.Calls.INCOMING_TYPE && callDurationSec == 0)
 
-        if (isUnanswered && latest.outcome == "ALLOWED_LOW_SCORE") {
+        if (isUnanswered && cleanArrivalScore < latest.thresholdApplied) {
+            val qPrefix = extractQuarantinePrefix(latest.normalizedNumber, latest.prefix7)
             dao.updateCallDurationAndCategory(latest.id, 0, latest.category)
 
-            val recentCallsInPrefix = if (latest.prefix7.isNotEmpty()) {
-                dao.countDistinctNumbersInPrefix7Since(latest.prefix7, nowMillis - NEIGHBORHOOD_BURST_WINDOW_MS)
+            val recentCallsInPrefix = if (qPrefix.isNotEmpty()) {
+                dao.countDistinctNumbersInPrefix7Since(qPrefix, nowMillis - NEIGHBORHOOD_BURST_WINDOW_MS)
             } else {
                 1
             }
             val recentCallsSameNum = dao.countRecentCallsFromNumber(latest.normalizedNumber, nowMillis - NEIGHBORHOOD_BURST_WINDOW_MS)
 
             if (recentCallsSameNum >= 2 || recentCallsInPrefix >= 2) {
-                val qPrefix = extractQuarantinePrefix(latest.normalizedNumber, latest.prefix7)
                 if (qPrefix.isNotEmpty()) {
                     val existingQ = dao.getActiveQuarantineForPrefix(
                         prefix8 = qPrefix,

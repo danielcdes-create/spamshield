@@ -127,12 +127,17 @@ pub async fn post_telemetry_batch(
         join_all(update_futs).await;
     }
 
-    // 3. Group NEW blocked / shadow-blocked calls by prefix_7 and upsert prefix_quarantine concurrently
+    // 3. Group blocked / shadow-blocked calls (including post-call rejections in updated_existing_calls) by prefix_7 and upsert prefix_quarantine
     let mut grouped_prefixes: HashMap<String, PrefixBatchAggregation> = HashMap::new();
-    for call in &new_calls {
+    for call in new_calls.iter().map(|c| &**c).chain(updated_existing_calls.iter().copied()) {
         if call.decision_vector.outcome.is_blocked_or_shadow()
             && !call.call_details.prefix_7.is_empty()
         {
+            let is_post_call_rejection = call
+                .decision_vector
+                .triggered_rules
+                .iter()
+                .any(|r| r.rule_id == "SYSTEM_CALLLOG_BLOCKED");
             let entry = grouped_prefixes
                 .entry(call.call_details.prefix_7.clone())
                 .or_insert_with(|| PrefixBatchAggregation {
@@ -142,11 +147,17 @@ pub async fn post_telemetry_batch(
                         .carrier_guess
                         .clone()
                         .unwrap_or_else(|| "Outros".to_string()),
-                    reason: call.decision_vector.category.as_str().to_string(),
+                    reason: if is_post_call_rejection {
+                        "DIALER_REJECTED".to_string()
+                    } else {
+                        call.decision_vector.category.as_str().to_string()
+                    },
                     hit_delta: 0,
                     numbers: HashSet::new(),
                 });
-            entry.hit_delta += 1;
+            if !existing_ids.contains(&call.id) || is_post_call_rejection {
+                entry.hit_delta = (entry.hit_delta + 1).max(1);
+            }
             if !call.call_details.normalized_number.is_empty() {
                 entry
                     .numbers
@@ -173,7 +184,7 @@ pub async fn post_telemetry_batch(
                 "$setOnInsert": {
                     "ddd": agg.ddd,
                     "carrier_guess": agg.carrier_guess,
-                    "penalty_weight": 65_i32,
+                    "penalty_weight": 70_i32,
                     "reason": agg.reason,
                     "first_seen_at": now_bson,
                 }

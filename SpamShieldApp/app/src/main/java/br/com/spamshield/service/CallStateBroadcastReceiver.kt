@@ -24,8 +24,9 @@ import javax.inject.Inject
 
 /**
  * Monitors call termination (`EXTRA_STATE_IDLE`) to:
- * 1. Detect "Ping Calls" (answered incoming call from unknown number lasting 1..4 seconds).
- * 2. Record outbound calls in `outbound_grace` with a 2-hour PBX return immunity window.
+ * 1. Detect user dialer rejections (`REJECTED_TYPE`) on calls that rang (`ALLOWED_LOW_SCORE`) and quarantine their /8 prefix.
+ * 2. Detect "Ping Calls" (answered incoming call from unknown number lasting 1..4 seconds).
+ * 3. Record outbound calls in `outbound_grace` with a 2-hour PBX return immunity window.
  */
 @AndroidEntryPoint
 class CallStateBroadcastReceiver : BroadcastReceiver() {
@@ -115,6 +116,7 @@ class CallStateBroadcastReceiver : BroadcastReceiver() {
                         callType = callType,
                         callDurationSec = durationSec,
                         isSystemBlocked = isSystemBlocked,
+                        callTimestampMs = callDate,
                         nowMillis = now
                     )
                     if (changed) {
@@ -122,7 +124,7 @@ class CallStateBroadcastReceiver : BroadcastReceiver() {
                         Log.d(
                             TAG,
                             "Post-call verdict updated for ${normalized.normalizedNumber}: " +
-                                "type=$callType, dur=${durationSec}s, isBlocked=$isSystemBlocked. Prefix ${normalized.prefix7} quarantined."
+                                "type=$callType, dur=${durationSec}s, isBlocked=$isSystemBlocked. Prefix ${normalized.prefix8} quarantined."
                         )
                     }
                 }

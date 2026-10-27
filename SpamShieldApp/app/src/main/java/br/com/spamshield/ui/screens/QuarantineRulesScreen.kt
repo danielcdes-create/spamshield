@@ -67,7 +67,7 @@ fun QuarantineRulesScreen(
                 fontSize = 18.sp
             )
             Text(
-                text = "Clusters de prefixos de 7 dígitos com decaimento TTL e regras Regex ativas.",
+                text = "Clusters de prefixos de 8 dígitos (milhar) e 7 dígitos (bloco) com decaimento TTL e regras Regex.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -83,12 +83,12 @@ fun QuarantineRulesScreen(
                     modifier = Modifier.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("Adicionar Prefixo 7 Dígitos em Quarentena", fontWeight = FontWeight.Bold)
+                    Text("Adicionar Prefixo (8 ou 7 Dígitos) em Quarentena", fontWeight = FontWeight.Bold)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
                             value = newPrefix,
                             onValueChange = { newPrefix = it },
-                            label = { Text("Prefixo 7 (ex: 3141011)") },
+                            label = { Text("Prefixo (ex: 31982042)") },
                             modifier = Modifier.weight(1f),
                             singleLine = true
                         )

@@ -156,13 +156,39 @@ class SyncRepository @Inject constructor(
                 }
             }
 
+            // 1b. Push locally learned 8-digit quarantines (e.g. DIALER_REJECTED / PING_CALL_ROBOCALL) to server
+            val now = System.currentTimeMillis()
+            val existingLocalQuarantines = dao.getAllQuarantines().filter { it.expiresAt > now }
+            for (lq in existingLocalQuarantines) {
+                if (lq.prefix7.length >= 8 || lq.reason == "DIALER_REJECTED" || lq.reason == "PING_CALL_ROBOCALL") {
+                    runCatching {
+                        val distinctNumbers = runCatching {
+                            json.decodeFromString<List<String>>(lq.distinctNumbersJson)
+                        }.getOrDefault(emptyList())
+                        api.upsertQuarantine(
+                            PrefixQuarantineRemoteDto(
+                                prefix_7 = lq.prefix7,
+                                ddd = lq.ddd,
+                                carrier_guess = lq.carrierGuess,
+                                distinct_numbers_seen = distinctNumbers,
+                                hit_count = lq.hitCount,
+                                penalty_weight = lq.penaltyWeight,
+                                reason = lq.reason,
+                                first_seen_at = Instant.ofEpochMilli(lq.firstSeenAt).toString(),
+                                last_seen_at = Instant.ofEpochMilli(lq.lastSeenAt).toString(),
+                                expires_at = Instant.ofEpochMilli(lq.expiresAt).toString()
+                            )
+                        )
+                    }
+                }
+            }
+
             // 2. Pull updated rules, quarantines, and Anatel prefixes
             val payload = api.getSyncPayload(
                 ddd = settings.userDdd,
                 sinceTimestamp = settings.lastSyncTimestamp
             )
 
-            val now = System.currentTimeMillis()
             dao.deduplicateHistoryRecords()
             dao.purgeExpiredQuarantines(now)
             dao.purgeExpiredOutboundGrace(now)
@@ -184,22 +210,35 @@ class SyncRepository @Inject constructor(
             }
 
             if (payload.prefix_quarantine.isNotEmpty()) {
-                val localQuarantines = payload.prefix_quarantine.map { q ->
-                    PrefixQuarantineEntity(
-                        prefix7 = q.prefix_7,
-                        ddd = q.ddd,
-                        carrierGuess = q.carrier_guess,
-                        distinctNumbersJson = json.encodeToString(q.distinct_numbers_seen),
-                        hitCount = q.hit_count,
-                        penaltyWeight = q.penalty_weight,
-                        reason = q.reason,
-                        firstSeenAt = parseIsoToMillis(q.first_seen_at, now),
-                        lastSeenAt = parseIsoToMillis(q.last_seen_at, now),
-                        expiresAt = parseIsoToMillis(q.expires_at, now + 7L * 86_400_000L)
-                    )
+                val preserved8DigitLocal = existingLocalQuarantines.filter {
+                    it.prefix7.length >= 8 || it.reason == "DIALER_REJECTED" || it.reason == "PING_CALL_ROBOCALL"
+                }.associateBy { it.prefix7 }
+
+                val remoteQuarantines = payload.prefix_quarantine
+                    .filter { it.prefix_7 != "3198204" }
+                    .map { q ->
+                        PrefixQuarantineEntity(
+                            prefix7 = q.prefix_7,
+                            ddd = q.ddd,
+                            carrierGuess = q.carrier_guess,
+                            distinctNumbersJson = json.encodeToString(q.distinct_numbers_seen),
+                            hitCount = q.hit_count,
+                            penaltyWeight = q.penalty_weight,
+                            reason = q.reason,
+                            firstSeenAt = parseIsoToMillis(q.first_seen_at, now),
+                            lastSeenAt = parseIsoToMillis(q.last_seen_at, now),
+                            expiresAt = parseIsoToMillis(q.expires_at, now + 7L * 86_400_000L)
+                        )
+                    }
+
+                val mergedMap = remoteQuarantines.associateBy { it.prefix7 }.toMutableMap()
+                for ((k, v) in preserved8DigitLocal) {
+                    if (!mergedMap.containsKey(k)) {
+                        mergedMap[k] = v
+                    }
                 }
                 dao.clearAllQuarantines()
-                dao.insertQuarantines(localQuarantines)
+                dao.insertQuarantines(mergedMap.values.toList())
             }
 
             if (payload.anatel_numbering_plan.isNotEmpty()) {
@@ -246,6 +285,9 @@ class SyncRepository @Inject constructor(
             dao.updateUserFeedback(telemetryId, feedback)
             if (feedback == "FALSE_POSITIVE" && prefix7.isNotEmpty()) {
                 deleteManualQuarantine(prefix7)
+                if (prefix7.length == 8) {
+                    deleteManualQuarantine(prefix7.take(7))
+                }
             } else if (feedback == "CONFIRMED_SPAM" && prefix7.isNotEmpty()) {
                 val now = System.currentTimeMillis()
                 val existing = dao.getActiveQuarantineForPrefix(prefix7, now)
