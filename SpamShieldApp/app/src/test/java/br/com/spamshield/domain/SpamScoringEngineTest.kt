@@ -389,4 +389,53 @@ class SpamScoringEngineTest {
         assertEquals("ALLOWED_LOW_SCORE", resultDiffMilhar.telemetry.outcome)
         assertFalse(resultDiffMilhar.shouldDisallowAndReject)
     }
+
+    @Test
+    fun `evaluatePostCallLogVerdict does NOT alter call that was already BLOCKED at edge`() = runTest {
+        val fakeDao = FakeSpamShieldDao()
+        val now = 1_700_000_100_000L
+
+        // Call originally blocked at edge (e.g. score 170 from 03136150224)
+        val initialCall = CallTelemetryEntity(
+            id = "call-03136150224",
+            timestamp = now - 10_000L,
+            rawNumber = "03136150224",
+            normalizedNumber = "+553136150224",
+            ddd = "31",
+            prefix7 = "3136150",
+            carrierGuess = "Algar Telecom",
+            lineType = "FIXED_OR_VOIP",
+            stirShakenStatus = "NOT_VERIFIED",
+            finalScore = 170,
+            thresholdApplied = 70,
+            outcome = "BLOCKED",
+            category = "ROBOCALL_PREFIX_CLUSTER",
+            processingLatencyMs = 1.22,
+            shadowModeActive = false,
+            callDurationSec = null,
+            triggeredRulesJson = """[{"rule_id":"NOT_IN_CONTACTS","weight":25},{"rule_id":"PREFIX_QUARANTINE_HIT","weight":70}]"""
+        )
+        fakeDao.insertTelemetry(initialCall)
+
+        val settingsStore = br.com.spamshield.data.local.SettingsDataStore()
+        val lookup = FakeContactLookup()
+        val engine = SpamScoringEngine(fakeDao, settingsStore, lookup)
+
+        // Telecom reports BLOCKED_TYPE (6) because SpamShield screened and rejected it
+        val changed = engine.evaluatePostCallLogVerdict(
+            normalizedNumber = "+553136150224",
+            callType = android.provider.CallLog.Calls.BLOCKED_TYPE,
+            callDurationSec = 0,
+            nowMillis = now
+        )
+        assertFalse(changed)
+
+        // Verify call was NOT mutated, score was not inflated, and SYSTEM_CALLLOG_BLOCKED was NOT added
+        val tele = fakeDao.getTelemetryById("call-03136150224")
+        assertNotNull(tele)
+        assertEquals("BLOCKED", tele?.outcome)
+        assertEquals(170, tele?.finalScore)
+        assertEquals(0, tele?.callDurationSec)
+        assertFalse(tele!!.triggeredRulesJson.contains("SYSTEM_CALLLOG_BLOCKED"))
+    }
 }

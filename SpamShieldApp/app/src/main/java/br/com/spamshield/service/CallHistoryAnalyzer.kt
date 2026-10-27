@@ -242,20 +242,6 @@ class CallHistoryAnalyzer @Inject constructor(
                 score += unverifiedW
                 triggered.add(TriggeredRuleDto("STIR_SHAKEN_UNVERIFIED", unverifiedW, "Histórico"))
 
-                // System CallLog blocked (6) or rejected (5)
-                val wasBlockedOrRejectedInSystem = call.callType == CallLog.Calls.BLOCKED_TYPE ||
-                    call.callType == CallLog.Calls.REJECTED_TYPE
-                if (wasBlockedOrRejectedInSystem) {
-                    score += 45
-                    triggered.add(
-                        TriggeredRuleDto(
-                            rule_id = "SYSTEM_CALLLOG_BLOCKED",
-                            weight = 45,
-                            meta = if (call.callType == CallLog.Calls.BLOCKED_TYPE) "Bloqueado no Sistema" else "Rejeitado"
-                        )
-                    )
-                }
-
                 // Ping Call (< 4s answered incoming call)
                 val isPingCall = call.callType == CallLog.Calls.INCOMING_TYPE && call.durationSec in 1..4
                 if (isPingCall) {
@@ -348,6 +334,24 @@ class CallHistoryAnalyzer @Inject constructor(
                     )
                 }
 
+                // Aprendizado Ativo: se a chamada foi rejeitada/bloqueada no sistema E seu score inicial era baixo (< threshold),
+                // promove com SYSTEM_CALLLOG_BLOCKED. Não aplica a chamadas que já foram bloqueadas na borda em tempo real.
+                val isRealTimeBlocked = realTimeMatch != null &&
+                    (realTimeMatch.outcome == "BLOCKED" || realTimeMatch.outcome == "SHADOW_BLOCKED")
+                val wasBlockedOrRejectedInSystem = !isRealTimeBlocked &&
+                    (call.callType == CallLog.Calls.BLOCKED_TYPE || call.callType == CallLog.Calls.REJECTED_TYPE)
+
+                if (wasBlockedOrRejectedInSystem && score < settings.blockThresholdScore) {
+                    score += 45
+                    triggered.add(
+                        TriggeredRuleDto(
+                            rule_id = "SYSTEM_CALLLOG_BLOCKED",
+                            weight = 45,
+                            meta = if (call.callType == CallLog.Calls.BLOCKED_TYPE) "Bloqueado no Sistema" else "Rejeitado no Discador"
+                        )
+                    )
+                }
+
                 if (call.durationSec >= 10 && preservedFeedback != "CONFIRMED_SPAM" && !wasBlockedOrRejectedInSystem) {
                     score = (score - 40).coerceAtLeast(0)
                     triggered.add(
@@ -361,7 +365,7 @@ class CallHistoryAnalyzer @Inject constructor(
 
                 val isSpam = preservedFeedback == "CONFIRMED_SPAM" ||
                     (preservedFeedback != "FALSE_POSITIVE" &&
-                        (score >= settings.blockThresholdScore || wasBlockedOrRejectedInSystem || isPingCall))
+                        (score >= settings.blockThresholdScore || isPingCall))
                 val outcome = when {
                     preservedFeedback == "FALSE_POSITIVE" -> "ALLOWED_CONTACT"
                     isSpam -> "BLOCKED"
@@ -375,7 +379,8 @@ class CallHistoryAnalyzer @Inject constructor(
                     else -> "UNKNOWN_UNVERIFIED"
                 }
 
-                val latencyMs = ((SystemClock.elapsedRealtimeNanos() - startNanos).coerceAtLeast(120_000L)) / 1_000_000.0
+                val latencyMs = realTimeMatch?.processingLatencyMs
+                    ?: (((SystemClock.elapsedRealtimeNanos() - startNanos).coerceAtLeast(120_000L)) / 1_000_000.0)
 
                 dao.insertTelemetry(
                     CallTelemetryEntity(
@@ -388,7 +393,7 @@ class CallHistoryAnalyzer @Inject constructor(
                         prefix7 = norm.prefix7,
                         carrierGuess = carrierGuess,
                         lineType = resolvedLineType,
-                        stirShakenStatus = "NOT_VERIFIED",
+                        stirShakenStatus = realTimeMatch?.stirShakenStatus ?: "NOT_VERIFIED",
                         finalScore = if (preservedFeedback == "CONFIRMED_SPAM") maxOf(score, 100) else score,
                         thresholdApplied = settings.blockThresholdScore,
                         outcome = outcome,
@@ -633,13 +638,6 @@ class CallHistoryAnalyzer @Inject constructor(
                 }
             }
 
-            if (wasSystemBlocked) {
-                val sysRule = existingRules.firstOrNull { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }
-                val w = sysRule?.weight ?: 45
-                score += w
-                triggered.add(TriggeredRuleDto("SYSTEM_CALLLOG_BLOCKED", w, sysRule?.meta ?: "Rejeitado"))
-            }
-
             if (wasPingCall) {
                 val pingW = enabledRules["PING_CALL_PENALTY"]?.weight ?: 55
                 score += pingW
@@ -715,6 +713,14 @@ class CallHistoryAnalyzer @Inject constructor(
                 triggered.add(TriggeredRuleDto("LEADING_ZERO_TRUNK_DIALING", 25, row.rawNumber.trim().take(4)))
             }
 
+            // Aprendizado Ativo: só aplica SYSTEM_CALLLOG_BLOCKED se o score inicial de chegada era inferior ao limite
+            if (wasSystemBlocked && score < settings.blockThresholdScore) {
+                val sysRule = existingRules.firstOrNull { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }
+                val w = sysRule?.weight ?: 45
+                score += w
+                triggered.add(TriggeredRuleDto("SYSTEM_CALLLOG_BLOCKED", w, sysRule?.meta ?: "Rejeitado no Discador"))
+            }
+
             val callDur = row.callDurationSec ?: 0
             if (callDur >= 10 && row.userFeedback != "CONFIRMED_SPAM" && !wasSystemBlocked && resolvedLineType == "MOBILE") {
                 score = (score - 40).coerceAtLeast(0)
@@ -733,7 +739,6 @@ class CallHistoryAnalyzer @Inject constructor(
 
             val isSpam = row.userFeedback == "CONFIRMED_SPAM" ||
                 score >= settings.blockThresholdScore ||
-                wasSystemBlocked ||
                 wasPingCall
 
             val newOutcome = if (isSpam) "BLOCKED" else "ALLOWED_LOW_SCORE"

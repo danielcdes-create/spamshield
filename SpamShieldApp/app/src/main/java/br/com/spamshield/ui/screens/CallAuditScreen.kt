@@ -101,7 +101,10 @@ fun CallAuditScreen(
                             modifier = Modifier.padding(14.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            val wasLearnedFromDialer = rules.any { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }
+                            val sysBlockedRule = rules.firstOrNull { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }
+                            val baseScoreWithoutSys = item.finalScore - (sysBlockedRule?.weight ?: 0)
+                            val wasLearnedAfterRing = sysBlockedRule != null && baseScoreWithoutSys < item.thresholdApplied
+                            val isBlockedAtEdge = item.outcome == "BLOCKED" && !wasLearnedAfterRing
                             val quarantineRule = rules.firstOrNull { it.rule_id == "PREFIX_QUARANTINE_HIT" }
                             val displayPrefix = quarantineRule?.meta?.split(' ')?.firstOrNull() ?: item.prefix7
 
@@ -130,21 +133,49 @@ fun CallAuditScreen(
                                 OutcomeBadge(
                                     outcome = item.outcome,
                                     score = item.finalScore,
-                                    wasLearnedFromDialer = wasLearnedFromDialer
+                                    wasLearnedAfterRing = wasLearnedAfterRing
                                 )
                             }
 
-                            if (wasLearnedFromDialer) {
+                            if (isBlockedAtEdge) {
+                                Surface(
+                                    color = Color(0xFFDC2626).copy(alpha = 0.12f),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = "🛡️ Bloqueada na borda em ${String.format(Locale.US, "%.2f", item.processingLatencyMs)} ms (Não tocou)",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFFDC2626),
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
+                            } else if (wasLearnedAfterRing) {
                                 Surface(
                                     color = Color(0xFFEA580C).copy(alpha = 0.12f),
                                     shape = RoundedCornerShape(8.dp),
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Text(
-                                        text = "🔔 Tocou na chegada (Score inicial 45) ➔ Quarentenada pós-rejeição",
+                                        text = "🔔 Tocou na chegada (Score inicial $baseScoreWithoutSys) ➔ Quarentenada pós-rejeição",
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = Color(0xFFEA580C),
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
+                            } else if (item.outcome == "ALLOWED_LOW_SCORE") {
+                                Surface(
+                                    color = Color(0xFF16A34A).copy(alpha = 0.10f),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = "✓ Permitida em tempo real (Score ${item.finalScore} < limite ${item.thresholdApplied})",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFF16A34A),
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                     )
                                 }
@@ -153,7 +184,27 @@ fun CallAuditScreen(
                             if (expanded) {
                                 HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
 
-                                if (wasLearnedFromDialer) {
+                                if (isBlockedAtEdge) {
+                                    Surface(
+                                        color = Color(0xFFDC2626).copy(alpha = 0.08f),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
+                                    ) {
+                                        Column(modifier = Modifier.padding(8.dp)) {
+                                            Text(
+                                                text = "🛡️ Interceptação Silenciosa em Tempo Real",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFDC2626)
+                                            )
+                                            Text(
+                                                text = "Esta chamada foi interceptada e rejeitada antes de tocar no aparelho (latência: ${String.format(Locale.US, "%.2f", item.processingLatencyMs)} ms). O score atingiu ${item.finalScore} pontos (limite: ${item.thresholdApplied}), acionando o bloqueio automático de borda.",
+                                                fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                } else if (wasLearnedAfterRing) {
                                     Surface(
                                         color = Color(0xFFEA580C).copy(alpha = 0.10f),
                                         shape = RoundedCornerShape(8.dp),
@@ -167,7 +218,7 @@ fun CallAuditScreen(
                                                 color = Color(0xFFEA580C)
                                             )
                                             Text(
-                                                text = "Esta chamada tocou em tempo real porque foi a 1ª vez do prefixo (score 45 < limite 70). Após ser rejeitada no discador, o SpamShield aprendeu o padrão e quarentenou o bloco de 1.000 números ($displayPrefix). Novas chamadas deste bloco serão bloqueadas em < 2 ms antes de tocar.",
+                                                text = "Esta chamada tocou em tempo real porque foi a 1ª vez do prefixo (score $baseScoreWithoutSys < limite ${item.thresholdApplied}). Após ser rejeitada no discador, o SpamShield aprendeu o padrão e quarentenou o bloco de 1.000 números ($displayPrefix). Novas chamadas deste bloco serão bloqueadas em < 2 ms antes de tocar.",
                                                 fontSize = 11.sp,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
@@ -287,9 +338,9 @@ fun CallAuditScreen(
 }
 
 @Composable
-private fun OutcomeBadge(outcome: String, score: Int, wasLearnedFromDialer: Boolean = false) {
+private fun OutcomeBadge(outcome: String, score: Int, wasLearnedAfterRing: Boolean = false) {
     val (label, bgColor) = when {
-        wasLearnedFromDialer -> "APRENDIDA" to Color(0xFFEA580C)
+        wasLearnedAfterRing -> "APRENDIDA" to Color(0xFFEA580C)
         outcome == "BLOCKED" -> "BLOQUEADA" to Color(0xFFDC2626)
         outcome == "SHADOW_BLOCKED" -> "SOMBRA" to Color(0xFFD97706)
         outcome == "ALLOWED_CONTACT" -> "AGENDA" to Color(0xFF16A34A)

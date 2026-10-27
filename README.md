@@ -11,12 +11,15 @@ Ecossistema privado de defesa em borda (`< 2 ms`), telemetria vetorial e intelig
    - **Quarentena Granular com 1 Dígito a Mais (`/8` — 1.000 números):**
      - Em vez de quarentenar blocos amplos de 10.000 números (`/7`, ex.: `3198204`), o motor agora adota **8 dígitos** (`/8`, ex.: `31982042`), restringindo a quarentena ao milhar específico utilizado pela chipeira/robocall (`3198204-2000` a `3198204-2999`).
      - Reduz a restritividade em 10 vezes, blindando contra falso-positivos em vizinhos da mesma central telefônica, mantendo total retrocompatibilidade com quarentenas e troncos legados (`/7`).
-   - **Transparência Visual no Histórico e Aprendizado Ativo:**
-     - Distinção transparente entre chamadas bloqueadas na chegada em tempo real (`BLOQUEADA`) vs chamadas que tocaram por ser a 1ª vez e foram quarentenadas após rejeição no discador (`APRENDIDA (Score)` com indicador explícito: *"🔔 Tocou na chegada (Score inicial 45) ➔ Quarentenada pós-rejeição"*).
-   - **Aprendizado Ativo via CallLog do Sistema (`evaluatePostCallLogVerdict`):**
-     - O Android CallScreening executa antes do discador tocar. Quando uma chamada desconhecida toca e é rejeitada ou bloqueada pelo usuário/discador (Google Phone com `BLOCKED_TYPE` ou `REJECTED_TYPE`), o `CallStateBroadcastReceiver` intercepta o evento pós-chamada no `CallLog`.
-     - O `SpamScoringEngine` reavalia o veredito via `evaluatePostCallLogVerdict()`, elevando o score para `85` (`APRENDIDA`), registrando `SYSTEM_CALLLOG_BLOCKED` (`+45`) ou `DIALER_REJECTED` (`+45`) e inserindo o milhar `/8` na tabela `prefix_quarantine` com bônus de quarentena ativa (`+70`).
-     - Novas chamadas do mesmo milhar ou vizinhos são bloqueadas na borda antes de qualquer toque.
+    - **Transparência Visual no Histórico e Aprendizado Ativo:**
+      - Distinção transparente e estrita entre:
+        - **Bloqueio em Tempo Real na Borda (`BLOQUEADA`, Badge Vermelho):** Chamadas com score inicial `>= 70` (ex: `170`), interceptadas e rejeitadas pelo `CallScreeningService` em `< 2 ms` antes de tocar no aparelho. Exibe banner explicativo: *"🛡️ Bloqueada na borda em X.XX ms (Não tocou)"*.
+        - **Aprendizado Ativo Pós-Rejeição (`APRENDIDA`, Badge Laranja):** Chamadas que tocaram por ser a 1ª vez do prefixo (score inicial `< 70`) e que o usuário/discador rejeitou (`REJECTED_TYPE`), elevando o score com `SYSTEM_CALLLOG_BLOCKED (+45)` e quarentenando o bloco `/8`. Exibe banner explícito: *"🔔 Tocou na chegada (Score inicial X) ➔ Quarentenada pós-rejeição"*.
+        - **Permitida em Tempo Real (`PERMITIDA`, Badge Verde):** Chamadas legítimas ou desconhecidas com score `< 70`.
+    - **Blindagem do Feedback Loop do Telecom (`evaluatePostCallLogVerdict`):**
+      - Quando o SpamShield rejeita uma ligação na borda, o Android Telecom grava o evento no `CallLog` como `BLOCKED_TYPE` (6). O motor agora verifica `outcome == "BLOCKED" || outcome == "SHADOW_BLOCKED"` antes de avaliar vereditos do sistema, impedindo que o bloqueio nativo do SpamShield seja interpretado erroneamente como rejeição manual do usuário.
+      - A regra `SYSTEM_CALLLOG_BLOCKED` só é atribuída se o score de chegada era inferior ao limite de bloqueio (`ALLOWED_LOW_SCORE`), mantendo o histórico de auditoria 100% fidedigno à realidade.
+      - O reprocessamento retroativo (`reprocessAllStoredTelemetry`) expurga automaticamente regras residuais de chamadas que já possuíam score suficiente para bloqueio de borda.
    - **Normalização Telefônica Brasileira (`PhoneNormalizer`):**
      - Tratamento de formato `E.164` (`+55`), prefixos de tronco com zero (`031...`, `011...`), Códigos de Seleção de Prestadora (`015`, `021`, `041`, `031`) e chamadas internacionais/duplo zero (`004131...`).
      - **Separação Estrita entre `VoIP` e `Fixo`:**

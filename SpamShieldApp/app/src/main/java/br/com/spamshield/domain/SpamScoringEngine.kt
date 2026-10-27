@@ -484,12 +484,21 @@ class SpamScoringEngine @Inject constructor(
             return false
         }
 
+        // Se a chamada já foi bloqueada na borda em tempo real pelo SpamShield,
+        // o Telecom grava BLOCKED_TYPE porque nós a rejeitamos! Não inflacionar score nem rotular como aprendizado.
+        if (latest.outcome == "BLOCKED" || latest.outcome == "SHADOW_BLOCKED") {
+            if (currentDuration == null && callDurationSec >= 0) {
+                dao.updateCallDurationAndCategory(latest.id, callDurationSec, latest.category)
+            }
+            return false
+        }
+
         val wasBlockedOrRejectedInSystem = isSystemBlocked ||
             callType == android.provider.CallLog.Calls.BLOCKED_TYPE ||
             callType == android.provider.CallLog.Calls.REJECTED_TYPE
 
-        // 1. Rejeição no Discador ou Bloqueio no Sistema (ex: Google Dialer Spam Flag)
-        if (wasBlockedOrRejectedInSystem) {
+        // 1. Rejeição no Discador ou Bloqueio no Sistema (ex: Google Dialer Spam Flag) em chamada que tocou (ALLOWED_LOW_SCORE)
+        if (wasBlockedOrRejectedInSystem && latest.outcome == "ALLOWED_LOW_SCORE") {
             val existingRules = runCatching {
                 json.decodeFromString<List<TriggeredRuleDto>>(latest.triggeredRulesJson)
             }.getOrDefault(emptyList()).toMutableList()
