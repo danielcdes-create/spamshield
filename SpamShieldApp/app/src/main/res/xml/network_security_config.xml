@@ -1,10 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Cleartext is denied except inside Tailscale CGNAT 100.64.0.0/10.
-         The platform matches IP literals exactly; TailscaleCleartext rejects
-         any http host outside that range before the request is sent. -->
+    <!-- Cleartext is denied except inside Tailscale CGNAT 100.64.0.0/10 or MagicDNS (*.ts.net).
+         The platform matches IP literals and domains; TailscaleCleartext enforces
+         the allowed hosts before requests are sent. -->
     <base-config cleartextTrafficPermitted="false" />
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">100.83.253.15</domain>
+        <domain includeSubdomains="true">ts.net</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
     </domain-config>
 </network-security-config>

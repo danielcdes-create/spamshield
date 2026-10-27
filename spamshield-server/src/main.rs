@@ -368,8 +368,25 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
             .header("authorization", "Bearer unit-test-key")
             .body(Body::empty())
             .unwrap();
-        let accepted_resp = router.oneshot(accepted).await.unwrap();
+        let accepted_resp = router.clone().oneshot(accepted).await.unwrap();
         assert_ne!(accepted_resp.status(), StatusCode::UNAUTHORIZED);
         assert!(accepted_resp.status().is_success());
+
+        // Health and APK endpoints must remain public so older apps (v1.2.8) can update OTA without a pre-shared bearer.
+        let public_health = Request::builder()
+            .method("GET")
+            .uri("/api/v1/health")
+            .body(Body::empty())
+            .unwrap();
+        let pub_health_resp = router.clone().oneshot(public_health).await.unwrap();
+        assert_eq!(pub_health_resp.status(), StatusCode::OK);
+
+        let public_apk_info = Request::builder()
+            .method("GET")
+            .uri("/api/v1/apk/info")
+            .body(Body::empty())
+            .unwrap();
+        let pub_apk_resp = router.oneshot(public_apk_info).await.unwrap();
+        assert_eq!(pub_apk_resp.status(), StatusCode::OK);
     }
 }

@@ -122,12 +122,8 @@ pub fn create_router(state: AppState) -> Router {
         .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT]);
 
-    Router::new()
-        .route("/api/v1/health", get(health_check))
-        .route("/api/v1/apk/info", get(get_apk_info))
+    let protected = Router::new()
         .route("/api/v1/providers/sync", post(sync_providers_handler))
-        .route("/apk", get(download_apk))
-        .route("/spamshield.apk", get(download_apk))
         .route(
             "/api/v1/telemetry/batch",
             post(telemetry::post_telemetry_batch),
@@ -145,7 +141,17 @@ pub fn create_router(state: AppState) -> Router {
             delete(rules::delete_quarantine),
         )
         .route("/api/v1/analytics/summary", get(analytics::get_analytics_summary))
-        .layer(middleware::from_fn_with_state(state.clone(), require_bearer))
+        .layer(middleware::from_fn_with_state(state.clone(), require_bearer));
+
+    let public = Router::new()
+        .route("/api/v1/health", get(health_check))
+        .route("/api/v1/apk/info", get(get_apk_info))
+        .route("/apk", get(download_apk))
+        .route("/spamshield.apk", get(download_apk));
+
+    Router::new()
+        .merge(public)
+        .merge(protected)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(cors)

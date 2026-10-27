@@ -1,6 +1,14 @@
-# SpamShield BR (`v1.2.8` — Build `12`)
+# SpamShield BR (`v1.2.9` — Build `13`)
 
 Ecossistema privado de defesa em borda (`< 2 ms`), telemetria vetorial e inteligência contra chamadas de spam, robocall, chipeiras GSM e spoofing no Brasil (padrões Anatel RNPM / Ato nº 10.413 / STIR-SHAKEN).
+
+### Novidades da versão v1.2.9 (Build 13):
+- **Atualização OTA Contínua e Sem Fricção:** Endpoints `/api/v1/health`, `/api/v1/apk/info` e `/apk` públicos para permitir que clientes instalados (v1.2.8 ou anteriores) descubram e baixem automaticamente a nova versão via Tailscale, sem exigir chave prévia.
+- **Segurança da API Reforçada:** Proteção com token Bearer (`SPAMSHIELD_API_KEY`) nas rotas de sincronização de telemetria, regras, quarentena e analíticos. Campo de configuração de token Bearer disponível em Ajustes no app.
+- **Endurecimento de Rede:** Regras de tráfego cleartext no Android limitadas à rede CGNAT do Tailscale (`100.64.0.0/10`), MagicDNS (`*.ts.net`) e loopback local.
+- **Proteção de Linhas Fixas:** Ajuste no motor de scoring para não aplicar quarentena de robocall a linhas fixas convencionais por duas chamadas perdidas.
+- **Governança de Pesos Globais:** Travamento de recalibração global de pesos no servidor, exigindo taxa mínima de falso-positivos (> 5%) e aprovação.
+- **Verificação de Integridade:** Validação de integridade do pacote APK via SHA-256 tanto no servidor quanto no app antes da instalação.
 
 ---
 
@@ -75,20 +83,20 @@ Ecossistema privado de defesa em borda (`< 2 ms`), telemetria vetorial e intelig
 
 ## 2. Endpoints da API (`spamshield-server` — Porta `8080`)
 
-| Método | Rota | Descrição |
-| :--- | :--- | :--- |
-| `GET` | `/api/v1/health` | Status do servidor e latência do MongoDB Atlas |
-| `POST` | `/api/v1/telemetry/batch` | Recebe lote de telemetria e atualiza registros reprocessados |
-| `PATCH` | `/api/v1/telemetry/:id/feedback` | Registra `CONFIRMED_SPAM` ou `FALSE_POSITIVE` com recalibração |
-| `GET` | `/api/v1/sync/rules` | Retorna regras ativas, quarentenas `/7` e prefixos Anatel |
-| `POST` | `/api/v1/rules` | Cria ou atualiza regra customizada (Regex/Heurística) |
-| `DELETE` | `/api/v1/rules/:rule_id` | Remove regra customizada |
-| `POST` | `/api/v1/quarantine` | Adiciona prefixo `/7` manualmente na quarentena |
-| `DELETE` | `/api/v1/quarantine/:prefix7` | Remove prefixo `/7` da quarentena |
-| `POST` | `/api/v1/providers/sync` | Sincroniza base Anatel e Blacklists comunitárias BR |
-| `POST` | `/api/v1/anatel/sync` | Importa planilha CSV de numeração Anatel via Rayon |
-| `GET` | `/api/v1/apk/info` | Metadados da versão atual do APK disponível para OTA |
-| `GET` | `/apk` | Download direto do pacote `SpamShieldBR-debug.apk` |
+| Método | Rota | Autenticação | Descrição |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/health` | Pública | Status do servidor e latência do MongoDB Atlas |
+| `GET` | `/api/v1/apk/info` | Pública | Metadados e SHA-256 da versão atual do APK para atualização OTA |
+| `GET` | `/apk` | Pública | Download direto do pacote `SpamShieldBR-debug.apk` |
+| `POST` | `/api/v1/telemetry/batch` | Bearer Token | Recebe lote de telemetria e atualiza registros reprocessados |
+| `PATCH` | `/api/v1/telemetry/:id/feedback` | Bearer Token | Registra `CONFIRMED_SPAM` ou `FALSE_POSITIVE` com recalibração |
+| `GET` | `/api/v1/sync/payload` | Bearer Token | Retorna regras ativas, quarentenas `/8`/`/7` e prefixos Anatel |
+| `POST` | `/api/v1/rules` | Bearer Token | Cria ou atualiza regra customizada (Regex/Heurística) |
+| `POST` | `/api/v1/quarantine/batch` | Bearer Token | Ingestão em lote de quarentenas derivadas na borda |
+| `POST` | `/api/v1/quarantine` | Bearer Token | Adiciona prefixo manualmente na quarentena |
+| `DELETE` | `/api/v1/quarantine/:prefix7` | Bearer Token | Remove prefixo da quarentena |
+| `POST` | `/api/v1/providers/sync` | Bearer Token | Sincroniza base Anatel e Blacklists comunitárias BR |
+| `GET` | `/api/v1/analytics/summary` | Bearer Token | Métricas e sumário de bloqueios do cluster |
 
 ---
 

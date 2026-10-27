@@ -11,6 +11,8 @@ object TailscaleCleartext {
     const val RANGE = "100.64.0.0/10"
 
     fun isInRange(host: String): Boolean {
+        if (host.equals("localhost", ignoreCase = true) || host == "127.0.0.1") return true
+        if (host.endsWith(".ts.net", ignoreCase = true)) return true
         val parts = host.split('.')
         if (parts.size != 4) return false
         val octets = parts.map { it.toIntOrNull() ?: return false }
