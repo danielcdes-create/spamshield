@@ -488,6 +488,26 @@ class SpamScoringEngineTest {
     }
 
     @Test
+    fun `two missed calls from one geographic landline do not insert UNANSWERED_SPAM_BURST`() = runTest {
+        val fakeDao = FakeSpamShieldDao()
+        val now = 1_700_000_250_000L
+        val number = "+553132201234"
+        fakeDao.insertTelemetry(missedCall("fixo-1", number, "31322012", "FIXED_OR_VOIP", "Fixo", now - 20_000L))
+        fakeDao.insertTelemetry(missedCall("fixo-2", number, "31322012", "FIXED_OR_VOIP", "Fixo", now - 5_000L))
+        val engine = SpamScoringEngine(fakeDao, br.com.spamshield.data.local.SettingsDataStore(), FakeContactLookup())
+
+        val changed = engine.evaluatePostCallLogVerdict(
+            normalizedNumber = number,
+            callType = android.provider.CallLog.Calls.MISSED_TYPE,
+            callDurationSec = 0,
+            nowMillis = now
+        )
+
+        assertFalse(changed)
+        assertTrue(fakeDao.getAllQuarantines().none { it.reason == "UNANSWERED_SPAM_BURST" && it.prefix7 == "31322012" })
+    }
+
+    @Test
     fun `two missed calls from a VoIP number still insert UNANSWERED_SPAM_BURST`() = runTest {
         val fakeDao = FakeSpamShieldDao()
         val now = 1_700_000_300_000L

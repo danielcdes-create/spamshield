@@ -58,12 +58,15 @@ class SpamScoringEngine @Inject constructor(
         fun isVoipOrRobocallLike(
             lineType: String,
             carrierGuess: String?,
-            triggeredRulesJson: String
+            triggeredRulesJson: String,
+            normalizedNumber: String = "",
+            prefix7: String = ""
         ): Boolean {
-            if (lineType == "FIXED_OR_VOIP" || lineType == "TOLL_FREE_OR_SPECIAL") return true
+            if (lineType == "TOLL_FREE_OR_SPECIAL") return true
+            val subscriber = nationalSubscriber(normalizedNumber, prefix7)
             if (PhoneNormalizer.isVoipPrefixOrSubscriber(
-                    subscriber = "",
-                    prefix7 = "",
+                    subscriber = subscriber,
+                    prefix7 = prefix7,
                     rawCarrier = carrierGuess,
                     isCorporatePabx = false
                 )
@@ -74,6 +77,15 @@ class SpamScoringEngine @Inject constructor(
                 triggeredRulesJson.contains("REGEX_") ||
                 triggeredRulesJson.contains("ROBOCALL") ||
                 triggeredRulesJson.contains("STIR_SHAKEN_FAILED")
+        }
+
+        /** National subscriber after the DDD. A geographic landline such as 32201234 is not a VoIP trunk. */
+        fun nationalSubscriber(normalizedNumber: String, prefix7: String): String {
+            val digits = normalizedNumber.filter { it.isDigit() }
+            val national = if (digits.startsWith("55") && digits.length >= 12) digits.drop(2) else digits
+            if (national.length > 2) return national.drop(2)
+            if (prefix7.length > 2) return prefix7.drop(2)
+            return national.ifEmpty { prefix7 }
         }
     }
 
@@ -641,7 +653,9 @@ class SpamScoringEngine @Inject constructor(
             val voipOrRobocall = isVoipOrRobocallLike(
                 latest.lineType,
                 latest.carrierGuess,
-                latest.triggeredRulesJson
+                latest.triggeredRulesJson,
+                latest.normalizedNumber,
+                latest.prefix7.ifEmpty { qPrefix }
             )
             if (shouldQuarantineUnansweredBurst(recentCallsSameNum, recentCallsInPrefix, voipOrRobocall)) {
                 if (qPrefix.isNotEmpty()) {
