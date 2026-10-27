@@ -1,8 +1,12 @@
 package br.com.spamshield
 
 import android.Manifest
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import androidx.core.content.FileProvider
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -31,7 +35,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -49,6 +53,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import br.com.spamshield.service.RoleManagerHelper
+import br.com.spamshield.ui.ApkInstallEvent
 import br.com.spamshield.ui.MainViewModel
 import br.com.spamshield.ui.screens.CallAuditScreen
 import br.com.spamshield.ui.screens.DashboardScreen
@@ -136,12 +141,45 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
         permissionLauncher.launch(perms.toTypedArray())
     }
 
-    val telemetryList by viewModel.telemetryList.collectAsState()
-    val activeRules by viewModel.activeRules.collectAsState()
-    val activeQuarantines by viewModel.activeQuarantines.collectAsState()
-    val settings by viewModel.settings.collectAsState()
-    val tailscaleStatus by viewModel.tailscaleStatus.collectAsState()
-    val apkUpdateState by viewModel.apkUpdateState.collectAsState()
+    val telemetryList by viewModel.telemetryList.collectAsStateWithLifecycle()
+    val activeRules by viewModel.activeRules.collectAsStateWithLifecycle()
+    val activeQuarantines by viewModel.activeQuarantines.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val tailscaleStatus by viewModel.tailscaleStatus.collectAsStateWithLifecycle()
+    val apkUpdateState by viewModel.apkUpdateState.collectAsStateWithLifecycle()
+
+    LaunchedEffect(viewModel) {
+        viewModel.apkInstallEvents.collect { event ->
+            when (event) {
+                ApkInstallEvent.NeedsUnknownSourcesPermission -> {
+                    runCatching {
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:${context.packageName}")
+                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                }
+                is ApkInstallEvent.ReadyToInstall -> {
+                    runCatching {
+                        val apkUri = FileProvider.getUriForFile(
+                            context,
+                            "${context.packageName}.fileprovider",
+                            event.apkFile
+                        )
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(apkUri, "application/vnd.android.package-archive")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -247,6 +285,7 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
                     onSyncAnatelProviders = viewModel::syncAnatelAndBlacklistProviders,
                     onSimulateAttack = viewModel::simulateTestCall,
                     onSaveTailscaleUrl = viewModel::setTailscaleUrl,
+                    onSaveApiBearerToken = viewModel::setApiBearerToken,
                     onChangeThreshold = viewModel::setThresholdScore,
                     onToggleSkipCallLog = viewModel::setHideBlockedFromCallLog,
                     onCheckApkUpdate = viewModel::checkApkUpdate,

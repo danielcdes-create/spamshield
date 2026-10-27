@@ -1,4 +1,4 @@
-use crate::db::AppDatabase;
+use super::AppState;
 use crate::models::{
     BatchTelemetryResponse, CallTelemetryDoc, FeedbackPatchRequest, FeedbackPatchResponse,
     UserFeedback,
@@ -11,8 +11,8 @@ use axum::{
 };
 use bson::{doc, DateTime as BsonDateTime, Document};
 use chrono::{Duration, Utc};
-use futures::{future::join_all, TryStreamExt};
-use mongodb::options::{FindOptions, InsertManyOptions, UpdateOptions};
+use futures::TryStreamExt;
+use mongodb::options::{FindOptions, InsertManyOptions};
 use std::collections::{HashMap, HashSet};
 use tracing::{error, info};
 
@@ -30,9 +30,10 @@ struct PrefixBatchAggregation {
 /// - Inserts only new documents and increments `prefix_quarantine.hit_count` strictly once per new blocked call.
 /// - Updates `user_feedback` and `call_duration_sec` on already-existing documents if modified offline.
 pub async fn post_telemetry_batch(
-    State(db): State<AppDatabase>,
+    State(state): State<AppState>,
     Json(mut batch): Json<Vec<CallTelemetryDoc>>,
 ) -> Result<Json<BatchTelemetryResponse>, (StatusCode, String)> {
+    let db = &state.db;
     if batch.is_empty() {
         return Ok(Json(BatchTelemetryResponse {
             accepted_ids: vec![],
@@ -99,32 +100,38 @@ pub async fn post_telemetry_batch(
         info!("Inserted {} new telemetry records", new_calls.len());
     }
 
-    // 2. Sync offline updates (re-processed history, feedback, carrier separation, or ping call duration) for existing documents concurrently
+    // 2. Sync offline updates for existing documents in one bulk write
     if !updated_existing_calls.is_empty() {
-        let update_futs = updated_existing_calls.iter().map(|call| {
-            let coll = telemetry_coll.clone();
-            let id = call.id.clone();
-            let full_doc = call.to_bson_document();
-            let call_details = full_doc.get_document("call_details").cloned().unwrap_or_default();
-            let decision_vector = full_doc.get_document("decision_vector").cloned().unwrap_or_default();
-            let fb = call.audit.user_feedback.as_str().to_string();
-            async move {
-                let _ = coll
-                    .update_one(
-                        doc! { "_id": id },
-                        doc! {
-                            "$set": {
-                                "call_details": call_details,
-                                "decision_vector": decision_vector,
-                                "audit.user_feedback": fb,
-                                "audit.synced_at": now_bson,
-                            }
-                        },
-                    )
-                    .await;
-            }
-        });
-        join_all(update_futs).await;
+        let updates = updated_existing_calls
+            .iter()
+            .map(|call| {
+                let full_doc = call.to_bson_document();
+                let call_details = full_doc
+                    .get_document("call_details")
+                    .cloned()
+                    .unwrap_or_default();
+                let decision_vector = full_doc
+                    .get_document("decision_vector")
+                    .cloned()
+                    .unwrap_or_default();
+                let fb = call.audit.user_feedback.as_str().to_string();
+                (
+                    doc! { "_id": &call.id },
+                    doc! {
+                        "$set": {
+                            "call_details": call_details,
+                            "decision_vector": decision_vector,
+                            "audit.user_feedback": fb,
+                            "audit.synced_at": now_bson,
+                        }
+                    },
+                    false,
+                )
+            })
+            .collect();
+        if let Err(err) = db.bulk_update_ones("call_telemetry", updates).await {
+            error!("Error during telemetry batch bulk update: {}", err);
+        }
     }
 
     // 3. Group blocked / shadow-blocked calls (including post-call rejections in updated_existing_calls) by prefix_7 and upsert prefix_quarantine
@@ -166,39 +173,48 @@ pub async fn post_telemetry_batch(
         }
     }
 
-    let quarantine_coll = db.prefix_quarantine();
-    let update_futures = grouped_prefixes.into_iter().map(|(prefix_7, agg)| {
-        let coll = quarantine_coll.clone();
-        async move {
+    let quarantine_models: Vec<(Document, Document, bool)> = grouped_prefixes
+        .into_iter()
+        .map(|(prefix_7, agg)| {
             let ttl_days = if agg.hit_delta > 5 { 30 } else { 7 };
             let expires_at = BsonDateTime::from_chrono(now_utc + Duration::days(ttl_days));
             let distinct_vec: Vec<String> = agg.numbers.into_iter().collect();
-
-            let update_doc = doc! {
-                "$inc": { "hit_count": agg.hit_delta },
-                "$addToSet": { "distinct_numbers_seen": { "$each": distinct_vec } },
-                "$set": {
-                    "last_seen_at": now_bson,
-                    "expires_at": expires_at,
+            (
+                doc! { "prefix_7": prefix_7 },
+                doc! {
+                    "$inc": { "hit_count": agg.hit_delta },
+                    "$addToSet": { "distinct_numbers_seen": { "$each": distinct_vec } },
+                    "$set": {
+                        "last_seen_at": now_bson,
+                        "expires_at": expires_at,
+                    },
+                    "$setOnInsert": {
+                        "ddd": agg.ddd,
+                        "carrier_guess": agg.carrier_guess,
+                        "penalty_weight": 70_i32,
+                        "reason": agg.reason,
+                        "first_seen_at": now_bson,
+                    }
                 },
-                "$setOnInsert": {
-                    "ddd": agg.ddd,
-                    "carrier_guess": agg.carrier_guess,
-                    "penalty_weight": 70_i32,
-                    "reason": agg.reason,
-                    "first_seen_at": now_bson,
-                }
-            };
-
-            coll.update_one(doc! { "prefix_7": prefix_7 }, update_doc)
-                .with_options(UpdateOptions::builder().upsert(true).build())
-                .await
-                .is_ok()
+                true,
+            )
+        })
+        .collect();
+    let quarantine_model_count = quarantine_models.len();
+    let quarantine_updates = if quarantine_model_count == 0 {
+        0
+    } else {
+        match db
+            .bulk_update_ones("prefix_quarantine", quarantine_models)
+            .await
+        {
+            Ok(_) => quarantine_model_count,
+            Err(err) => {
+                error!("Error during quarantine bulk update: {}", err);
+                0
+            }
         }
-    });
-
-    let results = join_all(update_futures).await;
-    let quarantine_updates = results.into_iter().filter(|ok| *ok).count();
+    };
 
     Ok(Json(BatchTelemetryResponse {
         accepted_ids,
@@ -208,10 +224,11 @@ pub async fn post_telemetry_batch(
 
 /// PATCH /api/v1/telemetry/:id/feedback
 pub async fn patch_telemetry_feedback(
-    State(db): State<AppDatabase>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(payload): Json<FeedbackPatchRequest>,
 ) -> Result<Json<FeedbackPatchResponse>, (StatusCode, String)> {
+    let db = &state.db;
     let telemetry_coll = db.call_telemetry();
 
     let existing_doc = telemetry_coll

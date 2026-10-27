@@ -28,6 +28,7 @@ import retrofit2.Retrofit
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import java.io.File
 import java.io.FileOutputStream
+import java.security.MessageDigest
 import java.time.Instant
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
@@ -61,11 +62,21 @@ class SyncRepository @Inject constructor(
         private const val TAG = "TailscaleSync"
     }
 
-    private fun buildApi(baseUrl: String): SpamShieldApi {
+    private fun buildApi(baseUrl: String, apiBearerToken: String): SpamShieldApi {
+        TailscaleCleartext.requireAllowed(baseUrl)
         val cleanUrl = if (baseUrl.endsWith("/")) baseUrl else "$baseUrl/"
+        val client = okHttpClient.newBuilder()
+            .addInterceptor { chain ->
+                val builder = chain.request().newBuilder()
+                if (apiBearerToken.isNotBlank()) {
+                    builder.header("Authorization", "Bearer $apiBearerToken")
+                }
+                chain.proceed(builder.build())
+            }
+            .build()
         return Retrofit.Builder()
             .baseUrl(cleanUrl)
-            .client(okHttpClient)
+            .client(client)
             .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
             .build()
             .create(SpamShieldApi::class.java)
@@ -73,7 +84,8 @@ class SyncRepository @Inject constructor(
 
     suspend fun checkServerReachable(baseUrl: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            val resp = buildApi(baseUrl).getHealth()
+            val token = settingsDataStore.getSnapshot().apiBearerToken
+            val resp = buildApi(baseUrl, token).getHealth()
             resp.status == "ok" || resp.mongodb_connected
         } catch (_: Exception) {
             false
@@ -83,7 +95,7 @@ class SyncRepository @Inject constructor(
     suspend fun fetchRemoteApkInfo(): ApkInfoResponseDto? = withContext(Dispatchers.IO) {
         try {
             val settings = settingsDataStore.getSnapshot()
-            buildApi(settings.tailscaleServerUrl).getApkInfo()
+            buildApi(settings.tailscaleServerUrl, settings.apiBearerToken).getApkInfo()
         } catch (e: Exception) {
             Log.w(TAG, "Failed to check remote APK info: ${e.message}")
             null
@@ -93,7 +105,7 @@ class SyncRepository @Inject constructor(
     suspend fun triggerProvidersSync(): SyncOutcome = withContext(Dispatchers.IO) {
         try {
             val settings = settingsDataStore.getSnapshot()
-            val api = buildApi(settings.tailscaleServerUrl)
+            val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
             val summary = api.syncProviders()
             // Reset lastSyncTimestamp to 0 so all newly added Anatel prefixes are pulled
             settingsDataStore.setLastSyncTimestamp(0L)
@@ -113,7 +125,13 @@ class SyncRepository @Inject constructor(
         try {
             val settings = settingsDataStore.getSnapshot()
             val apkUrl = "${settings.tailscaleServerUrl.trimEnd('/')}/apk"
-            val req = Request.Builder().url(apkUrl).get().build()
+            TailscaleCleartext.requireAllowed(apkUrl)
+            val info = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken).getApkInfo()
+            val reqBuilder = Request.Builder().url(apkUrl).get()
+            if (settings.apiBearerToken.isNotBlank()) {
+                reqBuilder.header("Authorization", "Bearer ${settings.apiBearerToken}")
+            }
+            val req = reqBuilder.build()
             val dlClient = okHttpClient.newBuilder()
                 .readTimeout(60, TimeUnit.SECONDS)
                 .build()
@@ -128,6 +146,13 @@ class SyncRepository @Inject constructor(
                         input.copyTo(output)
                     }
                 }
+                val expected = info.sha256_checksum.trim().lowercase()
+                val actual = sha256Hex(outFile.readBytes())
+                if (expected.isEmpty() || expected != actual) {
+                    outFile.delete()
+                    Log.w(TAG, "Refusing APK install: checksum mismatch")
+                    return@withContext null
+                }
                 outFile
             }
         } catch (e: Exception) {
@@ -138,7 +163,7 @@ class SyncRepository @Inject constructor(
 
     suspend fun performFullSync(): SyncOutcome = withContext(Dispatchers.IO) {
         val settings = settingsDataStore.getSnapshot()
-        val api = buildApi(settings.tailscaleServerUrl)
+        val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
 
         try {
             // 1. Push pending telemetry batches in chunks of 100
@@ -159,28 +184,29 @@ class SyncRepository @Inject constructor(
             // 1b. Push locally learned 8-digit quarantines (e.g. DIALER_REJECTED / PING_CALL_ROBOCALL) to server
             val now = System.currentTimeMillis()
             val existingLocalQuarantines = dao.getAllQuarantines().filter { it.expiresAt > now }
-            for (lq in existingLocalQuarantines) {
-                if (lq.prefix7.length >= 8 || lq.reason == "DIALER_REJECTED" || lq.reason == "PING_CALL_ROBOCALL") {
-                    runCatching {
-                        val distinctNumbers = runCatching {
-                            json.decodeFromString<List<String>>(lq.distinctNumbersJson)
-                        }.getOrDefault(emptyList())
-                        api.upsertQuarantine(
-                            PrefixQuarantineRemoteDto(
-                                prefix_7 = lq.prefix7,
-                                ddd = lq.ddd,
-                                carrier_guess = lq.carrierGuess,
-                                distinct_numbers_seen = distinctNumbers,
-                                hit_count = lq.hitCount,
-                                penalty_weight = lq.penaltyWeight,
-                                reason = lq.reason,
-                                first_seen_at = Instant.ofEpochMilli(lq.firstSeenAt).toString(),
-                                last_seen_at = Instant.ofEpochMilli(lq.lastSeenAt).toString(),
-                                expires_at = Instant.ofEpochMilli(lq.expiresAt).toString()
-                            )
-                        )
-                    }
+            val localBatch = existingLocalQuarantines
+                .filter { lq ->
+                    lq.prefix7.length >= 8 || lq.reason == "DIALER_REJECTED" || lq.reason == "PING_CALL_ROBOCALL"
                 }
+                .map { lq ->
+                    val distinctNumbers = runCatching {
+                        json.decodeFromString<List<String>>(lq.distinctNumbersJson)
+                    }.getOrDefault(emptyList())
+                    PrefixQuarantineRemoteDto(
+                        prefix_7 = lq.prefix7,
+                        ddd = lq.ddd,
+                        carrier_guess = lq.carrierGuess,
+                        distinct_numbers_seen = distinctNumbers,
+                        hit_count = lq.hitCount,
+                        penalty_weight = lq.penaltyWeight,
+                        reason = lq.reason,
+                        first_seen_at = Instant.ofEpochMilli(lq.firstSeenAt).toString(),
+                        last_seen_at = Instant.ofEpochMilli(lq.lastSeenAt).toString(),
+                        expires_at = Instant.ofEpochMilli(lq.expiresAt).toString()
+                    )
+                }
+            if (localBatch.isNotEmpty()) {
+                runCatching { api.upsertQuarantineBatch(localBatch) }
             }
 
             // 2. Pull updated rules, quarantines, and Anatel prefixes
@@ -215,7 +241,6 @@ class SyncRepository @Inject constructor(
                 }.associateBy { it.prefix7 }
 
                 val remoteQuarantines = payload.prefix_quarantine
-                    .filter { it.prefix_7 != "3198204" }
                     .map { q ->
                         PrefixQuarantineEntity(
                             prefix7 = q.prefix_7,
@@ -237,8 +262,7 @@ class SyncRepository @Inject constructor(
                         mergedMap[k] = v
                     }
                 }
-                dao.clearAllQuarantines()
-                dao.insertQuarantines(mergedMap.values.toList())
+                dao.replaceAllQuarantines(mergedMap.values.toList())
             }
 
             if (payload.anatel_numbering_plan.isNotEmpty()) {
@@ -308,7 +332,7 @@ class SyncRepository @Inject constructor(
 
             try {
                 val settings = settingsDataStore.getSnapshot()
-                val api = buildApi(settings.tailscaleServerUrl)
+                val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
                 api.patchTelemetryFeedback(telemetryId, FeedbackPatchRequestDto(feedback))
                 dao.markTelemetrySynced(listOf(telemetryId))
             } catch (e: Exception) {
@@ -320,7 +344,7 @@ class SyncRepository @Inject constructor(
         dao.upsertQuarantine(item)
         try {
             val settings = settingsDataStore.getSnapshot()
-            val api = buildApi(settings.tailscaleServerUrl)
+            val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
             val distinctNumbers = runCatching {
                 json.decodeFromString<List<String>>(item.distinctNumbersJson)
             }.getOrDefault(emptyList())
@@ -347,7 +371,7 @@ class SyncRepository @Inject constructor(
         dao.deleteQuarantineByPrefix(prefix7)
         try {
             val settings = settingsDataStore.getSnapshot()
-            val api = buildApi(settings.tailscaleServerUrl)
+            val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
             api.deleteQuarantine(prefix7)
         } catch (e: Exception) {
             Log.w(TAG, "Deleted quarantine locally; remote sync deferred: ${e.message}")
@@ -358,7 +382,7 @@ class SyncRepository @Inject constructor(
         dao.upsertRule(rule)
         try {
             val settings = settingsDataStore.getSnapshot()
-            val api = buildApi(settings.tailscaleServerUrl)
+            val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
             api.upsertActiveRule(
                 ActiveRuleRemoteDto(
                     rule_id = rule.ruleId,
@@ -409,6 +433,11 @@ class SyncRepository @Inject constructor(
                 synced_at = System.currentTimeMillis()
             )
         )
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        return digest.joinToString("") { byte -> "%02x".format(byte) }
     }
 
     private fun parseIsoToMillis(iso: String, fallback: Long): Long {

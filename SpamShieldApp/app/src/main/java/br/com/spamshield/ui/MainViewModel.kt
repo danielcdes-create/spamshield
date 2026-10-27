@@ -1,10 +1,6 @@
 package br.com.spamshield.ui
 
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
-import android.provider.Settings
-import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import br.com.spamshield.BuildConfig
@@ -22,9 +18,12 @@ import br.com.spamshield.sync.TailscaleNetworkHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -58,6 +57,11 @@ data class ApkUpdateUiState(
         get() = remoteVersionCode != null && remoteVersionCode > installedVersionCode
 }
 
+sealed class ApkInstallEvent {
+    data object NeedsUnknownSourcesPermission : ApkInstallEvent()
+    data class ReadyToInstall(val apkFile: File) : ApkInstallEvent()
+}
+
 @HiltViewModel
 class MainViewModel @Inject constructor(
     @ApplicationContext private val appContext: Context,
@@ -67,6 +71,9 @@ class MainViewModel @Inject constructor(
     private val spamScoringEngine: SpamScoringEngine,
     private val callHistoryAnalyzer: CallHistoryAnalyzer
 ) : ViewModel() {
+
+    private val _apkInstallEvents = MutableSharedFlow<ApkInstallEvent>(extraBufferCapacity = 1)
+    val apkInstallEvents: SharedFlow<ApkInstallEvent> = _apkInstallEvents.asSharedFlow()
 
     private val json = Json {
         prettyPrint = true
@@ -215,21 +222,13 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun downloadAndInstallApk(context: Context) {
+    fun downloadAndInstallApk() {
         viewModelScope.launch {
-            if (!context.packageManager.canRequestPackageInstalls()) {
-                runCatching {
-                    val permIntent = Intent(
-                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                        Uri.parse("package:${context.packageName}")
-                    ).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    context.startActivity(permIntent)
-                }
+            if (!appContext.packageManager.canRequestPackageInstalls()) {
                 _apkUpdateState.value = _apkUpdateState.value.copy(
                     statusMessage = "Autorize 'Instalar apps desconhecidos' para o SpamShield BR e toque novamente em Atualizar."
                 )
+                _apkInstallEvents.emit(ApkInstallEvent.NeedsUnknownSourcesPermission)
                 return@launch
             }
 
@@ -237,12 +236,12 @@ class MainViewModel @Inject constructor(
                 isDownloading = true,
                 statusMessage = "Baixando APK via Tailscale..."
             )
-            val updatesDir = File(context.getExternalFilesDir(null) ?: context.filesDir, "updates")
+            val updatesDir = File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, "updates")
             val apkFile = syncRepository.downloadApkUpdate(updatesDir)
             if (apkFile == null || !apkFile.exists()) {
                 _apkUpdateState.value = _apkUpdateState.value.copy(
                     isDownloading = false,
-                    statusMessage = "Falha ao baixar o APK do servidor Tailscale."
+                    statusMessage = "Falha ao baixar o APK ou o checksum SHA-256 não confere."
                 )
                 return@launch
             }
@@ -251,24 +250,7 @@ class MainViewModel @Inject constructor(
                 isDownloading = false,
                 statusMessage = "APK baixado (${apkFile.length() / 1024} KB). Abrindo instalador do Android..."
             )
-
-            runCatching {
-                val apkUri = FileProvider.getUriForFile(
-                    context,
-                    "${context.packageName}.fileprovider",
-                    apkFile
-                )
-                val installIntent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(apkUri, "application/vnd.android.package-archive")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(installIntent)
-            }.onFailure { err ->
-                _apkUpdateState.value = _apkUpdateState.value.copy(
-                    statusMessage = "Erro ao abrir instalador: ${err.localizedMessage}"
-                )
-            }
+            _apkInstallEvents.emit(ApkInstallEvent.ReadyToInstall(apkFile))
         }
     }
 
@@ -284,6 +266,12 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             settingsDataStore.setTailscaleServerUrl(url)
             refreshTailscaleStatus()
+        }
+    }
+
+    fun setApiBearerToken(token: String) {
+        viewModelScope.launch {
+            settingsDataStore.setApiBearerToken(token)
         }
     }
 

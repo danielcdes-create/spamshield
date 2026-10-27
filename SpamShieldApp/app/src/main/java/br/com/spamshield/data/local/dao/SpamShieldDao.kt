@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import br.com.spamshield.data.local.entity.ActiveRuleEntity
 import br.com.spamshield.data.local.entity.AnatelPrefixEntity
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
@@ -192,6 +193,12 @@ interface SpamShieldDao {
 
     @Query("DELETE FROM prefix_quarantine")
     suspend fun clearAllQuarantines()
+
+    @Transaction
+    suspend fun replaceAllQuarantines(items: List<PrefixQuarantineEntity>) {
+        clearAllQuarantines()
+        insertQuarantines(items)
+    }
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertQuarantines(items: List<PrefixQuarantineEntity>)

@@ -127,6 +127,7 @@ data class ApkInfoResponseDto(
     val version_code: Int = 1,
     val version_name: String = "1.0.0",
     val size_bytes: Long = 0L,
+    val sha256_checksum: String = "",
     val download_path: String = "/apk"
 )
 
@@ -136,6 +137,12 @@ data class ProviderSyncSummaryDto(
     val blacklist_clusters_synced: Int = 0,
     val rules_synced: Int = 0,
     val sources: List<String> = emptyList()
+)
+
+@Serializable
+data class QuarantineBatchResponseDto(
+    val upserted: Int = 0,
+    val received: Int = 0
 )
 
 interface SpamShieldApi {
@@ -175,6 +182,11 @@ interface SpamShieldApi {
     suspend fun upsertQuarantine(
         @Body quarantine: PrefixQuarantineRemoteDto
     ): PrefixQuarantineRemoteDto
+
+    @POST("/api/v1/quarantine/batch")
+    suspend fun upsertQuarantineBatch(
+        @Body quarantines: List<PrefixQuarantineRemoteDto>
+    ): QuarantineBatchResponseDto
 
     @DELETE("/api/v1/quarantine/{prefix7}")
     suspend fun deleteQuarantine(

@@ -23,6 +23,7 @@ data class SpamShieldSettings(
     val shadowModeEnabled: Boolean = false,
     val blockThresholdScore: Int = 70,
     val tailscaleServerUrl: String = "http://100.83.253.15:8080",
+    val apiBearerToken: String = "",
     val hideBlockedFromSystemCallLog: Boolean = false,
     val userDdd: String = "31",
     val lastSyncTimestamp: Long = 0L
@@ -43,6 +44,7 @@ class SettingsDataStore internal constructor(
         val KEY_SHADOW_MODE = booleanPreferencesKey("shadow_mode_enabled")
         val KEY_BLOCK_THRESHOLD = intPreferencesKey("block_threshold_score")
         val KEY_TAILSCALE_URL = stringPreferencesKey("tailscale_server_url")
+        val KEY_API_BEARER = stringPreferencesKey("api_bearer_token")
         val KEY_HIDE_FROM_CALL_LOG = booleanPreferencesKey("hide_blocked_from_system_call_log")
         val KEY_USER_DDD = stringPreferencesKey("user_ddd")
         val KEY_LAST_SYNC_TS = longPreferencesKey("last_sync_timestamp")
@@ -53,6 +55,7 @@ class SettingsDataStore internal constructor(
             shadowModeEnabled = prefs[KEY_SHADOW_MODE] ?: false,
             blockThresholdScore = prefs[KEY_BLOCK_THRESHOLD] ?: 70,
             tailscaleServerUrl = prefs[KEY_TAILSCALE_URL] ?: "http://100.83.253.15:8080",
+            apiBearerToken = prefs[KEY_API_BEARER] ?: "",
             hideBlockedFromSystemCallLog = prefs[KEY_HIDE_FROM_CALL_LOG] ?: false,
             userDdd = prefs[KEY_USER_DDD] ?: "31",
             lastSyncTimestamp = prefs[KEY_LAST_SYNC_TS] ?: 0L
@@ -71,6 +74,10 @@ class SettingsDataStore internal constructor(
 
     suspend fun setTailscaleServerUrl(url: String) {
         context?.dataStore?.edit { it[KEY_TAILSCALE_URL] = url.trim().removeSuffix("/") }
+    }
+
+    suspend fun setApiBearerToken(token: String) {
+        context?.dataStore?.edit { it[KEY_API_BEARER] = token.trim() }
     }
 
     suspend fun setHideBlockedFromSystemCallLog(hide: Boolean) {

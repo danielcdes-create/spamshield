@@ -466,4 +466,95 @@ class SpamScoringEngineTest {
         assertEquals(0, tele?.callDurationSec)
         assertFalse(tele!!.triggeredRulesJson.contains("SYSTEM_CALLLOG_BLOCKED"))
     }
+
+    @Test
+    fun `two missed calls from one ordinary number do not insert UNANSWERED_SPAM_BURST`() = runTest {
+        val fakeDao = FakeSpamShieldDao()
+        val now = 1_700_000_200_000L
+        val number = "+5511987600001"
+        fakeDao.insertTelemetry(missedCall("ordinary-1", number, "11987600", "MOBILE", "TIM", now - 20_000L))
+        fakeDao.insertTelemetry(missedCall("ordinary-2", number, "11987600", "MOBILE", "TIM", now - 5_000L))
+        val engine = SpamScoringEngine(fakeDao, br.com.spamshield.data.local.SettingsDataStore(), FakeContactLookup())
+
+        val changed = engine.evaluatePostCallLogVerdict(
+            normalizedNumber = number,
+            callType = android.provider.CallLog.Calls.MISSED_TYPE,
+            callDurationSec = 0,
+            nowMillis = now
+        )
+
+        assertFalse(changed)
+        assertTrue(fakeDao.getAllQuarantines().none { it.reason == "UNANSWERED_SPAM_BURST" && it.prefix7 == "11987600" })
+    }
+
+    @Test
+    fun `two missed calls from a VoIP number still insert UNANSWERED_SPAM_BURST`() = runTest {
+        val fakeDao = FakeSpamShieldDao()
+        val now = 1_700_000_300_000L
+        val number = "+551141011111"
+        fakeDao.insertTelemetry(missedCall("voip-1", number, "11410111", "FIXED_OR_VOIP", "VoIP", now - 20_000L))
+        fakeDao.insertTelemetry(missedCall("voip-2", number, "11410111", "FIXED_OR_VOIP", "VoIP", now - 5_000L))
+        val engine = SpamScoringEngine(fakeDao, br.com.spamshield.data.local.SettingsDataStore(), FakeContactLookup())
+
+        val changed = engine.evaluatePostCallLogVerdict(
+            normalizedNumber = number,
+            callType = android.provider.CallLog.Calls.MISSED_TYPE,
+            callDurationSec = 0,
+            nowMillis = now
+        )
+
+        assertTrue(changed)
+        val quarantine = fakeDao.getActiveQuarantineForPrefix("11410111", "1141011", now)
+        assertEquals("UNANSWERED_SPAM_BURST", quarantine?.reason)
+    }
+
+    @Test
+    fun `three distinct ordinary numbers in the prefix window insert UNANSWERED_SPAM_BURST`() = runTest {
+        val fakeDao = FakeSpamShieldDao()
+        val now = 1_700_000_400_000L
+        val numbers = listOf("+5521900000011", "+5521900000022", "+5521900000033")
+        numbers.forEachIndexed { index, number ->
+            fakeDao.insertTelemetry(
+                missedCall("distinct-$index", number, "21900000", "MOBILE", "TIM", now - (30_000L - index * 1_000L))
+            )
+        }
+        val engine = SpamScoringEngine(fakeDao, br.com.spamshield.data.local.SettingsDataStore(), FakeContactLookup())
+
+        val changed = engine.evaluatePostCallLogVerdict(
+            normalizedNumber = numbers.last(),
+            callType = android.provider.CallLog.Calls.MISSED_TYPE,
+            callDurationSec = 0,
+            nowMillis = now
+        )
+
+        assertTrue(changed)
+        val quarantine = fakeDao.getActiveQuarantineForPrefix("21900000", "2190000", now)
+        assertEquals("UNANSWERED_SPAM_BURST", quarantine?.reason)
+    }
+
+    private fun missedCall(
+        id: String,
+        normalizedNumber: String,
+        prefix7: String,
+        lineType: String,
+        carrier: String,
+        timestamp: Long
+    ) = CallTelemetryEntity(
+        id = id,
+        timestamp = timestamp,
+        rawNumber = normalizedNumber,
+        normalizedNumber = normalizedNumber,
+        ddd = prefix7.take(2),
+        prefix7 = prefix7,
+        carrierGuess = carrier,
+        lineType = lineType,
+        stirShakenStatus = "NOT_VERIFIED",
+        finalScore = 25,
+        thresholdApplied = 70,
+        outcome = "ALLOWED_LOW_SCORE",
+        category = "UNKNOWN_UNVERIFIED",
+        processingLatencyMs = 1.0,
+        shadowModeActive = false,
+        triggeredRulesJson = """[{"rule_id":"NOT_IN_CONTACTS","weight":25}]"""
+    )
 }

@@ -38,6 +38,43 @@ class SpamScoringEngine @Inject constructor(
         const val OUTBOUND_GRACE_WINDOW_MS = 2L * 60 * 60 * 1000L // 2 hours
         const val NEIGHBORHOOD_BURST_WINDOW_MS = 24L * 60 * 60 * 1000L // 24 hours
         const val QUARANTINE_DEFAULT_TTL_MS = 7L * 24 * 60 * 60 * 1000L // 7 days
+
+        /**
+         * Two missed calls from one ordinary number do not quarantine.
+         * A VoIP or robocall-like number still quarantines at the previous threshold of 2.
+         * Three distinct numbers in the prefix window still quarantine.
+         */
+        fun shouldQuarantineUnansweredBurst(
+            recentCallsSameNumber: Int,
+            distinctNumbersInPrefix: Int,
+            voipOrRobocall: Boolean
+        ): Boolean {
+            if (voipOrRobocall && (recentCallsSameNumber >= 2 || distinctNumbersInPrefix >= 2)) {
+                return true
+            }
+            return distinctNumbersInPrefix >= 3
+        }
+
+        fun isVoipOrRobocallLike(
+            lineType: String,
+            carrierGuess: String?,
+            triggeredRulesJson: String
+        ): Boolean {
+            if (lineType == "FIXED_OR_VOIP" || lineType == "TOLL_FREE_OR_SPECIAL") return true
+            if (PhoneNormalizer.isVoipPrefixOrSubscriber(
+                    subscriber = "",
+                    prefix7 = "",
+                    rawCarrier = carrierGuess,
+                    isCorporatePabx = false
+                )
+            ) {
+                return true
+            }
+            return triggeredRulesJson.contains("PING_CALL") ||
+                triggeredRulesJson.contains("REGEX_") ||
+                triggeredRulesJson.contains("ROBOCALL") ||
+                triggeredRulesJson.contains("STIR_SHAKEN_FAILED")
+        }
     }
 
     suspend fun evaluateIncomingCall(
@@ -601,7 +638,12 @@ class SpamScoringEngine @Inject constructor(
             }
             val recentCallsSameNum = dao.countRecentCallsFromNumber(latest.normalizedNumber, nowMillis - NEIGHBORHOOD_BURST_WINDOW_MS)
 
-            if (recentCallsSameNum >= 2 || recentCallsInPrefix >= 2) {
+            val voipOrRobocall = isVoipOrRobocallLike(
+                latest.lineType,
+                latest.carrierGuess,
+                latest.triggeredRulesJson
+            )
+            if (shouldQuarantineUnansweredBurst(recentCallsSameNum, recentCallsInPrefix, voipOrRobocall)) {
                 if (qPrefix.isNotEmpty()) {
                     val existingQ = dao.getActiveQuarantineForPrefix(
                         prefix8 = qPrefix,

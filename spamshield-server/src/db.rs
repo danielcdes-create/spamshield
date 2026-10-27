@@ -3,8 +3,8 @@ use crate::models::{ActiveRuleDoc, AnatelNumberingPlanDoc, LineType, PrefixQuara
 use bson::{doc, Bson, DateTime as BsonDateTime, Document};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use mongodb::{
-    options::{ClientOptions, CreateIndexOptions, IndexOptions, UpdateOptions},
-    Client, Collection, Database, IndexModel,
+    options::{ClientOptions, CreateIndexOptions, IndexOptions, UpdateOneModel, UpdateOptions},
+    Client, Collection, Database, IndexModel, Namespace,
 };
 use std::time::Duration as StdDuration;
 use tracing::{info, warn};
@@ -67,6 +67,36 @@ impl AppDatabase {
 
     pub fn anatel_numbering_plan(&self) -> Collection<Document> {
         self.db.collection::<Document>("anatel_numbering_plan")
+    }
+
+    pub fn migration_markers(&self) -> Collection<Document> {
+        self.db.collection::<Document>("_migrations")
+    }
+
+    pub fn rule_weight_approvals(&self) -> Collection<Document> {
+        self.db.collection::<Document>("rule_weight_approvals")
+    }
+
+    /// One MongoDB bulk write for a batch of single-document updates.
+    pub async fn bulk_update_ones(
+        &self,
+        collection: &str,
+        updates: Vec<(Document, Document, bool)>,
+    ) -> Result<u64, mongodb::error::Error> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+        let namespace = Namespace::new(self.db.name(), collection);
+        let models = updates.into_iter().map(|(filter, update, upsert)| {
+            UpdateOneModel::builder()
+                .namespace(namespace.clone())
+                .filter(filter)
+                .update(update)
+                .upsert(upsert)
+                .build()
+        });
+        let result = self.client.bulk_write(models).await?;
+        Ok((result.modified_count + result.upserted_count).max(0) as u64)
     }
 
     /// Executes the exact initialization from `init_mongodb.mongodb.js`:
@@ -508,6 +538,13 @@ impl AppDatabase {
         Ok(())
     }
 
+    pub const HISTORICAL_REGEX_MIGRATION_ID: &'static str = "historical_regex_v1";
+
+    /// A marker that is already recorded means the regex migration must not run again.
+    pub fn historical_migration_should_run(marker_present: bool) -> bool {
+        !marker_present
+    }
+
     /// Retroactively normalizes and re-classifies all historical records in MongoDB Atlas
     /// (`call_telemetry`, `prefix_quarantine`, and `anatel_numbering_plan`):
     /// - Splits "VoIP / Fixo" into distinct "VoIP" vs "Fixo" categories.
@@ -516,6 +553,18 @@ impl AppDatabase {
     /// - Fixes 0411140043535 (VoIP), 004131939995971 (TIM), 03110315 (VoIP), 031988644641 (BLOCKED),
     ///   and revokes improper ALLOWED_EMERGENCY_REPEAT on non-mobile / STIR_FAILED / quarantined numbers.
     pub async fn migrate_historical_records(&self) -> Result<(), mongodb::error::Error> {
+        let marker = self
+            .migration_markers()
+            .find_one(doc! { "_id": Self::HISTORICAL_REGEX_MIGRATION_ID })
+            .await?;
+        if !Self::historical_migration_should_run(marker.is_some()) {
+            info!(
+                "Skipping historical regex migration; marker {} is already recorded",
+                Self::HISTORICAL_REGEX_MIGRATION_ID
+            );
+            return Ok(());
+        }
+
         let telemetry_coll = self.call_telemetry();
         let quarantine_coll = self.prefix_quarantine();
         let anatel_coll = self.anatel_numbering_plan();
@@ -752,6 +801,13 @@ impl AppDatabase {
                 },
             )
             .await;
+
+        self.migration_markers()
+            .insert_one(doc! {
+                "_id": Self::HISTORICAL_REGEX_MIGRATION_ID,
+                "applied_at": BsonDateTime::now(),
+            })
+            .await?;
 
         Ok(())
     }

@@ -1,6 +1,5 @@
-use crate::db::{
-    parse_active_rule, parse_anatel_doc, parse_prefix_quarantine, AppDatabase,
-};
+use super::AppState;
+use crate::db::{parse_active_rule, parse_anatel_doc, parse_prefix_quarantine};
 use crate::models::{
     ActiveRuleDoc, AnatelNumberingPlanDoc, PrefixQuarantineDoc, SyncPayloadQuery,
     SyncPayloadResponse,
@@ -19,9 +18,10 @@ use serde_json::{json, Value};
 /// GET /api/v1/sync/payload?ddd=31&since_timestamp=1700000000
 /// Returns active rules (`enabled: true`), active `prefix_quarantine`, and `anatel_numbering_plan`.
 pub async fn get_sync_payload(
-    State(db): State<AppDatabase>,
+    State(state): State<AppState>,
     Query(query): Query<SyncPayloadQuery>,
 ) -> Result<Json<SyncPayloadResponse>, (StatusCode, String)> {
+    let db = &state.db;
     // 1. Active rules (enabled: true) sorted by priority ascending
     let rules_cursor = db
         .active_rules()
@@ -97,9 +97,10 @@ pub async fn get_sync_payload(
 
 /// POST /api/v1/rules
 pub async fn upsert_active_rule(
-    State(db): State<AppDatabase>,
+    State(state): State<AppState>,
     Json(rule): Json<ActiveRuleDoc>,
 ) -> Result<Json<ActiveRuleDoc>, (StatusCode, String)> {
+    let db = &state.db;
     let pattern_bson = match &rule.pattern {
         Some(p) => Bson::String(p.clone()),
         None => Bson::Null,
@@ -129,33 +130,13 @@ pub async fn upsert_active_rule(
 
 /// POST /api/v1/quarantine
 pub async fn upsert_quarantine(
-    State(db): State<AppDatabase>,
+    State(state): State<AppState>,
     Json(q): Json<PrefixQuarantineDoc>,
 ) -> Result<Json<PrefixQuarantineDoc>, (StatusCode, String)> {
-    let carrier_bson = match &q.carrier_guess {
-        Some(c) => Bson::String(c.clone()),
-        None => Bson::Null,
-    };
-
+    let db = &state.db;
+    let (filter, update) = quarantine_upsert_parts(&q);
     db.prefix_quarantine()
-        .update_one(
-            doc! { "prefix_7": &q.prefix_7 },
-            doc! {
-                "$set": {
-                    "ddd": &q.ddd,
-                    "carrier_guess": carrier_bson,
-                    "hit_count": q.hit_count,
-                    "penalty_weight": q.penalty_weight,
-                    "reason": &q.reason,
-                    "last_seen_at": BsonDateTime::from_chrono(q.last_seen_at),
-                    "expires_at": BsonDateTime::from_chrono(q.expires_at),
-                },
-                "$setOnInsert": {
-                    "distinct_numbers_seen": &q.distinct_numbers_seen,
-                    "first_seen_at": BsonDateTime::from_chrono(q.first_seen_at),
-                }
-            },
-        )
+        .update_one(filter, update)
         .with_options(UpdateOptions::builder().upsert(true).build())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -163,11 +144,58 @@ pub async fn upsert_quarantine(
     Ok(Json(q))
 }
 
+fn quarantine_upsert_parts(q: &PrefixQuarantineDoc) -> (Document, Document) {
+    let carrier_bson = match &q.carrier_guess {
+        Some(c) => Bson::String(c.clone()),
+        None => Bson::Null,
+    };
+    (
+        doc! { "prefix_7": &q.prefix_7 },
+        doc! {
+            "$set": {
+                "ddd": &q.ddd,
+                "carrier_guess": carrier_bson,
+                "hit_count": q.hit_count,
+                "penalty_weight": q.penalty_weight,
+                "reason": &q.reason,
+                "last_seen_at": BsonDateTime::from_chrono(q.last_seen_at),
+                "expires_at": BsonDateTime::from_chrono(q.expires_at),
+            },
+            "$setOnInsert": {
+                "distinct_numbers_seen": &q.distinct_numbers_seen,
+                "first_seen_at": BsonDateTime::from_chrono(q.first_seen_at),
+            }
+        },
+    )
+}
+
+/// POST /api/v1/quarantine/batch
+/// One bulk write for the whole list.
+pub async fn upsert_quarantine_batch(
+    State(state): State<AppState>,
+    Json(items): Json<Vec<PrefixQuarantineDoc>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let updates = items
+        .iter()
+        .map(|q| {
+            let (filter, update) = quarantine_upsert_parts(q);
+            (filter, update, true)
+        })
+        .collect();
+    let upserted = state
+        .db
+        .bulk_update_ones("prefix_quarantine", updates)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(json!({ "upserted": upserted, "received": items.len() })))
+}
+
 /// DELETE /api/v1/quarantine/:prefix7
 pub async fn delete_quarantine(
-    State(db): State<AppDatabase>,
+    State(state): State<AppState>,
     Path(prefix7): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    let db = &state.db;
     let res = db
         .prefix_quarantine()
         .delete_one(doc! { "prefix_7": &prefix7 })

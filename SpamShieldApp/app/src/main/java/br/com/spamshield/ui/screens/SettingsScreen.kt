@@ -34,6 +34,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -66,10 +67,11 @@ fun SettingsScreen(
     onSyncAnatelProviders: () -> Unit,
     onSimulateAttack: (String, String) -> Unit,
     onSaveTailscaleUrl: (String) -> Unit,
+    onSaveApiBearerToken: (String) -> Unit,
     onChangeThreshold: (Int) -> Unit,
     onToggleSkipCallLog: (Boolean) -> Unit,
     onCheckApkUpdate: () -> Unit,
-    onDownloadAndInstallApk: (android.content.Context) -> Unit,
+    onDownloadAndInstallApk: () -> Unit,
     onExportFiles: suspend () -> Pair<File, File>
 ) {
     val context = LocalContext.current
@@ -78,6 +80,9 @@ fun SettingsScreen(
 
     var urlText by remember(settings.tailscaleServerUrl) {
         mutableStateOf(settings.tailscaleServerUrl)
+    }
+    var apiKeyText by remember(settings.apiBearerToken) {
+        mutableStateOf(settings.apiBearerToken)
     }
     var sliderValue by remember(settings.blockThresholdScore) {
         mutableFloatStateOf(settings.blockThresholdScore.toFloat())
@@ -280,7 +285,7 @@ fun SettingsScreen(
                     }
 
                     Button(
-                        onClick = { onDownloadAndInstallApk(context) },
+                        onClick = onDownloadAndInstallApk,
                         enabled = !apkUpdateState.isDownloading,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (apkUpdateState.hasNewerVersion) Color(0xFF22C55E) else MaterialTheme.colorScheme.primary
@@ -320,6 +325,20 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
+                OutlinedTextField(
+                    value = apiKeyText,
+                    onValueChange = { apiKeyText = it },
+                    label = { Text("Chave Bearer da API") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation()
+                )
+                Button(
+                    onClick = { onSaveApiBearerToken(apiKeyText) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Salvar chave")
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = { onSaveTailscaleUrl(urlText) },

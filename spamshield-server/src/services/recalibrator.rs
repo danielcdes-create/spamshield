@@ -4,6 +4,55 @@ use chrono::{Duration, Utc};
 use mongodb::options::UpdateOptions;
 use tracing::info;
 
+/// Global rule weight changes only when the sampled false-positive rate is
+/// strictly above 5% and an administrative approval for that change is recorded.
+/// One vote, or a rate at or below 5%, or a missing approval, leaves the weight unchanged.
+pub fn next_global_rule_weight(
+    current_weight: i32,
+    false_positive_count: u64,
+    sample_count: u64,
+    admin_approved: bool,
+) -> Option<i32> {
+    if !admin_approved || sample_count == 0 {
+        return None;
+    }
+    let rate = (false_positive_count as f64) / (sample_count as f64);
+    if rate > 0.05 && current_weight > 15 {
+        Some((current_weight - 5).max(15))
+    } else {
+        None
+    }
+}
+
+async fn rule_feedback_counts(
+    db: &AppDatabase,
+    rule_id: &str,
+) -> Result<(u64, u64), mongodb::error::Error> {
+    let sample = db
+        .call_telemetry()
+        .count_documents(doc! { "decision_vector.triggered_rules.rule_id": rule_id })
+        .await?;
+    let false_positives = db
+        .call_telemetry()
+        .count_documents(doc! {
+            "decision_vector.triggered_rules.rule_id": rule_id,
+            "audit.user_feedback": "FALSE_POSITIVE"
+        })
+        .await?;
+    Ok((false_positives, sample))
+}
+
+async fn weight_change_approved(
+    db: &AppDatabase,
+    rule_id: &str,
+) -> Result<bool, mongodb::error::Error> {
+    let recorded = db
+        .rule_weight_approvals()
+        .find_one(doc! { "_id": rule_id, "approved": true })
+        .await?;
+    Ok(recorded.is_some())
+}
+
 /// Recalibrates rule weights and prefix quarantine when a call is marked as FALSE_POSITIVE.
 /// Returns (removed_quarantine_prefix, recalibrated_rule_ids).
 pub async fn handle_false_positive(
@@ -51,8 +100,15 @@ pub async fn handle_false_positive(
                             .await?
                         {
                             let current_weight = doc_get_i32(&active_rule, "weight", 50);
-                            if current_weight > 15 {
-                                let new_weight = (current_weight - 5).max(15);
+                            let (false_positives, sample_count) =
+                                rule_feedback_counts(db, rule_id).await?;
+                            let approved = weight_change_approved(db, rule_id).await?;
+                            if let Some(new_weight) = next_global_rule_weight(
+                                current_weight,
+                                false_positives,
+                                sample_count,
+                                approved,
+                            ) {
                                 db.active_rules()
                                     .update_one(
                                         doc! { "rule_id": rule_id },

@@ -1,4 +1,4 @@
-use crate::db::AppDatabase;
+use super::AppState;
 use crate::models::{
     AnalyticsSummaryResponse, CarrierStatItem, CategoryStatItem, HourlyHeatmapItem, PrefixStatItem,
 };
@@ -14,8 +14,9 @@ use futures::TryStreamExt;
 /// - Category distribution
 /// - Hourly heatmap (00h..23h)
 pub async fn get_analytics_summary(
-    State(db): State<AppDatabase>,
+    State(state): State<AppState>,
 ) -> Result<Json<AnalyticsSummaryResponse>, (StatusCode, String)> {
+    let db = &state.db;
     let pipeline = vec![doc! {
         "$facet": {
             "totals": [

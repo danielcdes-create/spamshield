@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let app = routes::create_router(app_db);
+    let app = routes::create_router(routes::AppState::new(&cfg, app_db));
     let listener = TcpListener::bind(&cfg.server_bind_addr).await?;
     info!(
         "SpamShield BR Server listening on http://{} (Tailscale: http://{}:8080)",
@@ -167,12 +167,14 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
         assert!(collections.contains(&"prefix_quarantine".to_string()));
         assert!(collections.contains(&"anatel_numbering_plan".to_string()));
 
-        let router = routes::create_router(app_db.clone());
+        let router = routes::create_router(routes::AppState::new(&cfg, app_db.clone()));
+        let bearer = format!("Bearer {}", cfg.api_key);
 
         // 1. Test GET /api/v1/sync/payload?ddd=31&since_timestamp=0
         let req = Request::builder()
             .method("GET")
             .uri("/api/v1/sync/payload?ddd=31&since_timestamp=0")
+            .header("authorization", &bearer)
             .body(Body::empty())
             .unwrap();
         let resp = router.clone().oneshot(req).await.unwrap();
@@ -225,6 +227,7 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
         let req_batch = Request::builder()
             .method("POST")
             .uri("/api/v1/telemetry/batch")
+            .header("authorization", &bearer)
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::to_vec(&sample_telemetry).unwrap(),
@@ -244,6 +247,7 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
         let req_patch = Request::builder()
             .method("PATCH")
             .uri(format!("/api/v1/telemetry/{}/feedback", test_id))
+            .header("authorization", &bearer)
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&feedback_req).unwrap()))
             .unwrap();
@@ -257,6 +261,7 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
         let req_analytics = Request::builder()
             .method("GET")
             .uri("/api/v1/analytics/summary")
+            .header("authorization", &bearer)
             .body(Body::empty())
             .unwrap();
         let resp_analytics = router.clone().oneshot(req_analytics).await.unwrap();
@@ -267,5 +272,104 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
             .call_telemetry()
             .delete_one(bson::doc! { "_id": &test_id })
             .await;
+    }
+
+    #[test]
+    fn test_one_false_positive_leaves_weight_unchanged_until_rate_and_approval() {
+        use crate::services::recalibrator::next_global_rule_weight;
+        assert_eq!(next_global_rule_weight(80, 1, 20, false), None);
+        assert_eq!(next_global_rule_weight(80, 6, 100, false), None);
+        assert_eq!(next_global_rule_weight(80, 5, 100, true), None);
+        assert_eq!(next_global_rule_weight(80, 6, 100, true), Some(75));
+    }
+
+    #[test]
+    fn test_historical_migration_already_marked_is_not_executed_again() {
+        assert!(!AppDatabase::historical_migration_should_run(true));
+        assert!(AppDatabase::historical_migration_should_run(false));
+        assert_eq!(
+            AppDatabase::HISTORICAL_REGEX_MIGRATION_ID,
+            "historical_regex_v1"
+        );
+    }
+
+    #[test]
+    fn test_apk_path_resolver_does_not_embed_user_home() {
+        use crate::config::{resolve_apk_metadata_path, resolve_apk_storage_path};
+        let fallback = resolve_apk_storage_path(None);
+        let rendered = fallback.display().to_string();
+        assert!(!rendered.contains("C:\\Users\\danie"));
+        assert!(!rendered.contains("Users\\danie"));
+        let explicit = resolve_apk_storage_path(Some("artifacts/spamshield.apk"));
+        assert_eq!(explicit, std::path::PathBuf::from("artifacts/spamshield.apk"));
+        let meta = resolve_apk_metadata_path(&explicit, None);
+        assert!(meta.ends_with("output-metadata.json"));
+    }
+
+    #[tokio::test]
+    async fn test_apk_info_from_temp_file_includes_sha256() {
+        use crate::routes::{apk_info_for_files, sha256_hex};
+        let dir = std::env::temp_dir().join(format!("spamshield-apk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let apk = dir.join("app.apk");
+        let bytes = b"spamshield-apk-bytes";
+        std::fs::write(&apk, bytes).unwrap();
+        let info = apk_info_for_files(&apk, &dir.join("missing-meta.json")).await;
+        assert_eq!(info["sha256_checksum"], sha256_hex(bytes));
+        assert_eq!(info["size_bytes"], bytes.len() as u64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_bearer_rejects_missing_and_wrong_and_accepts_configured_key() {
+        use mongodb::options::ClientOptions;
+        let mut opts = ClientOptions::parse("mongodb://127.0.0.1:1")
+            .await
+            .expect("parse local uri");
+        opts.server_selection_timeout = Some(std::time::Duration::from_millis(200));
+        opts.connect_timeout = Some(std::time::Duration::from_millis(200));
+        let client = mongodb::Client::with_options(opts).expect("client");
+        let db = AppDatabase {
+            client: client.clone(),
+            db: client.database("spamshield_auth_unit"),
+        };
+        let mut cfg = AppConfig::from_env();
+        cfg.api_key = "unit-test-key".to_string();
+        let router = routes::create_router(routes::AppState::new(&cfg, db));
+
+        let missing = Request::builder()
+            .method("POST")
+            .uri("/api/v1/quarantine")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let missing_resp = router.clone().oneshot(missing).await.unwrap();
+        assert_eq!(missing_resp.status(), StatusCode::UNAUTHORIZED);
+
+        let wrong = Request::builder()
+            .method("GET")
+            .uri("/api/v1/sync/payload")
+            .header("authorization", "Bearer wrong-key")
+            .body(Body::empty())
+            .unwrap();
+        let wrong_resp = router.clone().oneshot(wrong).await.unwrap();
+        assert_eq!(wrong_resp.status(), StatusCode::UNAUTHORIZED);
+
+        assert!(!routes::bearer_is_accepted(None, ""));
+        assert!(!routes::bearer_is_accepted(Some("Bearer unit-test-key"), ""));
+        assert!(routes::bearer_is_accepted(
+            Some("Bearer unit-test-key"),
+            "unit-test-key"
+        ));
+
+        let accepted = Request::builder()
+            .method("GET")
+            .uri("/api/v1/health")
+            .header("authorization", "Bearer unit-test-key")
+            .body(Body::empty())
+            .unwrap();
+        let accepted_resp = router.oneshot(accepted).await.unwrap();
+        assert_ne!(accepted_resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(accepted_resp.status().is_success());
     }
 }

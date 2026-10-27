@@ -2,6 +2,8 @@ package br.com.spamshield.data.local
 
 import androidx.room.Database
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import br.com.spamshield.data.local.dao.SpamShieldDao
 import br.com.spamshield.data.local.entity.ActiveRuleEntity
 import br.com.spamshield.data.local.entity.AnatelPrefixEntity
@@ -17,13 +19,19 @@ import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
         OutboundGraceEntity::class,
         AnatelPrefixEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun spamShieldDao(): SpamShieldDao
 
     companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // No column changes. Existing telemetry, rules, and quarantines stay.
+            }
+        }
+
         fun initialRulesSeed(now: Long = System.currentTimeMillis()): List<ActiveRuleEntity> = listOf(
             ActiveRuleEntity(
                 ruleId = "CONTACT_WHITELIST",

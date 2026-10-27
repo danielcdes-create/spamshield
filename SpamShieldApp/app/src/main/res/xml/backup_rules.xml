@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="database" path="spamshield_edge.db" />
+    <exclude domain="database" path="spamshield_edge.db-shm" />
+    <exclude domain="database" path="spamshield_edge.db-wal" />
+    <exclude domain="file" path="datastore/spamshield_prefs.preferences_pb" />
+</full-backup-content>
