@@ -103,16 +103,50 @@ Ecossistema privado de defesa em borda (`< 2 ms`), telemetria vetorial e intelig
 ## 3. Como Compilar e Executar
 
 ### 3.1. Servidor Rust (`spamshield-server`)
+Você pode iniciar todo o ambiente (Proxy Tailscale + Servidor Rust) com um único comando na raiz do projeto:
 ```powershell
+.\iniciar-servidor.ps1
+```
+
+Ou manualmente passo a passo:
+```powershell
+# 1. Garante o proxy do Tailscale ativo no Windows
+& "C:\Program Files\Tailscale\tailscale.exe" serve --bg --tcp 8080 tcp://127.0.0.1:8080
+
+# 2. Inicia o servidor Rust
 cd C:\Users\danie\spamshield\spamshield-server
-Copy-Item .env.example .env
-# Configure MONGODB_URI e MONGODB_DIRECT_URI no arquivo .env
 cargo test
 cargo run
 ```
+
+> **Atenção:** Se houver alterações em rotas públicas ou modelos, certifique-se de recompilar o binário com `cargo build` antes de executar o executável direto.
 
 ### 3.2. Aplicativo Android (`SpamShieldApp`)
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\Users\danie\spamshield\SpamShieldApp\build-android.ps1
 ```
 O script executa os testes unitários (`testDebugUnitTest`), compila o APK (`assembleDebug`) e publica os artefatos em `SpamShieldApp\dist\SpamShieldBR-debug.apk` e `SpamShieldApp\dist\apk-info.json` para distribuição imediata via OTA no Tailscale (`http://100.83.253.15:8080/apk`).
+
+---
+
+## 4. Guia Operacional Tailscale e Lições Aprendidas
+
+### 4.1. Proxy Userspace Obrigatório (`tailscale serve`) no Windows
+No Windows, se houver outras VPNs ativas (como NordVPN / adaptador `NordLynx`) ou políticas WFP restritivas, pacotes TCP direcionados diretamente para o IP da interface virtual Tailscale (`100.83.253.15:8080`) são descartados pelo sistema operacional, gerando timeout de 10 segundos no celular (`failed to connect ... after 10000ms`).
+
+**Procedimento de ativação do proxy da porta 8080:**
+```powershell
+& "C:\Program Files\Tailscale\tailscale.exe" serve --bg --tcp 8080 tcp://127.0.0.1:8080
+```
+- Esse comando configura o `tailscaled` para escutar na interface Tailscale (`100.83.253.15:8080` e `gbp360.tail1093e7.ts.net:8080`) e repassar o tráfego de forma confiável para o servidor Rust em `127.0.0.1:8080`.
+- **Nunca desative este proxy** (`tailscale serve --tcp 8080 off`) sob risco de quebrar o canal de sincronização do aplicativo móvel.
+
+### 4.2. Autenticação Bearer Obrigatória
+A partir da versão v1.2.9 (Build 13), os endpoints privados da API (`/api/v1/telemetry/batch`, `/api/v1/sync/payload`, `/api/v1/quarantine`, etc.) exigem a chave de segurança configurada em `SPAMSHIELD_API_KEY`:
+1. No aplicativo móvel, vá até a aba **Tailscale**.
+2. No card **Endpoint Tailscale (Servidor Rust Axum)**, preencha o campo **Chave Bearer da API** com o token correspondente.
+3. Toque em **Salvar chave**. Sem isso, qualquer sincronização é recusada pelo servidor com `HTTP 401 Unauthorized`.
+
+### 4.3. Indicadores Visuais de Conexão no Dashboard
+- **Bolinha Verde (`🟢 Tailscale 100.77.79.105`):** A VPN do Tailscale está conectada no celular (`Transport.VPN`) e com rota ativa para o nó do servidor (`100.83.253.15`).
+- **Bolinha Vermelha (`🔴 Tailscale 100.67.x.y`):** A VPN do Tailscale no celular está desconectada (por exemplo, após troca de rede, modo de economia de bateria ou inicialização do sistema). O IP `100.67...` exibido é o CGNAT atribuído pela operadora de telefonia celular (Claro/Vivo/TIM), e não alcança a rede privada Tailscale. Basta abrir o aplicativo Tailscale no celular e religar a chave.
