@@ -1,0 +1,62 @@
+{
+  "version": "1.3.1",
+  "build": 15,
+  "android": {
+    "tests": 44,
+    "failures": 0,
+    "suites": [
+      {
+        "name": "br.com.spamshield.domain.DecisionTraceTest",
+        "tests": "8",
+        "failures": "0",
+        "errors": "0"
+      },
+      {
+        "name": "br.com.spamshield.domain.NtSpamshield2026001Test",
+        "tests": "17",
+        "failures": "0",
+        "errors": "0"
+      },
+      {
+        "name": "br.com.spamshield.domain.PhoneNormalizerTest",
+        "tests": "8",
+        "failures": "0",
+        "errors": "0"
+      },
+      {
+        "name": "br.com.spamshield.domain.SpamScoringEngineTest",
+        "tests": "11",
+        "failures": "0",
+        "errors": "0"
+      }
+    ]
+  },
+  "rust": {
+    "passed": 8,
+    "failed": 0,
+    "ignored": 1,
+    "integration_guard": "Ignored MongoDB integration requires database name ending in _test; no operational DB writes in these validation runs."
+  },
+  "host_sqlite_checks": [
+    "actual 3-to-4 migration DDL preserves legacy rows",
+    "INSERT OR IGNORE preserves original event by ID",
+    "pending events select already-synced call",
+    "acknowledging sent snapshot leaves newer event pending",
+    "expected journal indexes present"
+  ],
+  "apk": {
+    "path": "C:\\Users\\danie\\spamshield\\SpamShieldApp\\app\\build\\outputs\\apk\\debug\\app-debug.apk",
+    "size_bytes": 61396039,
+    "sha256": "15e5a783c6489c783f9ec35fd8841be0b50d9598bd43ebde37ea9ba09a554edf"
+  },
+  "deployment": {
+    "ota_published": false,
+    "phone_installed": false,
+    "running_server_updated": false
+  },
+  "limits": [
+    "Physical Android calls unverified",
+    "MongoDB integration/pipeline not run against a live database in this implementation turn",
+    "Original decisions before this version cannot be reconstructed"
+  ]
+}

@@ -9,6 +9,9 @@ import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
 import br.com.spamshield.domain.TelemetrySyncScheduler
 import br.com.spamshield.domain.UserFeedbackAudit
+import br.com.spamshield.domain.DecisionTrace
+import br.com.spamshield.data.remote.toRemoteEvent
+import br.com.spamshield.data.local.entity.CallDecisionEventEntity
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
 import br.com.spamshield.data.remote.ActiveRuleRemoteDto
 import br.com.spamshield.data.remote.ApkInfoResponseDto
@@ -173,10 +176,19 @@ class SyncRepository @Inject constructor(
             while (true) {
                 val pending = dao.getPendingTelemetry().take(100)
                 if (pending.isEmpty()) break
-                val batchDtos = pending.map { it.toRemoteDto() }
+                val events = pending.associate { it.id to dao.getDecisionEvents(it.id) }
+                val batchDtos = pending.map { it.toRemoteDto(events[it.id].orEmpty()) }
                 val batchResp = api.postTelemetryBatch(batchDtos)
                 if (batchResp.accepted_ids.isNotEmpty()) {
                     dao.markTelemetrySynced(batchResp.accepted_ids)
+                    // Acknowledge only the snapshot actually sent; concurrent events stay pending.
+                    val sentEvents = batchResp.accepted_ids.flatMap { events[it].orEmpty() }
+                    val acknowledged = sentEvents.map { it.eventId }.intersect(batchResp.accepted_event_ids.toSet())
+                    dao.markDecisionEventsSynced(acknowledged.toList())
+                    if (sentEvents.any { it.syncStatus == "PENDING" && it.eventId !in acknowledged }) {
+                        return@withContext SyncOutcome(success = false, pushedTelemetryCount = pushedCount,
+                            message = "Eventos preservados no aparelho: o servidor ainda não confirmou o diário de decisões.")
+                    }
                     pushedCount += batchResp.accepted_ids.size
                 } else {
                     break
@@ -340,6 +352,19 @@ class SyncRepository @Inject constructor(
                 saveManualQuarantine(qEntity)
             }
 
+            dao.getTelemetryById(telemetryId)?.let { updated ->
+                DecisionTrace.record(dao, telemetryId, "USER_FEEDBACK", "USER",
+                    DecisionTrace.snapshot(updated).copy(reason = feedback))
+                if (prefix7.isNotEmpty() && feedback in setOf("CONFIRMED_SPAM", "FALSE_POSITIVE")) {
+                    val protection = dao.getActiveQuarantineForPrefix(prefix7, System.currentTimeMillis())
+                    DecisionTrace.record(dao, telemetryId, "QUARANTINE_UPDATED", "USER",
+                        br.com.spamshield.domain.DecisionDetails(prefix = prefix7,
+                            reason = if (feedback == "FALSE_POSITIVE") "REMOVED_AFTER_FALSE_POSITIVE"
+                            else "${protection?.reason}; expiresAt=${protection?.expiresAt}"))
+                }
+                TelemetrySyncScheduler.enqueueImmediateSync()
+            }
+
             try {
                 val settings = settingsDataStore.getSnapshot()
                 val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
@@ -410,7 +435,7 @@ class SyncRepository @Inject constructor(
         }
     }
 
-    private fun CallTelemetryEntity.toRemoteDto(): CallTelemetryRemoteDto {
+    private fun CallTelemetryEntity.toRemoteDto(events: List<CallDecisionEventEntity>): CallTelemetryRemoteDto {
         val rules = runCatching {
             json.decodeFromString<List<TriggeredRuleDto>>(triggeredRulesJson)
         }.getOrDefault(emptyList())
@@ -438,6 +463,7 @@ class SyncRepository @Inject constructor(
                 call_duration_sec = callDurationSec,
                 triggered_rules = rules
             ),
+            decision_events = events.map { it.toRemoteEvent() },
             audit = AuditRemoteDto(
                 user_feedback = userFeedback,
                 synced_at = System.currentTimeMillis()

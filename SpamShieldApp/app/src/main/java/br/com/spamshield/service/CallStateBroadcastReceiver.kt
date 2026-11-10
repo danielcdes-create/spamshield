@@ -81,6 +81,7 @@ class CallStateBroadcastReceiver : BroadcastReceiver() {
             val durIdx = cursor.getColumnIndex(CallLog.Calls.DURATION)
             val dateIdx = cursor.getColumnIndex(CallLog.Calls.DATE)
             val blockReasonIdx = cursor.getColumnIndex("block_reason")
+                val screeningComponentIdx = cursor.getColumnIndex("call_screening_component_name")
 
             if (numIdx < 0 || typeIdx < 0 || durIdx < 0 || dateIdx < 0) return
 
@@ -94,7 +95,9 @@ class CallStateBroadcastReceiver : BroadcastReceiver() {
                 val callType = cursor.getInt(typeIdx)
                 val durationSec = cursor.getInt(durIdx)
                 val callDate = cursor.getLong(dateIdx)
-                val isSystemBlocked = if (blockReasonIdx >= 0) cursor.getInt(blockReasonIdx) != 0 else false
+                val systemBlockReason = if (blockReasonIdx >= 0 && !cursor.isNull(blockReasonIdx)) cursor.getInt(blockReasonIdx) else null
+                    val isSystemBlocked = (systemBlockReason ?: 0) != 0
+                    val screeningComponent = if (screeningComponentIdx >= 0) cursor.getString(screeningComponentIdx) else null
 
                 if (callDate < now - 120_000L) break
 
@@ -116,6 +119,10 @@ class CallStateBroadcastReceiver : BroadcastReceiver() {
                         callType = callType,
                         callDurationSec = durationSec,
                         isSystemBlocked = isSystemBlocked,
+                        systemBlockReason = systemBlockReason,
+                        rawNumber = rawNumber,
+                        systemScreeningComponent = screeningComponent,
+                        systemScreeningAppIsSpamShield = screeningComponent?.let { it.substringBefore('/') == "br.com.spamshield" },
                         callTimestampMs = callDate,
                         nowMillis = now
                     )

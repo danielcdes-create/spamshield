@@ -46,6 +46,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import br.com.spamshield.data.local.SpamShieldSettings
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
+import br.com.spamshield.data.local.entity.CallDecisionEventEntity
+import br.com.spamshield.domain.DecisionTrace
 import br.com.spamshield.ui.TailscaleStatusUi
 import java.util.Calendar
 import java.util.Locale
@@ -53,6 +55,7 @@ import java.util.Locale
 @Composable
 fun DashboardScreen(
     telemetryList: List<CallTelemetryEntity>,
+    decisionEvents: List<CallDecisionEventEntity>,
     settings: SpamShieldSettings,
     tailscaleStatus: TailscaleStatusUi,
     onSyncNow: () -> Unit
@@ -61,15 +64,16 @@ fun DashboardScreen(
 
     // Global stats
     val totalIntercepted = telemetryList.size
-    val blockedCalls = telemetryList.filter { it.outcome == "BLOCKED" || it.outcome == "SHADOW_BLOCKED" }
+    val byCall = decisionEvents.groupBy { it.callId }
+    val evidence = telemetryList.associate { it.id to DecisionTrace.evidence(it, byCall[it.id].orEmpty()) }
+    val blockedCalls = telemetryList.filter { evidence[it.id]?.blockObserved == true }
+    val requestedCount = evidence.values.count { it.blockRequested }
+    val rejectedCount = evidence.values.count { it.dialerRejected }
     val totalBlocked = blockedCalls.size
-    val blockedPercent = if (totalIntercepted > 0) (totalBlocked * 100.0 / totalIntercepted) else 0.0
-    val estimatedMinutesSaved = (totalBlocked * 45) / 60.0
-    val avgLatencyMs = if (telemetryList.isNotEmpty()) {
-        telemetryList.map { it.processingLatencyMs }.average()
-    } else {
-        0.0
-    }
+    val responseLatencies = decisionEvents.filter {
+        it.eventType == "SCREENING_RESPONSE_SUBMITTED" && it.source == "CALL_SCREENING_SERVICE"
+    }.mapNotNull { DecisionTrace.details(it).elapsedMs }
+    val avgLatencyMs = if (responseLatencies.isEmpty()) 0.0 else responseLatencies.average()
 
     // Today's stats (from 00:00 today)
     val startOfTodayMillis = Calendar.getInstance().apply {
@@ -81,10 +85,10 @@ fun DashboardScreen(
 
     val todayCalls = telemetryList.filter { it.timestamp >= startOfTodayMillis }
     val todayIntercepted = todayCalls.size
-    val todayBlocked = todayCalls.count { it.outcome == "BLOCKED" || it.outcome == "SHADOW_BLOCKED" }
-    val todayMinutesSaved = (todayBlocked * 45) / 60.0
+    val todayBlocked = todayCalls.count { evidence[it.id]?.blockObserved == true }
+    val todayRejected = todayCalls.count { evidence[it.id]?.dialerRejected == true }
     val todayTopCarrier = todayCalls
-        .filter { it.outcome == "BLOCKED" || it.outcome == "SHADOW_BLOCKED" }
+        .filter { evidence[it.id]?.blockObserved == true }
         .groupBy { classifyCarrierLabel(it) }
         .maxByOrNull { it.value.size }
         ?.key ?: "Nenhuma"
@@ -226,20 +230,20 @@ fun DashboardScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     HeroDailyStatItem(
-                        label = "Avaliadas Hoje",
+                        label = "Registros Hoje",
                         value = "$todayIntercepted",
                         accent = Color.White,
                         modifier = Modifier.weight(1f)
                     )
                     HeroDailyStatItem(
-                        label = "Bloqueadas Hoje",
+                        label = "Bloqueios Registrados",
                         value = "$todayBlocked",
                         accent = Color(0xFFEF4444),
                         modifier = Modifier.weight(1f)
                     )
                     HeroDailyStatItem(
-                        label = "Salvos Hoje",
-                        value = String.format(Locale.US, "%.1fm", todayMinutesSaved),
+                        label = "Rejeitadas no Discador",
+                        value = "$todayRejected",
                         accent = Color(0xFF22C55E),
                         modifier = Modifier.weight(1f)
                     )
@@ -259,15 +263,15 @@ fun DashboardScreen(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             KpiCard(
-                title = "Total Interceptado",
+                title = "Registros",
                 value = "$totalIntercepted",
                 subtitle = "Histórico + Tempo Real",
                 modifier = Modifier.weight(1f)
             )
             KpiCard(
-                title = "Total Bloqueado",
-                value = String.format(Locale.US, "%d (%.1f%%)", totalBlocked, blockedPercent),
-                subtitle = "Threshold >= ${settings.blockThresholdScore}",
+                title = "Bloqueios Registrados",
+                value = "$totalBlocked",
+                subtitle = "Resposta + evidência do Android",
                 modifier = Modifier.weight(1f)
             )
         }
@@ -277,21 +281,21 @@ fun DashboardScreen(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             KpiCard(
-                title = "Tempo Economizado",
-                value = String.format(Locale.US, "%.1f min", estimatedMinutesSaved),
-                subtitle = "~45s / robocall",
+                title = "Bloqueios Solicitados",
+                value = "$requestedCount",
+                subtitle = "$rejectedCount rejeições no discador",
                 modifier = Modifier.weight(1f)
             )
             KpiCard(
-                title = "Latência Média",
+                title = "Resposta Média",
                 value = String.format(Locale.US, "%.2f ms", avgLatencyMs),
-                subtitle = "Meta Edge < 10 ms",
+                subtitle = "Até o envio ao Android",
                 modifier = Modifier.weight(1f)
             )
         }
 
         // 3. Gráfico Nativo 1: Barras Horizontais — Bloqueios por Categoria
-        CategoryHorizontalBarChartCard(telemetryList = telemetryList)
+        CategoryHorizontalBarChartCard(telemetryList = blockedCalls)
 
         // 4. Gráfico Nativo 2: Rosca/Pizza — Proporção por Operadora (Claro e VoIP separados)
         CarrierDonutChartCard(telemetryList = telemetryList)

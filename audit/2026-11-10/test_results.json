@@ -1,0 +1,88 @@
+{
+  "android_suites": [
+    {
+      "suite": "br.com.spamshield.domain.NtSpamshield2026001Test",
+      "tests": 17,
+      "failures": 0,
+      "errors": 0,
+      "cases": [
+        "stage2SevenDigitFallbackUsesADistinctRuleAndWeight",
+        "reprocessUsesScorerForVoipMutexAndVerifiedFixedConversation",
+        "stage5CoalescePreservesScreeningDecision",
+        "stage4ScreeningUsesMemoryQuarantineAndProcessLifetimePatterns",
+        "stage2EightDigitPrefixAndExactQuarantineWeight",
+        "stage1UtilityShortCodeKeeps10315WithoutPlus55",
+        "stage3VerifiedLocalFixedLineStaysAt25",
+        "stage7SanitizerHoldsTheFiveInvariants",
+        "stage3VoipTrunkMutexKeepsBlacklistAndScores285",
+        "stage1MalformedMobileLengthAddsSpoofingRule",
+        "stage1DigitSixToEightLength8IsMalformedAndPenalized",
+        "stage6ConfirmedSpamRecomputesScoreAndSyncsEveryPendingRow",
+        "postCallVerdictDoesNotKeepBlockedWhenDurationIsPositive",
+        "rejectedEmergencyRepeatWithPositiveDurationStaysUnderThreshold",
+        "stage5SameTimestampHistoryIsDedupedBeforeScoring",
+        "stage1Csp0041DoesNotBecomeTim",
+        "stage5DurationBandsAndPostCallOutcome"
+      ]
+    },
+    {
+      "suite": "br.com.spamshield.domain.PhoneNormalizerTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "cases": [
+        "normalizes +553198621040 preserving E164 and extracting prefix7 3198621",
+        "normalizes 03141011230 removing leading zero and extracting DDD 31 and prefix7 3141011",
+        "normalizes 03198621040 removing long-distance zero",
+        "classifies 0303 and 4004 as TOLL_FREE_OR_SPECIAL and separates VoIP from Fixo",
+        "canonicalizes carrier names consistently across mobile and fixed prefixes",
+        "normalizes 31983211420 11-digit mobile number to E164 and prefix7 3198321",
+        "normalizes and infers carriers for real call history numbers from S23 Ultra",
+        "normalizes 0153141011230 with long distance CSP 15"
+      ]
+    },
+    {
+      "suite": "br.com.spamshield.domain.SpamScoringEngineTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "cases": [
+        "blocks MG VoIP trunk 03141011230 with quarantine, regex and PABX range penalties",
+        "serializes CallTelemetryEntity to JSON for export and upgrades outcome on CONFIRMED_SPAM",
+        "ping call detector upgrades ALLOWED_LOW_SCORE call with 3s duration to PING_CALL_ROBOCALL and quarantines prefix",
+        "evaluatePostCallLogVerdict upgrades ALLOWED_LOW_SCORE call to BLOCKED and quarantines prefix when rejected or blocked in CallLog",
+        "8-digit quarantine blocks same milhar 31982042xxx but spares neighboring milhar 31982041xxx",
+        "two missed calls from a VoIP number still insert UNANSWERED_SPAM_BURST",
+        "evaluatePostCallLogVerdict does NOT alter call that was already BLOCKED at edge",
+        "two missed calls from one geographic landline do not insert UNANSWERED_SPAM_BURST",
+        "recover 18h27 call 031982042364 that was corrupted by PREFIX6_CLUSTER_HIT back to APRENDIDA with SYSTEM_CALLLOG_BLOCKED",
+        "two missed calls from one ordinary number do not insert UNANSWERED_SPAM_BURST",
+        "three distinct ordinary numbers in the prefix window insert UNANSWERED_SPAM_BURST"
+      ]
+    },
+    {
+      "suite": "br.com.spamshield.domain.SpamShieldAuditTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "cases": [
+        "reprocessingUsesFutureNumbersMoreThan24HoursApartAndRewritesArrival",
+        "malformedConfiguredRegexAbortsEvenAnExactQuarantineHit",
+        "databaseQuarantineIsIgnoredUntilCacheIsExplicitlyRefreshed",
+        "startupCacheLoadsExpiredQuarantineWithoutExpiryInformation",
+        "deletedDatabaseQuarantineRemainsEffectiveInCache",
+        "staleCacheLetsEmergencyRepeatOverrideConfirmedDatabaseSpam",
+        "nationalDigitsOnlyCustomRegexNoLongerMatches",
+        "manualDialerRejectionRewritesAllowedArrivalAsBlocked"
+      ]
+    }
+  ],
+  "android_total": 44,
+  "android_failures": 0,
+  "rust": {
+    "passed": 9,
+    "failed": 0,
+    "command": "cargo test --locked",
+    "isolation_warning": "Existing integration test connects to the configured MongoDB and mutates quarantine 3141011; telemetry test row is deleted but quarantine is not restored."
+  }
+}

@@ -8,12 +8,28 @@ import androidx.room.Transaction
 import br.com.spamshield.data.local.entity.ActiveRuleEntity
 import br.com.spamshield.data.local.entity.AnatelPrefixEntity
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
+import br.com.spamshield.data.local.entity.CallDecisionEventEntity
 import br.com.spamshield.data.local.entity.OutboundGraceEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface SpamShieldDao {
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertDecisionEvent(event: CallDecisionEventEntity)
+
+    @Query("SELECT * FROM call_decision_events ORDER BY recordedAt, eventId")
+    suspend fun getAllDecisionEvents(): List<CallDecisionEventEntity>
+
+    @Query("SELECT * FROM call_decision_events ORDER BY recordedAt, eventId")
+    fun observeDecisionEvents(): Flow<List<CallDecisionEventEntity>>
+
+    @Query("SELECT * FROM call_decision_events WHERE callId = :callId ORDER BY recordedAt, eventId")
+    suspend fun getDecisionEvents(callId: String): List<CallDecisionEventEntity>
+
+    @Query("UPDATE call_decision_events SET syncStatus = 'SYNCED' WHERE eventId IN (:eventIds)")
+    suspend fun markDecisionEventsSynced(eventIds: List<String>)
 
     // ========================================================================
     // 1. Call Telemetry
@@ -31,7 +47,7 @@ interface SpamShieldDao {
     @Query("SELECT * FROM call_telemetry WHERE id = :id LIMIT 1")
     suspend fun getTelemetryById(id: String): CallTelemetryEntity?
 
-    @Query("SELECT * FROM call_telemetry WHERE syncStatus = 'PENDING' ORDER BY timestamp ASC LIMIT 200")
+    @Query("SELECT * FROM call_telemetry WHERE syncStatus = 'PENDING' OR EXISTS (SELECT 1 FROM call_decision_events e WHERE e.callId = call_telemetry.id AND e.syncStatus = 'PENDING') ORDER BY timestamp ASC LIMIT 200")
     suspend fun getPendingTelemetry(): List<CallTelemetryEntity>
 
     @Query("UPDATE call_telemetry SET syncStatus = 'SYNCED' WHERE id IN (:ids)")
@@ -65,6 +81,7 @@ interface SpamShieldDao {
         WHERE normalizedNumber = :normalizedNumber
           AND deviceId != 's23-ultra-history'
           AND timestamp BETWEEN :minTs AND :maxTs
+        ORDER BY ABS(timestamp - (:minTs + (:maxTs - :minTs) / 2)), timestamp
         LIMIT 1
         """
     )
@@ -78,6 +95,7 @@ interface SpamShieldDao {
         """
         DELETE FROM call_telemetry
         WHERE deviceId = 's23-ultra-history'
+          AND NOT EXISTS (SELECT 1 FROM call_decision_events e WHERE e.callId = call_telemetry.id)
           AND EXISTS (
               SELECT 1 FROM call_telemetry rt
               WHERE rt.deviceId != 's23-ultra-history'

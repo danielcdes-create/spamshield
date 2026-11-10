@@ -19,10 +19,15 @@ object QuarantinePrefixIndex {
     const val EXACT_WEIGHT = 70
     const val BROAD_WEIGHT = 60
 
+    @Volatile var isReady: Boolean = false
+        private set
+    val size: Int get() = exact8.size + broad7.size
+
     private val exact8 = ConcurrentHashMap.newKeySet<String>()
     private val broad7 = ConcurrentHashMap.newKeySet<String>()
 
     fun clear() {
+        isReady = false
         exact8.clear()
         broad7.clear()
     }
@@ -30,6 +35,7 @@ object QuarantinePrefixIndex {
     fun replaceAll(prefixes: Collection<String>) {
         clear()
         prefixes.forEach { add(it) }
+        isReady = true
     }
 
     fun add(prefix: String) {

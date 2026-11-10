@@ -10,24 +10,37 @@ import br.com.spamshield.data.local.dao.SpamShieldDao
 import br.com.spamshield.data.local.entity.ActiveRuleEntity
 import br.com.spamshield.data.local.entity.AnatelPrefixEntity
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
+import br.com.spamshield.data.local.entity.CallDecisionEventEntity
 import br.com.spamshield.data.local.entity.OutboundGraceEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
 
 @Database(
     entities = [
         CallTelemetryEntity::class,
+        CallDecisionEventEntity::class,
         ActiveRuleEntity::class,
         PrefixQuarantineEntity::class,
         OutboundGraceEntity::class,
         AnatelPrefixEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun spamShieldDao(): SpamShieldDao
 
     companion object {
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Keep legacy rows intact. No fabricated arrival/response events.
+                db.execSQL("""CREATE TABLE IF NOT EXISTS call_decision_events (
+                    eventId TEXT NOT NULL PRIMARY KEY, callId TEXT NOT NULL, recordedAt INTEGER NOT NULL,
+                    eventType TEXT NOT NULL, source TEXT NOT NULL, appVersion TEXT NOT NULL,
+                    detailsJson TEXT NOT NULL, syncStatus TEXT NOT NULL)""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_call_decision_events_callId_recordedAt ON call_decision_events(callId, recordedAt)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_call_decision_events_syncStatus ON call_decision_events(syncStatus)")
+            }
+        }
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // No column changes. Existing telemetry, rules, and quarantines stay.

@@ -1,0 +1,5 @@
+// Run from SpamShieldApp. Adds diagnostics without editing application/test source sets in the project.
+gradle.projectsEvaluated {
+    def app = gradle.rootProject.findProject(':app')
+    app.android.sourceSets.getByName('test').java.srcDir(new File(gradle.rootProject.projectDir, '../audit/2026-11-10'))
+}

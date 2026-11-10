@@ -1,7 +1,7 @@
-﻿{
-    "size_bytes":  61066145,
-    "version_code":  14,
-    "download_path":  "/apk",
-    "sha256_checksum":  "4a0a3bfddcb5386a845aae757a643169d5b39051b97af95c299dbff8c8602d2d",
-    "version_name":  "1.3.0"
+{
+  "size_bytes": 61396039,
+  "download_path": "/apk",
+  "version_name": "1.3.1",
+  "version_code": 15,
+  "sha256_checksum": "15e5a783c6489c783f9ec35fd8841be0b50d9598bd43ebde37ea9ba09a554edf"
 }

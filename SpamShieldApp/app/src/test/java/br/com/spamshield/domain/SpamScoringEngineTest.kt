@@ -5,6 +5,7 @@ import br.com.spamshield.data.local.AppDatabase
 import br.com.spamshield.data.local.dao.SpamShieldDao
 import br.com.spamshield.data.local.entity.ActiveRuleEntity
 import br.com.spamshield.data.local.entity.AnatelPrefixEntity
+import br.com.spamshield.data.local.entity.CallDecisionEventEntity
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.OutboundGraceEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
@@ -18,6 +19,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 open class FakeSpamShieldDao : SpamShieldDao {
+    val decisionEvents = mutableListOf<CallDecisionEventEntity>()
+    override suspend fun insertDecisionEvent(event: CallDecisionEventEntity) {
+        if (decisionEvents.none { it.eventId == event.eventId }) decisionEvents.add(event)
+    }
+    override suspend fun getAllDecisionEvents() = decisionEvents.toList()
+    override fun observeDecisionEvents(): Flow<List<CallDecisionEventEntity>> = MutableStateFlow(decisionEvents)
+    override suspend fun getDecisionEvents(callId: String) = decisionEvents.filter { it.callId == callId }.sortedWith(compareBy({ it.recordedAt }, { it.eventId }))
+    override suspend fun markDecisionEventsSynced(eventIds: List<String>) {
+        decisionEvents.replaceAll { if (it.eventId in eventIds) it.copy(syncStatus = "SYNCED") else it }
+    }
     val telemetries = mutableListOf<CallTelemetryEntity>()
     val rules = AppDatabase.initialRulesSeed(1_700_000_000_000L).toMutableList()
     val quarantines = AppDatabase.initialQuarantineSeed(1_700_000_000_000L).toMutableList()
@@ -32,7 +43,7 @@ open class FakeSpamShieldDao : SpamShieldDao {
     override fun observeAllTelemetry(): Flow<List<CallTelemetryEntity>> = MutableStateFlow(telemetries)
     override suspend fun getAllTelemetry(): List<CallTelemetryEntity> = telemetries.toList()
     override suspend fun getTelemetryById(id: String): CallTelemetryEntity? = telemetries.find { it.id == id }
-    override suspend fun getPendingTelemetry(): List<CallTelemetryEntity> = telemetries.filter { it.syncStatus == "PENDING" }
+    override suspend fun getPendingTelemetry(): List<CallTelemetryEntity> = telemetries.filter { it.syncStatus == "PENDING" || decisionEvents.any { e -> e.callId == it.id && e.syncStatus == "PENDING" } }
     override suspend fun markTelemetrySynced(ids: List<String>) {
         telemetries.replaceAll { row ->
             if (row.id in ids) row.copy(syncStatus = "SYNCED") else row
@@ -60,11 +71,11 @@ open class FakeSpamShieldDao : SpamShieldDao {
         normalizedNumber: String,
         minTs: Long,
         maxTs: Long
-    ): CallTelemetryEntity? = telemetries.find {
+    ): CallTelemetryEntity? = telemetries.filter {
         it.normalizedNumber == normalizedNumber &&
             it.deviceId != "s23-ultra-history" &&
             it.timestamp in minTs..maxTs
-    }
+    }.minByOrNull { kotlin.math.abs(it.timestamp - (minTs + (maxTs - minTs) / 2)) }
 
     override suspend fun deduplicateHistoryRecords() {}
 

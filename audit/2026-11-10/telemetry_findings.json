@@ -1,0 +1,682 @@
+{
+  "input": "G:\\Meu Drive\\spamshield_telemetry (4).json",
+  "sha256": "dab3af6dda09fec4bf7fd249fe76f20b5187186fdaf5ed92400b3bed7edc93e0",
+  "timezone": "America/Sao_Paulo (UTC-03:00 in the observed period)",
+  "row_count": 391,
+  "range": [
+    "2026-09-26T12:05:22.954000-03:00",
+    "2026-11-10T17:55:18.947000-03:00"
+  ],
+  "grain": "One persisted telemetry row, not guaranteed one unique physical call",
+  "duplicate_ids": 0,
+  "device_counts": {
+    "android-edge-br": 93,
+    "s23-ultra-history": 298
+  },
+  "outcomes": {
+    "ALLOWED_CONTACT": 2,
+    "ALLOWED_LOW_SCORE": 88,
+    "BLOCKED": 285,
+    "FLAGGED_POST_CALL_QUARANTINED": 13,
+    "USER_BLOCKED_RETROACTIVE": 3
+  },
+  "edge_outcomes": {
+    "ALLOWED_CONTACT": 1,
+    "ALLOWED_LOW_SCORE": 13,
+    "BLOCKED": 72,
+    "FLAGGED_POST_CALL_QUARANTINED": 4,
+    "USER_BLOCKED_RETROACTIVE": 3
+  },
+  "nov10_edge_outcomes": {
+    "ALLOWED_LOW_SCORE": 5,
+    "BLOCKED": 20
+  },
+  "thresholds": {
+    "70": 391
+  },
+  "shadow_modes": {
+    "false": 391
+  },
+  "feedback": {
+    "CONFIRMED_SPAM": 12,
+    "UNRATED": 379
+  },
+  "stir": {
+    "FAILED": 1,
+    "NOT_VERIFIED": 365,
+    "PASSED": 25
+  },
+  "sync": {
+    "PENDING": 2,
+    "SYNCED": 389
+  },
+  "score_equation_failures": [],
+  "positive_duration_blocked": [],
+  "system_calllog_rules": {
+    "all": 100,
+    "edge": 28,
+    "blocked_edge": 25
+  },
+  "duplicate_pairs_within15s": [
+    {
+      "ids": [
+        "12234343-a84d-46e3-8d90-95380d44279b",
+        "calllog-observer-1793964929635-+5531998056388"
+      ],
+      "delta_ms": 364,
+      "same_timestamp": false
+    },
+    {
+      "ids": [
+        "81935f99-142d-4699-9f5a-f524368d12b8",
+        "calllog-observer-1793715750840-+5531993687018"
+      ],
+      "delta_ms": 811,
+      "same_timestamp": false
+    },
+    {
+      "ids": [
+        "5b6b6016-2b8c-399c-9256-08967726e174",
+        "adc8b107-24eb-3dd7-b9b4-8b9d3b939cf3"
+      ],
+      "delta_ms": 0,
+      "same_timestamp": true
+    },
+    {
+      "ids": [
+        "f2659819-aa1e-3e10-9753-3de65f2c3ae2",
+        "d523e468-8281-35da-a0d1-005b1f323789"
+      ],
+      "delta_ms": 0,
+      "same_timestamp": true
+    },
+    {
+      "ids": [
+        "48134ef3-97e5-3b80-983b-10e1c67c7c9c",
+        "2e362896-ca10-3b92-8299-dd525b4c5828"
+      ],
+      "delta_ms": 0,
+      "same_timestamp": true
+    },
+    {
+      "ids": [
+        "d340cee7-9af1-3a6c-adc0-493dd4398482",
+        "16826031-4c6a-3dfd-8fb7-a8cb7832bb6b"
+      ],
+      "delta_ms": 0,
+      "same_timestamp": true
+    },
+    {
+      "ids": [
+        "cdc44bd3-6d96-343f-b7ac-e7f1bb74b530",
+        "977411c7-7a92-33f3-bf7c-a8d7f4237e6c"
+      ],
+      "delta_ms": 0,
+      "same_timestamp": true
+    }
+  ],
+  "duplicate_affected_rows": 14,
+  "burst_rows_not_corroborated_by_two_distinct_numbers_in_prior24h_export": [
+    "9b533afc-08cf-4d41-a58f-5f077ed27384",
+    "a527c1e2-3ef8-4c4c-9077-cd1b02f28714",
+    "24c632a3-bae8-4d10-9fa0-4a5a87428fb3",
+    "18c3c259-bd54-48a0-94ba-196cb2a7591e",
+    "7b9ed410-fc9f-47b3-9ab2-c40bf018b7bd",
+    "d173cb6f-ce61-4d0b-88ad-2a2d9de1b968",
+    "4252c6ec-a56d-418d-a25c-8b16267bbee5",
+    "a1f801dd-a7f3-45d5-9b07-4c2ad1882144",
+    "269afa76-05cd-4845-9448-6b6b9a1f8285",
+    "42db3c6b-8541-470c-bf97-1c4f81ceb3b9",
+    "8b7b23ad-687b-452e-a704-161e236c31cb",
+    "c40f6c70-c897-474c-b570-fb9c25477e28",
+    "89df99c2-cae3-466b-8a12-7f6f12ee9034",
+    "c2342f66-fbba-3f1d-8fcf-4f7f2bd9fcba",
+    "0ea7ec07-7125-3553-99a5-2bc1670a33d5",
+    "bd3e0738-c37f-46fe-8d99-52dcc0a0e28a",
+    "da1a7f60-357a-41a7-b903-894279220a17",
+    "ef5d567f-e41d-4e87-b9e7-fc053b27f05e",
+    "87825738-60c0-3468-b5ba-37b57e2adea7",
+    "b4bd2359-3f17-3dc9-aaaf-e64d0056651d",
+    "713782be-59b4-364d-ad13-11bf8266b9d5",
+    "5162f0c8-a93b-3559-bb41-f6349bbce380",
+    "15bb8b04-7885-3208-b99b-1d86b017782b",
+    "f8f64f60-b0d8-3236-84a1-fbf61ca4fa19",
+    "3b0743b2-7aa3-382f-a012-1e99902a933d",
+    "ec92256a-1797-3f04-ac2a-af3efeff9bd0",
+    "bce5e839-1709-3a1a-a5d5-258a7c3f8a18",
+    "4e6a4f22-61c4-3eef-8f18-279a517bed8b",
+    "cf9b16b6-778d-38de-bfa0-e97db7a20cbe",
+    "828a1fc2-919b-3a49-9d1c-acca86be8a18",
+    "ca098202-7d75-31a9-be27-c02f2a04e320",
+    "d43e68fb-224f-30e6-bb23-bfff0283f52a",
+    "0803a6d1-fffe-32f4-8fb0-1f8d2bb54441",
+    "390b68d2-45a2-3e81-9c4b-e46338775473",
+    "440ec60a-5b5f-3b21-86fb-7ae48a19115c",
+    "fb2f9df3-1214-3050-b9f6-9b0d5066104b",
+    "22004c0e-9592-3e11-b19a-a8f36b6a329a",
+    "0de767b8-38ed-3cf9-96ef-12dd8e2e388d",
+    "1f74dbf4-6cfd-368c-87e7-2484dbca86c8",
+    "1ae7cbab-4fd1-3722-901b-41ba954b4a7a",
+    "84d20b82-0e42-346b-9404-3cb45fb2aa95",
+    "c02f1b65-7bbf-37de-ab84-07f11ad21a06",
+    "3aadbf23-ee8a-30ea-a3bc-015b088f8271",
+    "ee65a42c-b510-3f13-8160-dbd584de81e9",
+    "73093a4e-c2c3-351d-8cbf-8e759176a97a",
+    "32212399-c0d4-30af-a59a-f5cb141b1a2a",
+    "f186189f-28e2-3842-829b-7b37e54dbd64",
+    "2dd67975-57e4-3c24-9607-a2ec86ac21fd",
+    "0f42e7d4-3bf9-3508-b4c7-1ec0c04881ed",
+    "b089ba6c-1e83-3d72-9baf-68ed6cf40763",
+    "67ab5a99-0aef-39c4-91a9-b15f2f9e10b6",
+    "d025d327-6cfa-35ea-aee7-5439ce30e187",
+    "610b92b5-805c-3647-b452-eda781e3f53f",
+    "dfd88e5e-927d-3759-90cf-89363c6ec268",
+    "f1d40a72-7eb9-39e2-b2a2-760dd084874b",
+    "fe65e25d-1b80-39c6-a147-02c450763e8a",
+    "d0e1cc7b-180a-396d-9c65-7220d5eb15bd",
+    "243a06d7-34f6-361c-9374-ce2cabf99f75",
+    "11d33d9e-3171-37a5-8f72-e68359517121",
+    "d06ef181-952c-3f99-a8b6-b1b962a8e726",
+    "10454c17-d3de-3110-85f5-8daa05946583",
+    "c6e5070d-dca5-3f66-8f3c-a04ddcc184af",
+    "fc7ed312-6d1e-3059-837e-e00c8b15391f",
+    "97aa80a4-5e50-3c3f-aba4-b19fabcc89be",
+    "7575d1bd-eb33-3a3f-8259-e03299abbbb0",
+    "3220925e-edc0-34e1-9f6e-52bafe9199a5",
+    "408e8884-8625-357e-a0a8-0f4feba5fa79",
+    "f8b4179b-2764-3366-ad4d-bca2783d5cf9",
+    "0a28bb9e-7875-3aa2-b68b-f7a8978bdfe3",
+    "35598044-2ff2-300d-a751-39175de51783",
+    "75ae9a1b-4990-3480-b6db-9eca0faf06ac",
+    "a2a70ac8-d833-32dd-a806-3582cc914f4f"
+  ],
+  "nov10_allowed": [
+    {
+      "id": "038923f3-1522-499c-8888-5c93714d8a9a",
+      "time": "2026-11-10T16:36:53.139000-03:00",
+      "masked_number": "+553199799****",
+      "score": 40,
+      "rules": [
+        {
+          "rule_id": "NOT_IN_CONTACTS",
+          "weight": 25
+        },
+        {
+          "rule_id": "STIR_SHAKEN_UNVERIFIED",
+          "weight": 15,
+          "meta": "VERIFICATION_STATUS_NOT_VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "a3f5cbb3-6352-4681-9357-3f827fe86ddd",
+      "time": "2026-11-10T16:36:34.043000-03:00",
+      "masked_number": "+553198242****",
+      "score": 40,
+      "rules": [
+        {
+          "rule_id": "NOT_IN_CONTACTS",
+          "weight": 25
+        },
+        {
+          "rule_id": "STIR_SHAKEN_UNVERIFIED",
+          "weight": 15,
+          "meta": "VERIFICATION_STATUS_NOT_VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "a90d6c4f-01b4-43d3-b0a5-3ab03b9bfd8d",
+      "time": "2026-11-10T12:08:25.140000-03:00",
+      "masked_number": "+553199372****",
+      "score": 40,
+      "rules": [
+        {
+          "rule_id": "NOT_IN_CONTACTS",
+          "weight": 25
+        },
+        {
+          "rule_id": "STIR_SHAKEN_UNVERIFIED",
+          "weight": 15,
+          "meta": "VERIFICATION_STATUS_NOT_VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "7003dafb-59ad-49ca-8b26-388ec81defe0",
+      "time": "2026-11-10T10:57:44.877000-03:00",
+      "masked_number": "+553197322****",
+      "score": 40,
+      "rules": [
+        {
+          "rule_id": "NOT_IN_CONTACTS",
+          "weight": 25
+        },
+        {
+          "rule_id": "STIR_SHAKEN_UNVERIFIED",
+          "weight": 15,
+          "meta": "VERIFICATION_STATUS_NOT_VERIFIED"
+        }
+      ]
+    },
+    {
+      "id": "aab36fa7-fb29-4469-b634-36803d531b1b",
+      "time": "2026-11-10T08:44:34.724000-03:00",
+      "masked_number": "+553199520****",
+      "score": 40,
+      "rules": [
+        {
+          "rule_id": "NOT_IN_CONTACTS",
+          "weight": 25
+        },
+        {
+          "rule_id": "STIR_SHAKEN_UNVERIFIED",
+          "weight": 15,
+          "meta": "VERIFICATION_STATUS_NOT_VERIFIED"
+        }
+      ]
+    }
+  ],
+  "unknown_055_rows": [
+    {
+      "id": "23d533e1-6e9b-4934-a5f9-5751c8921984",
+      "time": "2026-11-10T13:12:41.864000-03:00",
+      "score": 95
+    },
+    {
+      "id": "47496d89-705d-4e9b-bc1a-b48f3403a749",
+      "time": "2026-11-10T13:11:00.094000-03:00",
+      "score": 95
+    },
+    {
+      "id": "48121775-ba47-41cb-9e85-032ee1077448",
+      "time": "2026-11-09T12:13:27.486000-03:00",
+      "score": 180
+    },
+    {
+      "id": "8b7b23ad-687b-452e-a704-161e236c31cb",
+      "time": "2026-11-09T12:00:38.575000-03:00",
+      "score": 195
+    }
+  ],
+  "daily": {
+    "2026-09-26": {
+      "rows": 5,
+      "devices": {
+        "s23-ultra-history": 5
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 1,
+        "BLOCKED": 4
+      }
+    },
+    "2026-09-28": {
+      "rows": 17,
+      "devices": {
+        "s23-ultra-history": 17
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 7,
+        "BLOCKED": 10
+      }
+    },
+    "2026-09-29": {
+      "rows": 20,
+      "devices": {
+        "s23-ultra-history": 20
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 5,
+        "BLOCKED": 14,
+        "FLAGGED_POST_CALL_QUARANTINED": 1
+      }
+    },
+    "2026-09-30": {
+      "rows": 10,
+      "devices": {
+        "s23-ultra-history": 10
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 5,
+        "BLOCKED": 5
+      }
+    },
+    "2026-10-01": {
+      "rows": 15,
+      "devices": {
+        "s23-ultra-history": 15
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 4,
+        "BLOCKED": 11
+      }
+    },
+    "2026-10-02": {
+      "rows": 12,
+      "devices": {
+        "s23-ultra-history": 12
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 4,
+        "BLOCKED": 8
+      }
+    },
+    "2026-10-03": {
+      "rows": 12,
+      "devices": {
+        "s23-ultra-history": 12
+      },
+      "outcomes": {
+        "BLOCKED": 11,
+        "FLAGGED_POST_CALL_QUARANTINED": 1
+      }
+    },
+    "2026-10-04": {
+      "rows": 1,
+      "devices": {
+        "s23-ultra-history": 1
+      },
+      "outcomes": {
+        "ALLOWED_CONTACT": 1
+      }
+    },
+    "2026-10-05": {
+      "rows": 19,
+      "devices": {
+        "s23-ultra-history": 19
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 4,
+        "BLOCKED": 12,
+        "FLAGGED_POST_CALL_QUARANTINED": 3
+      }
+    },
+    "2026-10-06": {
+      "rows": 8,
+      "devices": {
+        "s23-ultra-history": 8
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 3,
+        "BLOCKED": 5
+      }
+    },
+    "2026-10-07": {
+      "rows": 10,
+      "devices": {
+        "s23-ultra-history": 10
+      },
+      "outcomes": {
+        "BLOCKED": 10
+      }
+    },
+    "2026-10-08": {
+      "rows": 14,
+      "devices": {
+        "s23-ultra-history": 14
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 6,
+        "BLOCKED": 7,
+        "FLAGGED_POST_CALL_QUARANTINED": 1
+      }
+    },
+    "2026-10-09": {
+      "rows": 12,
+      "devices": {
+        "s23-ultra-history": 12
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 2,
+        "BLOCKED": 10
+      }
+    },
+    "2026-10-10": {
+      "rows": 18,
+      "devices": {
+        "s23-ultra-history": 18
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 1,
+        "BLOCKED": 17
+      }
+    },
+    "2026-10-13": {
+      "rows": 15,
+      "devices": {
+        "s23-ultra-history": 15
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 1,
+        "BLOCKED": 13,
+        "FLAGGED_POST_CALL_QUARANTINED": 1
+      }
+    },
+    "2026-10-14": {
+      "rows": 15,
+      "devices": {
+        "s23-ultra-history": 15
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 2,
+        "BLOCKED": 13
+      }
+    },
+    "2026-10-15": {
+      "rows": 14,
+      "devices": {
+        "s23-ultra-history": 14
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 3,
+        "BLOCKED": 11
+      }
+    },
+    "2026-10-16": {
+      "rows": 16,
+      "devices": {
+        "s23-ultra-history": 16
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 5,
+        "BLOCKED": 10,
+        "FLAGGED_POST_CALL_QUARANTINED": 1
+      }
+    },
+    "2026-10-17": {
+      "rows": 18,
+      "devices": {
+        "s23-ultra-history": 18
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 8,
+        "BLOCKED": 10
+      }
+    },
+    "2026-10-19": {
+      "rows": 9,
+      "devices": {
+        "s23-ultra-history": 9
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 4,
+        "BLOCKED": 5
+      }
+    },
+    "2026-10-20": {
+      "rows": 10,
+      "devices": {
+        "s23-ultra-history": 10
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 2,
+        "BLOCKED": 8
+      }
+    },
+    "2026-10-21": {
+      "rows": 13,
+      "devices": {
+        "s23-ultra-history": 13
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 3,
+        "BLOCKED": 10
+      }
+    },
+    "2026-10-22": {
+      "rows": 12,
+      "devices": {
+        "android-edge-br": 2,
+        "s23-ultra-history": 10
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 4,
+        "BLOCKED": 7,
+        "FLAGGED_POST_CALL_QUARANTINED": 1
+      }
+    },
+    "2026-10-23": {
+      "rows": 12,
+      "devices": {
+        "android-edge-br": 9,
+        "s23-ultra-history": 3
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 2,
+        "BLOCKED": 9,
+        "USER_BLOCKED_RETROACTIVE": 1
+      }
+    },
+    "2026-10-24": {
+      "rows": 8,
+      "devices": {
+        "android-edge-br": 8
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 2,
+        "BLOCKED": 6
+      }
+    },
+    "2026-10-26": {
+      "rows": 2,
+      "devices": {
+        "android-edge-br": 2
+      },
+      "outcomes": {
+        "BLOCKED": 2
+      }
+    },
+    "2026-10-27": {
+      "rows": 2,
+      "devices": {
+        "android-edge-br": 2
+      },
+      "outcomes": {
+        "BLOCKED": 2
+      }
+    },
+    "2026-10-28": {
+      "rows": 1,
+      "devices": {
+        "android-edge-br": 1
+      },
+      "outcomes": {
+        "ALLOWED_CONTACT": 1
+      }
+    },
+    "2026-10-29": {
+      "rows": 1,
+      "devices": {
+        "android-edge-br": 1
+      },
+      "outcomes": {
+        "USER_BLOCKED_RETROACTIVE": 1
+      }
+    },
+    "2026-10-30": {
+      "rows": 2,
+      "devices": {
+        "android-edge-br": 2
+      },
+      "outcomes": {
+        "BLOCKED": 2
+      }
+    },
+    "2026-11-03": {
+      "rows": 8,
+      "devices": {
+        "android-edge-br": 6,
+        "s23-ultra-history": 2
+      },
+      "outcomes": {
+        "BLOCKED": 5,
+        "FLAGGED_POST_CALL_QUARANTINED": 2,
+        "USER_BLOCKED_RETROACTIVE": 1
+      }
+    },
+    "2026-11-04": {
+      "rows": 1,
+      "devices": {
+        "android-edge-br": 1
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 1
+      }
+    },
+    "2026-11-05": {
+      "rows": 5,
+      "devices": {
+        "android-edge-br": 5
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 3,
+        "BLOCKED": 2
+      }
+    },
+    "2026-11-06": {
+      "rows": 2,
+      "devices": {
+        "android-edge-br": 2
+      },
+      "outcomes": {
+        "FLAGGED_POST_CALL_QUARANTINED": 2
+      }
+    },
+    "2026-11-07": {
+      "rows": 2,
+      "devices": {
+        "android-edge-br": 2
+      },
+      "outcomes": {
+        "BLOCKED": 2
+      }
+    },
+    "2026-11-09": {
+      "rows": 25,
+      "devices": {
+        "android-edge-br": 25
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 1,
+        "BLOCKED": 24
+      }
+    },
+    "2026-11-10": {
+      "rows": 25,
+      "devices": {
+        "android-edge-br": 25
+      },
+      "outcomes": {
+        "ALLOWED_LOW_SCORE": 5,
+        "BLOCKED": 20
+      }
+    }
+  },
+  "limitations": [
+    "No app/build/rules version, immutable arrival decision or screening acknowledgement.",
+    "Export code reconciles and reprocesses stored rows before serializing.",
+    "No quarantines snapshot, process start times, Android logcat or complete CallLog.",
+    "Near rows are duplicate candidates; distinct physical calls cannot be ruled out from timing alone.",
+    "Unrated allowed calls are not labelled false negatives."
+  ]
+}

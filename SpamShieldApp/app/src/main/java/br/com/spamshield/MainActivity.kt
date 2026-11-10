@@ -142,6 +142,7 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
     }
 
     val telemetryList by viewModel.telemetryList.collectAsStateWithLifecycle()
+    val decisionEvents by viewModel.decisionEvents.collectAsStateWithLifecycle()
     val activeRules by viewModel.activeRules.collectAsStateWithLifecycle()
     val activeQuarantines by viewModel.activeQuarantines.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
@@ -258,12 +259,14 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
             when (selectedTab) {
                 0 -> DashboardScreen(
                     telemetryList = telemetryList,
+                    decisionEvents = decisionEvents,
                     settings = settings,
                     tailscaleStatus = tailscaleStatus,
                     onSyncNow = viewModel::syncNowWithMongoDb
                 )
                 1 -> CallAuditScreen(
                     telemetryList = telemetryList,
+                    decisionEvents = decisionEvents,
                     parseTriggeredRules = viewModel::parseTriggeredRules,
                     onMarkFeedback = viewModel::markCallFeedback
                 )

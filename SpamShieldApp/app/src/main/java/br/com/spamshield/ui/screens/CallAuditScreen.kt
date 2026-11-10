@@ -37,6 +37,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
+import br.com.spamshield.data.local.entity.CallDecisionEventEntity
+import br.com.spamshield.domain.DecisionTrace
 import br.com.spamshield.domain.PhoneNormalizer
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -45,6 +47,7 @@ import java.util.Locale
 @Composable
 fun CallAuditScreen(
     telemetryList: List<CallTelemetryEntity>,
+    decisionEvents: List<CallDecisionEventEntity>,
     parseTriggeredRules: (String) -> List<TriggeredRuleDto>,
     onMarkFeedback: (CallTelemetryEntity, String) -> Unit
 ) {
@@ -102,37 +105,9 @@ fun CallAuditScreen(
                             modifier = Modifier.padding(14.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            val sysBlockedRule = rules.firstOrNull { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }
-                            val pingRule = rules.firstOrNull { it.rule_id == "PING_CALL_PENALTY" }
-                            val arrivalRules = rules.filter {
-                                it.rule_id != "SYSTEM_CALLLOG_BLOCKED" &&
-                                    it.rule_id != "PING_CALL_PENALTY" &&
-                                    it.rule_id != "CONVERSATION_ANSWERED_BONUS"
-                            }
-                            val arrivalScore = if (arrivalRules.isNotEmpty()) {
-                                arrivalRules.sumOf { it.weight }
-                            } else {
-                                item.finalScore - (sysBlockedRule?.weight ?: 0) - (pingRule?.weight ?: 0)
-                            }
-                            val wasLearnedAfterRing = item.outcome == "BLOCKED" &&
-                                arrivalScore < item.thresholdApplied &&
-                                (sysBlockedRule != null ||
-                                    pingRule != null ||
-                                    item.category == "PING_CALL_ROBOCALL" ||
-                                    item.userFeedback == "CONFIRMED_SPAM")
-                            val isBlockedAtEdge = item.outcome == "BLOCKED" && !wasLearnedAfterRing
-                            val quarantineRule = rules.firstOrNull { it.rule_id == "PREFIX_QUARANTINE_HIT" }
-                            val displayPrefix = remember(item.prefix7, item.rawNumber, item.normalizedNumber, wasLearnedAfterRing) {
-                                if (wasLearnedAfterRing && item.prefix7.length < 8) {
-                                    val n = PhoneNormalizer.normalize(
-                                        item.rawNumber.ifBlank { item.normalizedNumber },
-                                        item.ddd.ifBlank { "31" }
-                                    )
-                                    if (n.prefix8.length == 8) n.prefix8 else item.prefix7
-                                } else {
-                                    quarantineRule?.meta?.split(' ')?.firstOrNull() ?: item.prefix7
-                                }
-                            }
+                            val callEvents = decisionEvents.filter { it.callId == item.id }
+                            val evidence = DecisionTrace.evidence(item, callEvents)
+                            val displayPrefix = item.prefix7.ifBlank { "sem prefixo" }
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -157,111 +132,48 @@ fun CallAuditScreen(
                                 }
 
                                 OutcomeBadge(
-                                    outcome = item.outcome,
+                                    outcome = evidence.label,
                                     score = item.finalScore,
-                                    wasLearnedAfterRing = wasLearnedAfterRing
+                                    wasLearnedAfterRing = evidence.dialerRejected
                                 )
                             }
 
-                            if (isBlockedAtEdge) {
-                                Surface(
-                                    color = Color(0xFFDC2626).copy(alpha = 0.12f),
-                                    shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text(
-                                        text = "🛡️ Bloqueada na borda em ${String.format(Locale.US, "%.2f", item.processingLatencyMs)} ms (Não tocou)",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = Color(0xFFDC2626),
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                    )
-                                }
-                            } else if (wasLearnedAfterRing) {
-                                val postRingBanner = when {
-                                    pingRule != null || item.category == "PING_CALL_ROBOCALL" ->
-                                        "🔔 Chamada muda (${item.callDurationSec ?: 1}s • Score inicial $arrivalScore) ➔ Quarentenada"
-                                    sysBlockedRule != null ->
-                                        "🔔 Tocou na chegada (Score inicial $arrivalScore) ➔ Quarentenada pós-rejeição"
-                                    else ->
-                                        "🔔 Tocou na chegada (Score inicial $arrivalScore) ➔ Quarentenada pelo usuário"
-                                }
-                                Surface(
-                                    color = Color(0xFFEA580C).copy(alpha = 0.12f),
-                                    shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text(
-                                        text = postRingBanner,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = Color(0xFFEA580C),
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                    )
-                                }
-                            } else if (item.outcome == "ALLOWED_LOW_SCORE") {
-                                Surface(
-                                    color = Color(0xFF16A34A).copy(alpha = 0.10f),
-                                    shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Text(
-                                        text = "✓ Permitida em tempo real (Score ${item.finalScore} < limite ${item.thresholdApplied})",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = Color(0xFF16A34A),
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                    )
-                                }
-                            }
+                            Text(
+                                text = "${evidence.label} • Score de chegada: ${evidence.arrivalScore ?: "não registrado"}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
 
                             if (expanded) {
                                 HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
 
-                                if (isBlockedAtEdge) {
-                                    Surface(
-                                        color = Color(0xFFDC2626).copy(alpha = 0.08f),
-                                        shape = RoundedCornerShape(8.dp),
-                                        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
-                                    ) {
-                                        Column(modifier = Modifier.padding(8.dp)) {
-                                            Text(
-                                                text = "🛡️ Interceptação Silenciosa em Tempo Real",
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = Color(0xFFDC2626)
-                                            )
-                                            Text(
-                                                text = "Esta chamada foi interceptada e rejeitada antes de tocar no aparelho (latência: ${String.format(Locale.US, "%.2f", item.processingLatencyMs)} ms). O score atingiu ${item.finalScore} pontos (limite: ${item.thresholdApplied}), acionando o bloqueio automático de borda.",
-                                                fontSize = 11.sp,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    }
-                                } else if (wasLearnedAfterRing) {
-                                    Surface(
-                                        color = Color(0xFFEA580C).copy(alpha = 0.10f),
-                                        shape = RoundedCornerShape(8.dp),
-                                        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
-                                    ) {
-                                        Column(modifier = Modifier.padding(8.dp)) {
-                                            Text(
-                                                text = "ℹ️ Transparência de Aprendizado Ativo",
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = Color(0xFFEA580C)
-                                            )
-                                            Text(
-                                                text = "Esta chamada tocou em tempo real porque foi a 1ª vez do prefixo (score $arrivalScore < limite ${item.thresholdApplied}). Após ser rejeitada no discador, o SpamShield aprendeu o padrão e quarentenou o bloco de 1.000 números ($displayPrefix). Novas chamadas deste bloco serão bloqueadas em < 2 ms antes de tocar.",
-                                                fontSize = 11.sp,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    }
+                                Text("Linha do tempo da chamada", fontWeight = FontWeight.Bold)
+                                if (callEvents.isEmpty()) {
+                                    Text("O histórico antigo não preservou a decisão original. A classificação atual não comprova bloqueio antes do toque.",
+                                        style = MaterialTheme.typography.bodySmall)
                                 }
+                                callEvents.forEach { event ->
+                                    val detail = DecisionTrace.details(event)
+                                    Text("${dateFormat.format(Date(event.recordedAt))} • ${DecisionTrace.eventLabel(event.eventType)}",
+                                        fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+                                    val description = listOfNotNull(
+                                        detail.outcome,
+                                        detail.score?.let { "Score $it / limite ${detail.threshold}" },
+                                        detail.disallowCall?.let { if (it) "Pedido: bloquear" else "Pedido: permitir" },
+                                        detail.systemCallType?.let { "Android: tipo $it; motivo ${detail.systemBlockReason ?: "não informado"}" },
+                                        detail.durationSec?.let { "Duração: ${it}s" },
+                                        detail.reason
+                                    ).joinToString(" • ")
+                                    Text(description, style = MaterialTheme.typography.bodySmall)
+                                    if (detail.rules.isNotEmpty()) Text(
+                                        detail.rules.joinToString("; ") { "${it.rule_id} (${it.weight})" },
+                                        style = MaterialTheme.typography.bodySmall)
+                                    Text("${event.source} • ${event.appVersion}", style = MaterialTheme.typography.labelSmall)
+                                }
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
 
                                 Text(
-                                    text = "Árvore de Decisão Vetorial",
+                                    text = "Classificação atual (pode incluir aprendizado posterior)",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 14.sp
                                 )
@@ -374,13 +286,12 @@ fun CallAuditScreen(
 @Composable
 private fun OutcomeBadge(outcome: String, score: Int, wasLearnedAfterRing: Boolean = false) {
     val (label, bgColor) = when {
-        wasLearnedAfterRing -> "APRENDIDA" to Color(0xFFEA580C)
-        outcome == "BLOCKED" -> "BLOQUEADA" to Color(0xFFDC2626)
-        outcome == "SHADOW_BLOCKED" -> "SOMBRA" to Color(0xFFD97706)
-        outcome == "ALLOWED_CONTACT" -> "AGENDA" to Color(0xFF16A34A)
-        outcome == "ALLOWED_EMERGENCY_REPEAT" -> "2ª CHAMADA" to Color(0xFF16A34A)
-        outcome == "ALLOWED_OUTBOUND_GRACE" -> "RETORNO" to Color(0xFF16A34A)
-        else -> "PERMITIDA" to Color(0xFF16A34A)
+        wasLearnedAfterRing -> "REJEITADA" to Color(0xFFEA580C)
+        outcome == "Bloqueio registrado pelo Android" -> "BLOQUEIO REGISTRADO" to Color(0xFFDC2626)
+        outcome.startsWith("Bloqueio solicitado") -> "SOLICITADO" to Color(0xFFD97706)
+        outcome.startsWith("Legado") -> "LEGADO" to Color(0xFF64748B)
+        outcome == "Atendida" -> "ATENDIDA" to Color(0xFF16A34A)
+        else -> "AUDITADA" to Color(0xFF64748B)
     }
     Surface(
         color = bgColor.copy(alpha = 0.16f),

@@ -12,6 +12,8 @@ import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.OutboundGraceEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
+import br.com.spamshield.domain.DecisionTrace
+import br.com.spamshield.domain.DecisionDetails
 import br.com.spamshield.domain.CompiledRegexRule
 import br.com.spamshield.domain.ContactAndCallLogLookup
 import br.com.spamshield.domain.HeuristicScorer
@@ -43,7 +45,9 @@ private data class RawSystemCall(
     val rawNumber: String,
     val timestamp: Long,
     val durationSec: Int,
-    val callType: Int
+    val callType: Int,
+    val blockReason: Int? = null,
+    val screeningComponent: String? = null
 )
 
 @Singleton
@@ -80,7 +84,9 @@ class CallHistoryAnalyzer @Inject constructor(
                         CallLog.Calls.NUMBER,
                         CallLog.Calls.DATE,
                         CallLog.Calls.DURATION,
-                        CallLog.Calls.TYPE
+                        CallLog.Calls.TYPE,
+                        CallLog.Calls.BLOCK_REASON,
+                        CallLog.Calls.CALL_SCREENING_COMPONENT_NAME
                     ),
                     null,
                     null,
@@ -93,7 +99,9 @@ class CallHistoryAnalyzer @Inject constructor(
                         val duration = cursor.getInt(2)
                         val type = cursor.getInt(3)
                         if (number.isNotBlank()) {
-                            rawCalls.add(RawSystemCall(number, date, duration, type))
+                            rawCalls.add(RawSystemCall(number, date, duration, type,
+                                if (cursor.isNull(4)) null else cursor.getInt(4),
+                                if (cursor.isNull(5)) null else cursor.getString(5)))
                             count++
                         }
                     }
@@ -207,15 +215,11 @@ class CallHistoryAnalyzer @Inject constructor(
                 )
 
                 if (realTimeMatch != null) {
-                    val observer = realTimeMatch.copy(
-                        id = "calllog-observer-${call.timestamp}-${norm.normalizedNumber}",
-                        timestamp = call.timestamp,
-                        stirShakenStatus = "NOT_VERIFIED",
-                        callDurationSec = call.durationSec.takeIf { it > 0 },
-                        finalScore = 0,
-                        outcome = "ALLOWED_LOW_SCORE"
-                    )
-                    dao.insertTelemetry(TelemetryCoalescer.merge(realTimeMatch, observer))
+                    // Reconcile the existing call; observers must not replace its identity or decision.
+                    spamScoringEngine.evaluatePostCallLogVerdict(norm.normalizedNumber, call.callType, call.durationSec, callTimestampMs = call.timestamp, rawNumber = call.rawNumber,
+                        systemBlockReason = call.blockReason,
+                        systemScreeningComponent = call.screeningComponent,
+                        systemScreeningAppIsSpamShield = call.screeningComponent?.let { it.substringBefore('/') == "br.com.spamshield" })
                     processedCount++
                     continue
                 }
@@ -263,7 +267,7 @@ class CallHistoryAnalyzer @Inject constructor(
                             prefix7 = storagePrefix,
                             carrierGuess = carrierGuess,
                             lineType = resolvedLineType,
-                            stirShakenStatus = "PASSED",
+                            stirShakenStatus = "NOT_VERIFIED",
                             finalScore = 0,
                             thresholdApplied = settings.blockThresholdScore,
                             outcome = "ALLOWED_CONTACT",
@@ -278,6 +282,15 @@ class CallHistoryAnalyzer @Inject constructor(
                             syncStatus = preservedSyncStatus
                         )
                     )
+                    dao.getTelemetryById(deterministicId)?.let { imported ->
+                        DecisionTrace.record(dao, imported.id, "HISTORY_ASSESSMENT", "HISTORY_IMPORT", DecisionTrace.configuredSnapshot(imported, enabledRules.values))
+                        DecisionTrace.record(dao, imported.id, "CALL_LOG_OBSERVATION", "ANDROID_CALL_LOG",
+                            DecisionDetails(systemCallType = call.callType, durationSec = call.durationSec,
+                                observedCallTimestamp = call.timestamp, systemBlockReason = call.blockReason,
+                                systemScreeningComponent = call.screeningComponent,
+                                systemScreeningAppIsSpamShield = call.screeningComponent?.let { it.substringBefore('/') == "br.com.spamshield" }),
+                                key = "${call.timestamp}|${call.callType}|${call.durationSec}|${call.blockReason}|${call.screeningComponent}")
+                    }
                     processedCount++
                     continue
                 }
@@ -362,6 +375,15 @@ class CallHistoryAnalyzer @Inject constructor(
                         syncStatus = preservedSyncStatus
                     )
                 )
+                dao.getTelemetryById(deterministicId)?.let { imported ->
+                    DecisionTrace.record(dao, imported.id, "HISTORY_ASSESSMENT", "HISTORY_IMPORT", DecisionTrace.configuredSnapshot(imported, enabledRules.values))
+                    DecisionTrace.record(dao, imported.id, "CALL_LOG_OBSERVATION", "ANDROID_CALL_LOG",
+                        DecisionDetails(systemCallType = call.callType, durationSec = call.durationSec,
+                            observedCallTimestamp = call.timestamp, systemBlockReason = call.blockReason,
+                            systemScreeningComponent = call.screeningComponent,
+                            systemScreeningAppIsSpamShield = call.screeningComponent?.let { it.substringBefore('/') == "br.com.spamshield" }),
+                            key = "${call.timestamp}|${call.callType}|${call.durationSec}|${call.blockReason}|${call.screeningComponent}")
+                }
                 processedCount++
 
                 val shouldQuarantinePrefix = isSpam &&
@@ -395,6 +417,8 @@ class CallHistoryAnalyzer @Inject constructor(
                             expiresAt = now + SpamScoringEngine.QUARANTINE_DEFAULT_TTL_MS
                         )
                     )
+                    DecisionTrace.record(dao, deterministicId, "QUARANTINE_UPDATED", "HISTORY_IMPORT",
+                        DecisionDetails(prefix = storagePrefix, reason = "${if (wasBlockedOrRejectedAfterRing) "DIALER_REJECTED" else category}; expiresAt=${now + SpamScoringEngine.QUARANTINE_DEFAULT_TTL_MS}"))
                 } else if (isSpam) {
                     spamDetectedCount++
                 }
@@ -451,6 +475,7 @@ class CallHistoryAnalyzer @Inject constructor(
                 val durIdx = cursor.getColumnIndex(CallLog.Calls.DURATION)
                 val dateIdx = cursor.getColumnIndex(CallLog.Calls.DATE)
                 val blockReasonIdx = cursor.getColumnIndex("block_reason")
+                val screeningComponentIdx = cursor.getColumnIndex("call_screening_component_name")
                 if (numIdx < 0 || typeIdx < 0 || durIdx < 0) return@use
 
                 val now = System.currentTimeMillis()
@@ -462,7 +487,9 @@ class CallHistoryAnalyzer @Inject constructor(
                     val callType = cursor.getInt(typeIdx)
                     val durationSec = cursor.getInt(durIdx)
                     val callDate = if (dateIdx >= 0) cursor.getLong(dateIdx) else null
-                    val isSystemBlocked = if (blockReasonIdx >= 0) cursor.getInt(blockReasonIdx) != 0 else false
+                    val systemBlockReason = if (blockReasonIdx >= 0 && !cursor.isNull(blockReasonIdx)) cursor.getInt(blockReasonIdx) else null
+                    val isSystemBlocked = (systemBlockReason ?: 0) != 0
+                    val screeningComponent = if (screeningComponentIdx >= 0) cursor.getString(screeningComponentIdx) else null
 
                     val norm = PhoneNormalizer.normalize(rawNumber)
                     if (norm.normalizedNumber.isEmpty()) continue
@@ -472,6 +499,10 @@ class CallHistoryAnalyzer @Inject constructor(
                         callType = callType,
                         callDurationSec = durationSec,
                         isSystemBlocked = isSystemBlocked,
+                        systemBlockReason = systemBlockReason,
+                        rawNumber = rawNumber,
+                        systemScreeningComponent = screeningComponent,
+                        systemScreeningAppIsSpamShield = screeningComponent?.let { it.substringBefore('/') == "br.com.spamshield" },
                         callTimestampMs = callDate,
                         nowMillis = now
                     )
@@ -634,6 +665,8 @@ internal suspend fun reprocessStoredTelemetry(
                     category = "LEGITIMATE",
                     finalScore = 0
                 )
+                DecisionTrace.record(dao, row.id, "REPROCESS_EVALUATION", "HISTORY_REPROCESSOR",
+                    DecisionTrace.snapshot(updatedRow).copy(reason = "PROTECTED_ALLOW"))
                 if (updatedRow != row) {
                     dao.insertTelemetry(updatedRow.copy(syncStatus = "PENDING"))
                     updatedCount++
@@ -717,6 +750,7 @@ internal suspend fun reprocessStoredTelemetry(
                 triggeredRulesJson = newRulesJson
             )
 
+            DecisionTrace.record(dao, row.id, "REPROCESS_EVALUATION", "HISTORY_REPROCESSOR", DecisionTrace.configuredSnapshot(updatedRow, enabledRules.values).copy(reason = "REASSESSMENT_WITH_CURRENT_RULES; cluster_scope=ALL_STORED_HISTORY"))
             if (updatedRow != row) {
                 dao.insertTelemetry(updatedRow.copy(syncStatus = "PENDING"))
                 updatedCount++
@@ -753,6 +787,8 @@ internal suspend fun reprocessStoredTelemetry(
                             expiresAt = maxOf(existingQ?.expiresAt ?: 0L, now + SpamScoringEngine.QUARANTINE_DEFAULT_TTL_MS)
                         )
                     )
+                    DecisionTrace.record(dao, row.id, "QUARANTINE_UPDATED", "HISTORY_REPROCESSOR",
+                        DecisionDetails(prefix = qTargetPrefix, reason = "${if (learnedFromRejection) "DIALER_REJECTED" else newCategory}; expiresAt=${maxOf(existingQ?.expiresAt ?: 0L, now + SpamScoringEngine.QUARANTINE_DEFAULT_TTL_MS)}"))
                 }
             }
         }

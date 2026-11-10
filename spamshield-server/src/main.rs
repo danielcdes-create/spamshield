@@ -127,6 +127,11 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
                     },
                 ],
             },
+            decision_events: vec![crate::models::DecisionEventDoc {
+                event_id: "original-arrival".to_string(), recorded_at: 1794400000000,
+                event_type: "SCREENING_DECISION".to_string(), source: "CALL_SCREENING_SERVICE".to_string(),
+                app_version: "test".to_string(), details: serde_json::json!({"score":45,"outcome":"ALLOWED_LOW_SCORE"}),
+            }],
             audit: AuditInfo {
                 user_feedback: UserFeedback::UNRATED,
                 synced_at: Utc::now(),
@@ -142,11 +147,20 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
         let bson_doc = roundtrip.to_bson_document();
         assert_eq!(bson_doc.get_str("_id").unwrap(), "test-uuid-1234");
         assert!(bson_doc.get_datetime("timestamp").is_ok());
+        let events = bson_doc.get_array("decision_events").unwrap();
+        assert_eq!(events[0].as_document().unwrap().get_str("event_id").unwrap(), "original-arrival");
+        assert_eq!(roundtrip.decision_events[0].details["score"], 45);
+        let mut legacy = serde_json::to_value(&doc).unwrap();
+        legacy.as_object_mut().unwrap().remove("decision_events");
+        let parsed: CallTelemetryDoc = serde_json::from_value(legacy).unwrap();
+        assert!(parsed.decision_events.is_empty());
     }
 
     #[tokio::test]
+    #[ignore = "Requires explicit isolated MongoDB database ending in _test"]
     async fn test_mongodb_init_and_end_to_end_api() {
         let cfg = AppConfig::from_env();
+        assert!(cfg.mongodb_db_name.ends_with("_test"), "Integration tests must use an isolated database ending in _test");
         let app_db = AppDatabase::connect(&cfg)
             .await
             .expect("Failed to connect to MongoDB Atlas");
@@ -222,6 +236,7 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
                 ],
             },
             audit: AuditInfo::default(),
+            decision_events: vec![],
         }];
 
         let req_batch = Request::builder()

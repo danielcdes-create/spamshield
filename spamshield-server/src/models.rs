@@ -260,6 +260,16 @@ impl Default for AuditInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionEventDoc {
+    pub event_id: String,
+    pub recorded_at: i64,
+    pub event_type: String,
+    pub source: String,
+    pub app_version: String,
+    pub details: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallTelemetryDoc {
     #[serde(rename = "_id")]
     pub id: String,
@@ -270,6 +280,8 @@ pub struct CallTelemetryDoc {
     pub decision_vector: DecisionVector,
     #[serde(default)]
     pub audit: AuditInfo,
+    #[serde(default)]
+    pub decision_events: Vec<DecisionEventDoc>,
 }
 
 impl CallTelemetryDoc {
@@ -306,6 +318,7 @@ impl CallTelemetryDoc {
             "_id": &self.id,
             "timestamp": BsonDateTime::from_chrono(self.timestamp),
             "device_id": &self.device_id,
+            "decision_events": bson::to_bson(&self.decision_events).expect("validated event documents"),
             "call_details": {
                 "raw_number": &self.call_details.raw_number,
                 "normalized_number": &self.call_details.normalized_number,
@@ -381,6 +394,7 @@ pub struct AnatelNumberingPlanDoc {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchTelemetryResponse {
     pub accepted_ids: Vec<String>,
+    pub accepted_event_ids: Vec<String>,
     pub quarantine_updates: usize,
 }
 
@@ -439,6 +453,8 @@ pub struct HourlyHeatmapItem {
 pub struct AnalyticsSummaryResponse {
     pub total_intercepted: i64,
     pub total_blocked: i64,
+    pub total_block_requests: i64,
+    pub total_dialer_rejected: i64,
     pub avg_processing_latency_ms: f64,
     pub top_attacking_prefixes: Vec<PrefixStatItem>,
     pub carrier_distribution: Vec<CarrierStatItem>,

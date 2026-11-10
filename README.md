@@ -1,4 +1,6 @@
-# SpamShield BR (`v1.3.0` — Build `14`)
+# SpamShield BR (`v1.3.1` — Build `15`)
+
+**v1.3.1 / Build 15:** diário de decisões de chamadas, separação entre bloqueio solicitado, bloqueio registrado pelo Android e rejeição no discador. Consulte o [contrato de telemetria](docs/TELEMETRIA-DECISOES.md).
 
 ### Novidades da versão v1.3.0 (Build 14):
 - Parser E.164, prefixo de 8 dígitos, mutex VoIP e equação de score conforme `NT-SPAMSHIELD-2026-001`.

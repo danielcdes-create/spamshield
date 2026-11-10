@@ -92,7 +92,8 @@ class SpamScoringEngine @Inject constructor(
     suspend fun evaluateIncomingCall(
         rawNumber: String,
         stirShakenStatus: String, // PASSED | FAILED | NOT_VERIFIED
-        nowMillis: Long = System.currentTimeMillis()
+        nowMillis: Long = System.currentTimeMillis(),
+        decisionSource: String = "SIMULATION"
     ): CallEvaluationResult {
         val startNanos = safeElapsedNanos()
         val settings = settingsDataStore.getSnapshot()
@@ -144,7 +145,8 @@ class SpamScoringEngine @Inject constructor(
                 ruleId = "CONTACT_WHITELIST",
                 ruleWeight = -1000,
                 startNanos = startNanos,
-                nowMillis = nowMillis
+                nowMillis = nowMillis,
+                decisionSource = decisionSource
             )
         }
 
@@ -172,7 +174,8 @@ class SpamScoringEngine @Inject constructor(
                         ruleId = "EMERGENCY_REPEATED_CALL",
                         ruleWeight = -500,
                         startNanos = startNanos,
-                        nowMillis = nowMillis
+                        nowMillis = nowMillis,
+                        decisionSource = decisionSource
                     )
                 }
             }
@@ -207,7 +210,8 @@ class SpamScoringEngine @Inject constructor(
                     ruleId = "OUTBOUND_GRACE_PERIOD",
                     ruleWeight = -500,
                     startNanos = startNanos,
-                    nowMillis = nowMillis
+                    nowMillis = nowMillis,
+                    decisionSource = decisionSource
                 )
             }
         }
@@ -248,6 +252,7 @@ class SpamScoringEngine @Inject constructor(
         )
         val triggeredRules = decision.triggeredRules.toMutableList()
 
+        var distinctNumbers24h: Int? = null
         val burstPrefix = normalized.storedPrefix7.orEmpty()
         if (burstPrefix.length == 8) {
             val distinctIn24h = dao.countDistinctNumbersInPrefix7Since(
@@ -259,6 +264,7 @@ class SpamScoringEngine @Inject constructor(
                 sinceTimestamp = nowMillis - NEIGHBORHOOD_BURST_WINDOW_MS
             )
             val effectiveDistinctCount = if (prevCallForSameNumber == 0) distinctIn24h + 1 else distinctIn24h
+            distinctNumbers24h = effectiveDistinctCount
             if (effectiveDistinctCount >= 2) {
                 val burstWeight = enabledRules["PREFIX_NEIGHBORHOOD_BURST"]?.weight ?: 60
                 triggeredRules.add(
@@ -362,11 +368,21 @@ class SpamScoringEngine @Inject constructor(
             syncStatus = "PENDING"
         )
 
-        insertCoalesced(telemetryEntity)
+        val persisted = insertCoalesced(telemetryEntity)
+        DecisionTrace.record(dao, persisted.id, "SCREENING_DECISION", decisionSource,
+            DecisionTrace.configuredSnapshot(telemetryEntity, enabledRules.values).copy(
+                quarantineMatch = quarantineMatch.name,
+                quarantineCacheReady = QuarantinePrefixIndex.isReady,
+                quarantineCacheSize = QuarantinePrefixIndex.size,
+                distinctNumbers24h = distinctNumbers24h))
 
+        if ((outcome == "BLOCKED" || outcome == "SHADOW_BLOCKED") && storagePrefix.length == 8) {
+            DecisionTrace.record(dao, persisted.id, "QUARANTINE_UPDATED", decisionSource,
+                DecisionDetails(prefix = storagePrefix, reason = "$category; expiresAt=${nowMillis + QUARANTINE_DEFAULT_TTL_MS}"))
+        }
         val shouldBlock = outcome == "BLOCKED"
         return CallEvaluationResult(
-            telemetry = telemetryEntity,
+            telemetry = telemetryEntity.copy(id = persisted.id),
             shouldDisallowAndReject = shouldBlock,
             shouldSkipNotification = shouldBlock,
             shouldSkipCallLog = shouldBlock && settings.hideBlockedFromSystemCallLog,
@@ -388,10 +404,11 @@ class SpamScoringEngine @Inject constructor(
     suspend fun evaluatePostCallPingDetector(
         normalizedNumber: String,
         callDurationSec: Int,
-        nowMillis: Long = System.currentTimeMillis()
+        nowMillis: Long = System.currentTimeMillis(),
+        callId: String? = null
     ): Boolean {
         if (callDurationSec !in 1..11) return false
-        val latest = dao.getLatestTelemetryForNumber(normalizedNumber) ?: return false
+        val latest = (if (callId != null) dao.getTelemetryById(callId) else dao.getLatestTelemetryForNumber(normalizedNumber)) ?: return false
         if (latest.outcome != "ALLOWED_LOW_SCORE") return false
 
         val existingRules = runCatching {
@@ -466,18 +483,60 @@ class SpamScoringEngine @Inject constructor(
         callDurationSec: Int,
         isSystemBlocked: Boolean = false,
         callTimestampMs: Long? = null,
-        nowMillis: Long = System.currentTimeMillis()
+        nowMillis: Long = System.currentTimeMillis(),
+        systemBlockReason: Int? = null,
+        rawNumber: String? = null,
+        systemScreeningComponent: String? = null,
+        systemScreeningAppIsSpamShield: Boolean? = null
     ): Boolean {
         val latest = if (callTimestampMs != null) {
-            dao.findRealTimeTelemetryNearTimestamp(
-                normalizedNumber = normalizedNumber,
-                minTs = callTimestampMs - 60_000L,
-                maxTs = callTimestampMs + 60_000L
-            ) ?: dao.getLatestTelemetryForNumber(normalizedNumber)
-        } else {
-            dao.getLatestTelemetryForNumber(normalizedNumber)
-        } ?: return false
+            dao.findRealTimeTelemetryNearTimestamp(normalizedNumber,
+                callTimestampMs - TelemetryCoalescer.WINDOW_MS,
+                callTimestampMs + TelemetryCoalescer.WINDOW_MS)
+        } else dao.getLatestTelemetryForNumber(normalizedNumber)
+        // A timestamped observation must never be attached to an unrelated latest call.
+        val target = latest ?: run {
+            val n = PhoneNormalizer.normalize(rawNumber ?: normalizedNumber)
+            val callAt = callTimestampMs ?: nowMillis
+            val id = UUID.nameUUIDFromBytes("calllog-$callAt-${n.normalizedNumber}".toByteArray()).toString()
+            dao.getTelemetryById(id) ?: CallTelemetryEntity(
+                id = id, timestamp = callAt, deviceId = "s23-ultra-history", rawNumber = rawNumber ?: normalizedNumber,
+                normalizedNumber = n.normalizedNumber, ddd = n.ddd, prefix7 = n.storedPrefix7.orEmpty(),
+                carrierGuess = n.carrierHint, lineType = n.lineType, stirShakenStatus = "NOT_VERIFIED",
+                finalScore = 0, thresholdApplied = settingsDataStore.getSnapshot().blockThresholdScore,
+                outcome = "ALLOWED_LOW_SCORE", category = "UNKNOWN_UNVERIFIED", processingLatencyMs = 0.0,
+                shadowModeActive = false, callDurationSec = callDurationSec, triggeredRulesJson = "[]"
+            ).also { dao.insertTelemetry(it) }
+        }
+        DecisionTrace.record(dao, target.id, "CALL_LOG_OBSERVATION", "ANDROID_CALL_LOG",
+            DecisionDetails(systemCallType = callType, durationSec = callDurationSec,
+                rawNumber = rawNumber, normalizedNumber = normalizedNumber,
+                systemBlockReason = systemBlockReason, observedCallTimestamp = callTimestampMs,
+                systemScreeningComponent = systemScreeningComponent,
+                systemScreeningAppIsSpamShield = systemScreeningAppIsSpamShield),
+            at = nowMillis, key = "$callTimestampMs|$callType|$callDurationSec|$systemBlockReason|$systemScreeningComponent")
+        val prefix = extractQuarantinePrefix(target.normalizedNumber, target.prefix7)
+        val beforeQ = dao.getAllQuarantines().firstOrNull { it.prefix7 == prefix }
+        val changed = applyPostCallLogVerdict(target, normalizedNumber, callType, callDurationSec,
+            isSystemBlocked, nowMillis)
+        val after = dao.getTelemetryById(target.id) ?: target
+        DecisionTrace.record(dao, target.id, "POST_CALL_EVALUATION", "POST_CALL_ANALYZER",
+            DecisionTrace.snapshot(after).copy(reason = "CallLog type=$callType; blockReason=$systemBlockReason"), at = nowMillis)
+        val afterQ = dao.getAllQuarantines().firstOrNull { it.prefix7 == prefix }
+        if (afterQ != beforeQ) DecisionTrace.record(dao, target.id, "QUARANTINE_UPDATED", "POST_CALL_ANALYZER",
+            DecisionDetails(prefix = prefix, reason = "${afterQ?.reason}; expiresAt=${afterQ?.expiresAt}"), at = nowMillis)
+        TelemetrySyncScheduler.enqueueImmediateSync()
+        return changed
+    }
 
+    private suspend fun applyPostCallLogVerdict(
+        latest: CallTelemetryEntity,
+        normalizedNumber: String,
+        callType: Int,
+        callDurationSec: Int,
+        isSystemBlocked: Boolean,
+        nowMillis: Long
+    ): Boolean {
         val currentDuration = latest.callDurationSec
 
         // Se é contato da agenda ou chamada de saída protegida por grace, apenas atualiza duração
@@ -634,7 +693,7 @@ class SpamScoringEngine @Inject constructor(
 
         // 2. Chamada atendida: 1-5s ping, 6-11s robocall curto, >= 12s bônus
         if (callType == android.provider.CallLog.Calls.INCOMING_TYPE && callDurationSec in 1..11) {
-            return evaluatePostCallPingDetector(normalizedNumber, callDurationSec, nowMillis)
+            return evaluatePostCallPingDetector(normalizedNumber, callDurationSec, nowMillis, latest.id)
         }
 
         // 3. Chamada Perdida / Não Atendida (MISSED_TYPE ou duration == 0)
@@ -714,16 +773,19 @@ class SpamScoringEngine @Inject constructor(
         return false
     }
 
-    private suspend fun insertCoalesced(entity: CallTelemetryEntity) {
+    private suspend fun insertCoalesced(entity: CallTelemetryEntity): CallTelemetryEntity {
         val prior = dao.getLatestTelemetryForNumber(entity.normalizedNumber)
         if (
             prior != null &&
             prior.id != entity.id &&
-            kotlin.math.abs(prior.timestamp - entity.timestamp) <= TelemetryCoalescer.WINDOW_MS
+            prior.timestamp == entity.timestamp
         ) {
-            dao.insertTelemetry(TelemetryCoalescer.merge(prior, entity))
+            val merged = TelemetryCoalescer.merge(prior, entity).copy(id = prior.id)
+            dao.insertTelemetry(merged)
+            return merged
         } else {
             dao.insertTelemetry(entity)
+            return entity
         }
     }
 
@@ -739,7 +801,8 @@ class SpamScoringEngine @Inject constructor(
         ruleId: String,
         ruleWeight: Int,
         startNanos: Long,
-        nowMillis: Long
+        nowMillis: Long,
+        decisionSource: String
     ): CallEvaluationResult {
         val rules = listOf(TriggeredRuleDto(ruleId, ruleWeight, null))
         val latencyMs = (safeElapsedNanos() - startNanos).coerceAtLeast(50_000L) / 1_000_000.0
@@ -765,9 +828,10 @@ class SpamScoringEngine @Inject constructor(
             userFeedback = "UNRATED",
             syncStatus = "PENDING"
         )
-        dao.insertTelemetry(entity)
+        val persisted = insertCoalesced(entity)
+        DecisionTrace.record(dao, persisted.id, "SCREENING_DECISION", decisionSource, DecisionTrace.snapshot(entity))
         return CallEvaluationResult(
-            telemetry = entity,
+            telemetry = entity.copy(id = persisted.id),
             shouldDisallowAndReject = false,
             shouldSkipNotification = false,
             shouldSkipCallLog = false,

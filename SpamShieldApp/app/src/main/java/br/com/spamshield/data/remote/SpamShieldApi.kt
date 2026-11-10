@@ -1,6 +1,9 @@
 package br.com.spamshield.data.remote
 
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
+import br.com.spamshield.data.local.entity.CallDecisionEventEntity
+import br.com.spamshield.domain.DecisionDetails
+import br.com.spamshield.domain.DecisionTrace
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import retrofit2.http.Body
@@ -41,6 +44,20 @@ data class AuditRemoteDto(
 )
 
 @Serializable
+data class DecisionEventRemoteDto(
+    val event_id: String,
+    val recorded_at: Long,
+    val event_type: String,
+    val source: String,
+    val app_version: String,
+    val details: DecisionDetails
+)
+
+fun CallDecisionEventEntity.toRemoteEvent() = DecisionEventRemoteDto(
+    eventId, recordedAt, eventType, source, appVersion, DecisionTrace.details(this)
+)
+
+@Serializable
 data class CallTelemetryRemoteDto(
     @SerialName("_id")
     val id: String,
@@ -48,12 +65,14 @@ data class CallTelemetryRemoteDto(
     val device_id: String,
     val call_details: CallDetailsRemoteDto,
     val decision_vector: DecisionVectorRemoteDto,
-    val audit: AuditRemoteDto
+    val audit: AuditRemoteDto,
+    val decision_events: List<DecisionEventRemoteDto> = emptyList()
 )
 
 @Serializable
 data class BatchTelemetryResponseDto(
     val accepted_ids: List<String> = emptyList(),
+    val accepted_event_ids: List<String> = emptyList(),
     val quarantine_updates: Int = 0
 )
 

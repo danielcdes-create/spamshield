@@ -12,6 +12,20 @@ data class TriggeredRuleDto(
     val meta: String? = null
 )
 
+/** Separate append-only journal: replacing/reprocessing telemetry cannot erase decisions. */
+@Serializable
+@Entity(tableName = "call_decision_events", indices = [Index(value = ["callId", "recordedAt"]), Index(value = ["syncStatus"])])
+data class CallDecisionEventEntity(
+    @PrimaryKey val eventId: String,
+    val callId: String,
+    val recordedAt: Long,
+    val eventType: String,
+    val source: String,
+    val appVersion: String,
+    val detailsJson: String,
+    val syncStatus: String = "PENDING"
+)
+
 @Serializable
 @Entity(
     tableName = "call_telemetry",

@@ -37,10 +37,16 @@ pub async fn post_telemetry_batch(
     if batch.is_empty() {
         return Ok(Json(BatchTelemetryResponse {
             accepted_ids: vec![],
+            accepted_event_ids: vec![],
             quarantine_updates: 0,
         }));
     }
 
+    // Validate before constructing BSON or acknowledging journal events.
+    if batch.iter().any(|call| bson::to_bson(&call.decision_events).is_err()) {
+        return Err((StatusCode::BAD_REQUEST, "Invalid decision event document".to_string()));
+    }
+    let accepted_event_ids = batch.iter().flat_map(|call| call.decision_events.iter().map(|event| event.event_id.clone())).collect();
     let accepted_ids: Vec<String> = batch.iter().map(|d| d.id.clone()).collect();
     let now_utc = Utc::now();
     let now_bson = BsonDateTime::from_chrono(now_utc);
@@ -114,6 +120,7 @@ pub async fn post_telemetry_batch(
                     .get_document("decision_vector")
                     .cloned()
                     .unwrap_or_default();
+                let events = full_doc.get_array("decision_events").cloned().unwrap_or_default();
                 let fb = call.audit.user_feedback.as_str().to_string();
                 (
                     doc! { "_id": &call.id },
@@ -123,7 +130,8 @@ pub async fn post_telemetry_batch(
                             "decision_vector": decision_vector,
                             "audit.user_feedback": fb,
                             "audit.synced_at": now_bson,
-                        }
+                        },
+                        "$addToSet": { "decision_events": { "$each": events } }
                     },
                     false,
                 )
@@ -131,6 +139,7 @@ pub async fn post_telemetry_batch(
             .collect();
         if let Err(err) = db.bulk_update_ones("call_telemetry", updates).await {
             error!("Error during telemetry batch bulk update: {}", err);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Telemetry update failed; no acknowledgement".to_string()));
         }
     }
 
@@ -218,6 +227,7 @@ pub async fn post_telemetry_batch(
 
     Ok(Json(BatchTelemetryResponse {
         accepted_ids,
+        accepted_event_ids,
         quarantine_updates,
     }))
 }
@@ -259,7 +269,15 @@ pub async fn patch_telemetry_feedback(
         }
 
         telemetry_coll
-            .update_one(doc! { "_id": &id }, doc! { "$set": set_doc })
+            .update_one(doc! { "_id": &id }, doc! {
+                "$set": set_doc,
+                "$push": { "decision_events": {
+                    "event_id": uuid::Uuid::new_v4().to_string(),
+                    "recorded_at": Utc::now().timestamp_millis(),
+                    "event_type": "USER_FEEDBACK", "source": "FEEDBACK_API", "app_version": "server",
+                    "details": { "reason": payload.user_feedback.as_str() }
+                }}
+            })
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

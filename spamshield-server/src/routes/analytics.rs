@@ -17,7 +17,22 @@ pub async fn get_analytics_summary(
     State(state): State<AppState>,
 ) -> Result<Json<AnalyticsSummaryResponse>, (StatusCode, String)> {
     let db = &state.db;
-    let pipeline = vec![doc! {
+    let latest = |event_type: &str, source: Option<&str>| {
+        let mut clauses = vec![bson::Bson::Document(doc! { "$eq": ["$$e.event_type", event_type] })];
+        if let Some(source) = source { clauses.push(bson::Bson::Document(doc! { "$eq": ["$$e.source", source] })); }
+        doc! { "$arrayElemAt": [{ "$filter": {
+            "input": { "$ifNull": ["$decision_events", []] }, "as": "e", "cond": { "$and": clauses }
+        }}, -1] }
+    };
+    let pipeline = vec![doc! { "$set": {
+        "_screening_response": latest("SCREENING_RESPONSE_SUBMITTED", Some("CALL_SCREENING_SERVICE")),
+        "_call_log_observation": latest("CALL_LOG_OBSERVATION", None),
+    }}, doc! { "$set": { "_confirmed_block": { "$and": [
+        { "$eq": ["$_screening_response.details.disallowCall", true] },
+        { "$eq": ["$_call_log_observation.details.systemCallType", 6] },
+        { "$eq": ["$_call_log_observation.details.systemBlockReason", 1] },
+        { "$ne": ["$_call_log_observation.details.systemScreeningAppIsSpamShield", false] }
+    ]}}}, doc! {
         "$facet": {
             "totals": [
                 {
@@ -27,12 +42,14 @@ pub async fn get_analytics_summary(
                         "total_blocked": {
                             "$sum": {
                                 "$cond": [
-                                    { "$in": ["$decision_vector.outcome", ["BLOCKED", "SHADOW_BLOCKED"]] },
+                                    "$_confirmed_block",
                                     1,
                                     0
                                 ]
                             }
                         },
+                        "total_block_requests": { "$sum": { "$cond": [{ "$eq": ["$_screening_response.details.disallowCall", true] }, 1, 0] } },
+                        "total_dialer_rejected": { "$sum": { "$cond": [{ "$eq": ["$_call_log_observation.details.systemCallType", 5] }, 1, 0] } },
                         "avg_latency": { "$avg": "$decision_vector.processing_latency_ms" }
                     }
                 }
@@ -40,7 +57,7 @@ pub async fn get_analytics_summary(
             "top_prefixes": [
                 {
                     "$match": {
-                        "decision_vector.outcome": { "$in": ["BLOCKED", "SHADOW_BLOCKED"] }
+                        "_confirmed_block": true
                     }
                 },
                 {
@@ -95,6 +112,8 @@ pub async fn get_analytics_summary(
 
     let mut total_intercepted = 0_i64;
     let mut total_blocked = 0_i64;
+    let mut total_block_requests = 0_i64;
+    let mut total_dialer_rejected = 0_i64;
     let mut avg_processing_latency_ms = 0.0_f64;
     let mut top_attacking_prefixes = Vec::new();
     let mut carrier_distribution = Vec::new();
@@ -110,6 +129,8 @@ pub async fn get_analytics_summary(
             if let Some(first_total) = totals_arr.first().and_then(|b| b.as_document()) {
                 total_intercepted = doc_get_i64(first_total, "total_intercepted");
                 total_blocked = doc_get_i64(first_total, "total_blocked");
+                total_block_requests = doc_get_i64(first_total, "total_block_requests");
+                total_dialer_rejected = doc_get_i64(first_total, "total_dialer_rejected");
                 avg_processing_latency_ms = first_total.get_f64("avg_latency").unwrap_or(0.0);
             }
         }
@@ -170,6 +191,8 @@ pub async fn get_analytics_summary(
     Ok(Json(AnalyticsSummaryResponse {
         total_intercepted,
         total_blocked,
+        total_block_requests,
+        total_dialer_rejected,
         avg_processing_latency_ms,
         top_attacking_prefixes,
         carrier_distribution,

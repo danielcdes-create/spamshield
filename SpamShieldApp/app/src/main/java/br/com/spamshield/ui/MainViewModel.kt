@@ -8,6 +8,13 @@ import br.com.spamshield.data.local.SettingsDataStore
 import br.com.spamshield.data.local.SpamShieldSettings
 import br.com.spamshield.data.local.dao.SpamShieldDao
 import br.com.spamshield.data.local.entity.ActiveRuleEntity
+import br.com.spamshield.data.local.entity.CallDecisionEventEntity
+import br.com.spamshield.data.remote.toRemoteEvent
+import br.com.spamshield.domain.DecisionTrace
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonObject
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
@@ -83,6 +90,9 @@ class MainViewModel @Inject constructor(
 
     val telemetryList: StateFlow<List<CallTelemetryEntity>> = dao
         .observeAllTelemetry()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val decisionEvents: StateFlow<List<CallDecisionEventEntity>> = dao.observeDecisionEvents()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val activeRules: StateFlow<List<ActiveRuleEntity>> = dao
@@ -379,16 +389,21 @@ class MainViewModel @Inject constructor(
         exportDir.mkdirs()
 
         val jsonFile = File(exportDir, "spamshield_telemetry.json")
-        jsonFile.writeText(json.encodeToString(all))
+        val events = dao.getAllDecisionEvents().groupBy { it.callId }
+        jsonFile.writeText(br.com.spamshield.domain.TelemetryExport.encode(all, events.values.flatten()))
 
         val csvFile = File(exportDir, "spamshield_telemetry.csv")
         val sb = StringBuilder()
-        sb.appendLine("id,timestamp,rawNumber,normalizedNumber,ddd,prefix7,carrierGuess,lineType,stirShakenStatus,finalScore,thresholdApplied,outcome,category,processingLatencyMs,userFeedback,syncStatus")
+        sb.appendLine("id,timestamp,rawNumber,normalizedNumber,ddd,prefix7,carrierGuess,lineType,stirShakenStatus,finalScore,thresholdApplied,outcome,category,processingLatencyMs,userFeedback,syncStatus,arrivalScore,observedResult,decisionEventsJson")
+        fun csv(value: String) = "\"" + value.replace("\"", "\"\"") + "\""
         for (row in all) {
+            val callEvents = events[row.id].orEmpty()
+            val evidence = DecisionTrace.evidence(row, callEvents)
             sb.appendLine(
                 "${row.id},${row.timestamp},${row.rawNumber},${row.normalizedNumber},${row.ddd},${row.prefix7}," +
                     "\"${row.carrierGuess ?: ""}\",${row.lineType},${row.stirShakenStatus},${row.finalScore}," +
-                    "${row.thresholdApplied},${row.outcome},${row.category},${row.processingLatencyMs},${row.userFeedback},${row.syncStatus}"
+                    "${row.thresholdApplied},${row.outcome},${row.category},${row.processingLatencyMs},${row.userFeedback},${row.syncStatus}," +
+                    "${evidence.arrivalScore ?: ""},${csv(evidence.label)},${csv(json.encodeToString(callEvents.map { it.toRemoteEvent() }))}"
             )
         }
         csvFile.writeText(sb.toString())
