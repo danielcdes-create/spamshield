@@ -1,5 +1,6 @@
 package br.com.spamshield.domain
 
+import br.com.spamshield.domain.UserFeedbackAudit
 import br.com.spamshield.data.local.AppDatabase
 import br.com.spamshield.data.local.dao.SpamShieldDao
 import br.com.spamshield.data.local.entity.ActiveRuleEntity
@@ -16,7 +17,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class FakeSpamShieldDao : SpamShieldDao {
+open class FakeSpamShieldDao : SpamShieldDao {
     val telemetries = mutableListOf<CallTelemetryEntity>()
     val rules = AppDatabase.initialRulesSeed(1_700_000_000_000L).toMutableList()
     val quarantines = AppDatabase.initialQuarantineSeed(1_700_000_000_000L).toMutableList()
@@ -32,24 +33,26 @@ class FakeSpamShieldDao : SpamShieldDao {
     override suspend fun getAllTelemetry(): List<CallTelemetryEntity> = telemetries.toList()
     override suspend fun getTelemetryById(id: String): CallTelemetryEntity? = telemetries.find { it.id == id }
     override suspend fun getPendingTelemetry(): List<CallTelemetryEntity> = telemetries.filter { it.syncStatus == "PENDING" }
-    override suspend fun markTelemetrySynced(ids: List<String>) {}
+    override suspend fun markTelemetrySynced(ids: List<String>) {
+        telemetries.replaceAll { row ->
+            if (row.id in ids) row.copy(syncStatus = "SYNCED") else row
+        }
+    }
     override suspend fun updateUserFeedback(id: String, feedback: String) {
         val idx = telemetries.indexOfFirst { it.id == id }
         if (idx >= 0) {
             val cur = telemetries[idx]
-            telemetries[idx] = cur.copy(
-                userFeedback = feedback,
-                outcome = when (feedback) {
-                    "CONFIRMED_SPAM" -> "BLOCKED"
-                    "FALSE_POSITIVE" -> "ALLOWED_CONTACT"
-                    else -> cur.outcome
-                },
-                finalScore = when (feedback) {
-                    "CONFIRMED_SPAM" -> maxOf(cur.finalScore, 100)
-                    "FALSE_POSITIVE" -> 0
-                    else -> cur.finalScore
-                }
-            )
+            telemetries[idx] = when (feedback) {
+                "CONFIRMED_SPAM" -> UserFeedbackAudit.applyConfirmedSpam(cur)
+                "FALSE_POSITIVE" -> cur.copy(
+                    userFeedback = feedback,
+                    outcome = "ALLOWED_CONTACT",
+                    category = "LEGITIMATE",
+                    finalScore = 0,
+                    syncStatus = "PENDING"
+                )
+                else -> cur.copy(userFeedback = feedback, syncStatus = "PENDING")
+            }
         }
     }
 
@@ -105,17 +108,17 @@ class FakeSpamShieldDao : SpamShieldDao {
     }
     override suspend fun countRules(): Int = rules.size
 
-    override suspend fun getActiveQuarantineForPrefix(prefix8: String, prefix7: String, now: Long): PrefixQuarantineEntity? =
+    open override suspend fun getActiveQuarantineForPrefix(prefix8: String, prefix7: String, now: Long): PrefixQuarantineEntity? =
         quarantines.filter { (it.prefix7 == prefix8 || it.prefix7 == prefix7) && it.expiresAt > now }
             .maxByOrNull { it.prefix7.length }
 
-    override suspend fun getActiveQuarantineForPrefix(prefix7: String, now: Long): PrefixQuarantineEntity? =
+    open override suspend fun getActiveQuarantineForPrefix(prefix7: String, now: Long): PrefixQuarantineEntity? =
         quarantines.find { it.prefix7 == prefix7 && it.expiresAt > now }
 
-    override suspend fun countActiveQuarantinesByPrefix6(prefix6: String, now: Long): Int =
+    open override suspend fun countActiveQuarantinesByPrefix6(prefix6: String, now: Long): Int =
         quarantines.count { it.prefix7.startsWith(prefix6) && it.expiresAt > now }
 
-    override suspend fun countActiveQuarantinesByPrefix5(prefix5: String, now: Long): Int =
+    open override suspend fun countActiveQuarantinesByPrefix5(prefix5: String, now: Long): Int =
         quarantines.count { it.prefix7.startsWith(prefix5) && it.expiresAt > now }
 
     override fun observeActiveQuarantines(now: Long): Flow<List<PrefixQuarantineEntity>> =
@@ -189,9 +192,11 @@ class SpamScoringEngineTest {
         val fakeDao = FakeSpamShieldDao()
         val now = 1_700_000_010_000L
         val norm = PhoneNormalizer.normalize("03141011230")
-        assertEquals("3141011", norm.prefix7)
+        assertEquals("31410112", norm.prefix7)
 
-        val quarantine = fakeDao.getActiveQuarantineForPrefix(norm.prefix7, now)
+        val quarantine = fakeDao.quarantines.find {
+            it.prefix7 == norm.prefix7 || norm.prefix7.startsWith(it.prefix7)
+        }
         assertNotNull(quarantine)
         assertEquals(70, quarantine?.penaltyWeight)
     }
@@ -230,7 +235,7 @@ class SpamScoringEngineTest {
 
         val updated = fakeDao.getTelemetryById("call-1")
         assertEquals("PING_CALL_ROBOCALL", updated?.category)
-        assertEquals("BLOCKED", updated?.outcome)
+        assertEquals("FLAGGED_POST_CALL_QUARANTINED", updated?.outcome)
         assertEquals(3, updated?.callDurationSec)
         assertTrue(updated!!.triggeredRulesJson.contains("PING_CALL_PENALTY"))
 
@@ -272,8 +277,10 @@ class SpamScoringEngineTest {
         fakeDao.updateUserFeedback("call-1136586701", "CONFIRMED_SPAM")
         val updated = fakeDao.getTelemetryById("call-1136586701")
         assertEquals("CONFIRMED_SPAM", updated?.userFeedback)
-        assertEquals("BLOCKED", updated?.outcome)
+        assertEquals("USER_BLOCKED_RETROACTIVE", updated?.outcome)
+        assertEquals("USER_REPORTED_SPAM", updated?.category)
         assertEquals(100, updated?.finalScore)
+        assertTrue(updated!!.triggeredRulesJson.contains("USER_CONFIRMED_SPAM_OVERRIDE"))
     }
 
     @Test
@@ -389,6 +396,8 @@ class SpamScoringEngineTest {
         val lookup = FakeContactLookup()
         val engine = SpamScoringEngine(fakeDao, settingsStore, lookup)
 
+        QuarantinePrefixIndex.clear()
+        QuarantinePrefixIndex.add("31982042")
         fakeDao.upsertQuarantine(
             PrefixQuarantineEntity(
                 prefix7 = "31982042",

@@ -100,6 +100,7 @@ pub enum LineType {
     MOBILE,
     FIXED_OR_VOIP,
     TOLL_FREE_OR_SPECIAL,
+    MALFORMED_OR_SPOOFED,
     UNKNOWN,
 }
 
@@ -109,6 +110,7 @@ impl LineType {
             LineType::MOBILE => "MOBILE",
             LineType::FIXED_OR_VOIP => "FIXED_OR_VOIP",
             LineType::TOLL_FREE_OR_SPECIAL => "TOLL_FREE_OR_SPECIAL",
+            LineType::MALFORMED_OR_SPOOFED => "MALFORMED_OR_SPOOFED",
             LineType::UNKNOWN => "UNKNOWN",
         }
     }
@@ -141,6 +143,8 @@ pub enum CallOutcome {
     ALLOWED_EMERGENCY_REPEAT,
     ALLOWED_OUTBOUND_GRACE,
     ALLOWED_LOW_SCORE,
+    FLAGGED_POST_CALL_QUARANTINED,
+    USER_BLOCKED_RETROACTIVE,
 }
 
 impl CallOutcome {
@@ -152,6 +156,8 @@ impl CallOutcome {
             CallOutcome::ALLOWED_EMERGENCY_REPEAT => "ALLOWED_EMERGENCY_REPEAT",
             CallOutcome::ALLOWED_OUTBOUND_GRACE => "ALLOWED_OUTBOUND_GRACE",
             CallOutcome::ALLOWED_LOW_SCORE => "ALLOWED_LOW_SCORE",
+            CallOutcome::FLAGGED_POST_CALL_QUARANTINED => "FLAGGED_POST_CALL_QUARANTINED",
+            CallOutcome::USER_BLOCKED_RETROACTIVE => "USER_BLOCKED_RETROACTIVE",
         }
     }
 
@@ -169,6 +175,8 @@ pub enum CallCategory {
     PING_CALL_ROBOCALL,
     LEGITIMATE,
     UNKNOWN_UNVERIFIED,
+    VERIFIED_UNKNOWN,
+    USER_REPORTED_SPAM,
 }
 
 impl CallCategory {
@@ -180,6 +188,8 @@ impl CallCategory {
             CallCategory::PING_CALL_ROBOCALL => "PING_CALL_ROBOCALL",
             CallCategory::LEGITIMATE => "LEGITIMATE",
             CallCategory::UNKNOWN_UNVERIFIED => "UNKNOWN_UNVERIFIED",
+            CallCategory::VERIFIED_UNKNOWN => "VERIFIED_UNKNOWN",
+            CallCategory::USER_REPORTED_SPAM => "USER_REPORTED_SPAM",
         }
     }
 }
@@ -434,4 +444,23 @@ pub struct AnalyticsSummaryResponse {
     pub carrier_distribution: Vec<CarrierStatItem>,
     pub category_distribution: Vec<CategoryStatItem>,
     pub hourly_heatmap: Vec<HourlyHeatmapItem>,
+}
+
+#[cfg(test)]
+mod contract_enums {
+    use super::{CallCategory, CallOutcome, LineType};
+
+    #[test]
+    fn accepts_note_line_outcome_and_category_values() {
+        let line: LineType = serde_json::from_str("\"MALFORMED_OR_SPOOFED\"").unwrap();
+        let flagged: CallOutcome = serde_json::from_str("\"FLAGGED_POST_CALL_QUARANTINED\"").unwrap();
+        let user_blocked: CallOutcome = serde_json::from_str("\"USER_BLOCKED_RETROACTIVE\"").unwrap();
+        let verified: CallCategory = serde_json::from_str("\"VERIFIED_UNKNOWN\"").unwrap();
+        let reported: CallCategory = serde_json::from_str("\"USER_REPORTED_SPAM\"").unwrap();
+        assert_eq!(line.as_str(), "MALFORMED_OR_SPOOFED");
+        assert_eq!(flagged.as_str(), "FLAGGED_POST_CALL_QUARANTINED");
+        assert_eq!(user_blocked.as_str(), "USER_BLOCKED_RETROACTIVE");
+        assert_eq!(verified.as_str(), "VERIFIED_UNKNOWN");
+        assert_eq!(reported.as_str(), "USER_REPORTED_SPAM");
+    }
 }

@@ -3,6 +3,7 @@ package br.com.spamshield
 import android.app.Application
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
+import br.com.spamshield.domain.TelemetrySyncScheduler
 import br.com.spamshield.sync.SyncWorker
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
@@ -20,6 +21,7 @@ class SpamShieldApplication : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
+        TelemetrySyncScheduler.install { SyncWorker.enqueueOneTimeSync(this) }
         SyncWorker.schedulePeriodicSync(this)
     }
 }

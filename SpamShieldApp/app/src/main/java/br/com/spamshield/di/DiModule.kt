@@ -5,6 +5,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.sqlite.db.SupportSQLiteDatabase
 import br.com.spamshield.data.local.AppDatabase
+import br.com.spamshield.domain.QuarantinePrefixIndex
 import br.com.spamshield.data.local.dao.SpamShieldDao
 import br.com.spamshield.domain.ContactAndCallLogLookup
 import br.com.spamshield.service.AndroidContactAndCallLogLookup
@@ -59,10 +60,11 @@ object DatabaseModule {
                             dao.insertQuarantines(AppDatabase.initialQuarantineSeed(now))
                             dao.insertAnatelPrefixes(AppDatabase.initialAnatelSeed(now))
                         }
+                        QuarantinePrefixIndex.replaceAll(dao.getAllQuarantines().map { it.prefix7 })
                     }
                 }
             })
-            .addMigrations(AppDatabase.MIGRATION_1_2)
+            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3)
             .build()
     }
 

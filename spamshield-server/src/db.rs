@@ -127,7 +127,7 @@ impl AppDatabase {
                             "ddd": { "bsonType": "string" },
                             "prefix_7": { "bsonType": "string" },
                             "carrier_guess": { "bsonType": ["string", "null"] },
-                            "line_type": { "enum": ["MOBILE", "FIXED_OR_VOIP", "TOLL_FREE_OR_SPECIAL", "UNKNOWN"] },
+                            "line_type": { "enum": ["MOBILE", "FIXED_OR_VOIP", "TOLL_FREE_OR_SPECIAL", "MALFORMED_OR_SPOOFED", "UNKNOWN"] },
                             "stir_shaken_status": { "enum": ["PASSED", "FAILED", "NOT_VERIFIED"] }
                         }
                     },
@@ -144,7 +144,9 @@ impl AppDatabase {
                                     "ALLOWED_CONTACT",
                                     "ALLOWED_EMERGENCY_REPEAT",
                                     "ALLOWED_OUTBOUND_GRACE",
-                                    "ALLOWED_LOW_SCORE"
+                                    "ALLOWED_LOW_SCORE",
+                                    "FLAGGED_POST_CALL_QUARANTINED",
+                                    "USER_BLOCKED_RETROACTIVE"
                                 ]
                             },
                             "category": {
@@ -154,7 +156,9 @@ impl AppDatabase {
                                     "KNOWN_BLACKLIST",
                                     "PING_CALL_ROBOCALL",
                                     "LEGITIMATE",
-                                    "UNKNOWN_UNVERIFIED"
+                                    "UNKNOWN_UNVERIFIED",
+                                    "VERIFIED_UNKNOWN",
+                                    "USER_REPORTED_SPAM"
                                 ]
                             },
                             "processing_latency_ms": { "bsonType": "double" },
@@ -891,6 +895,7 @@ pub fn parse_anatel_doc(doc: &Document) -> Option<AnatelNumberingPlanDoc> {
         "MOBILE" => LineType::MOBILE,
         "FIXED_OR_VOIP" => LineType::FIXED_OR_VOIP,
         "TOLL_FREE_OR_SPECIAL" => LineType::TOLL_FREE_OR_SPECIAL,
+        "MALFORMED_OR_SPOOFED" => LineType::MALFORMED_OR_SPOOFED,
         _ => LineType::UNKNOWN,
     };
 

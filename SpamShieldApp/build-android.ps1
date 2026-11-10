@@ -28,8 +28,8 @@ try {
         $hash = (Get-FileHash -Path $targetApk -Algorithm SHA256).Hash.ToLowerInvariant()
         $size = (Get-Item $targetApk).Length
         $info = @{
-            version_code = 13
-            version_name = "1.2.9"
+            version_code = 14
+            version_name = "1.3.0"
             size_bytes = $size
             sha256_checksum = $hash
             download_path = "/apk"

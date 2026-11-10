@@ -42,17 +42,14 @@ interface SpamShieldDao {
         UPDATE call_telemetry 
         SET userFeedback = :feedback,
             outcome = CASE 
-                WHEN :feedback = 'CONFIRMED_SPAM' THEN 'BLOCKED'
                 WHEN :feedback = 'FALSE_POSITIVE' THEN 'ALLOWED_CONTACT'
                 ELSE outcome
             END,
             category = CASE 
-                WHEN :feedback = 'CONFIRMED_SPAM' THEN 'ROBOCALL_PREFIX_CLUSTER'
                 WHEN :feedback = 'FALSE_POSITIVE' THEN 'LEGITIMATE'
                 ELSE category
             END,
             finalScore = CASE 
-                WHEN :feedback = 'CONFIRMED_SPAM' AND finalScore < 100 THEN 100
                 WHEN :feedback = 'FALSE_POSITIVE' THEN 0
                 ELSE finalScore
             END,

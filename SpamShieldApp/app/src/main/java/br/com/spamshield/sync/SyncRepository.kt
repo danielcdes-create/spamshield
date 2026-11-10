@@ -7,6 +7,8 @@ import br.com.spamshield.data.local.entity.ActiveRuleEntity
 import br.com.spamshield.data.local.entity.AnatelPrefixEntity
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
+import br.com.spamshield.domain.TelemetrySyncScheduler
+import br.com.spamshield.domain.UserFeedbackAudit
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
 import br.com.spamshield.data.remote.ActiveRuleRemoteDto
 import br.com.spamshield.data.remote.ApkInfoResponseDto
@@ -306,7 +308,15 @@ class SyncRepository @Inject constructor(
 
     suspend fun submitFeedback(telemetryId: String, feedback: String, prefix7: String) =
         withContext(Dispatchers.IO) {
-            dao.updateUserFeedback(telemetryId, feedback)
+            val current = dao.getTelemetryById(telemetryId)
+            if (current != null && feedback == "CONFIRMED_SPAM") {
+                dao.insertTelemetry(UserFeedbackAudit.applyConfirmedSpam(current))
+            } else {
+                dao.updateUserFeedback(telemetryId, feedback)
+                if (feedback == "CONFIRMED_SPAM" || feedback == "FALSE_POSITIVE") {
+                    TelemetrySyncScheduler.enqueueImmediateSync()
+                }
+            }
             if (feedback == "FALSE_POSITIVE" && prefix7.isNotEmpty()) {
                 deleteManualQuarantine(prefix7)
                 if (prefix7.length == 8) {

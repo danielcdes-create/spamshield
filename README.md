@@ -1,4 +1,8 @@
-# SpamShield BR (`v1.2.9` — Build `13`)
+# SpamShield BR (`v1.3.0` — Build `14`)
+
+### Novidades da versão v1.3.0 (Build 14):
+- Parser E.164, prefixo de 8 dígitos, mutex VoIP e equação de score conforme `NT-SPAMSHIELD-2026-001`.
+- Coalescência de 15 s, faixas de duração, feedback `USER_CONFIRMED_SPAM_OVERRIDE` e migração local de saneamento.
 
 Ecossistema privado de defesa em borda (`< 2 ms`), telemetria vetorial e inteligência contra chamadas de spam, robocall, chipeiras GSM e spoofing no Brasil (padrões Anatel RNPM / Ato nº 10.413 / STIR-SHAKEN).
 

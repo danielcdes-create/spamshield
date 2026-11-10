@@ -1,9 +1,11 @@
 package br.com.spamshield.data.local
 
+import android.database.Cursor
 import androidx.room.Database
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import br.com.spamshield.domain.TelemetrySanitizer
 import br.com.spamshield.data.local.dao.SpamShieldDao
 import br.com.spamshield.data.local.entity.ActiveRuleEntity
 import br.com.spamshield.data.local.entity.AnatelPrefixEntity
@@ -19,7 +21,7 @@ import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
         OutboundGraceEntity::class,
         AnatelPrefixEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -30,6 +32,89 @@ abstract class AppDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // No column changes. Existing telemetry, rules, and quarantines stay.
             }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                val rows = mutableListOf<CallTelemetryEntity>()
+                db.query("SELECT * FROM call_telemetry").use { cursor ->
+                    while (cursor.moveToNext()) {
+                        rows.add(readTelemetry(cursor))
+                    }
+                }
+                if (rows.isEmpty()) return
+                val sanitized = TelemetrySanitizer.sanitize(rows)
+                db.execSQL("DELETE FROM call_telemetry")
+                sanitized.forEach { row ->
+                    db.execSQL(
+                        """
+                        INSERT INTO call_telemetry (
+                            id, timestamp, deviceId, rawNumber, normalizedNumber, ddd, prefix7,
+                            carrierGuess, lineType, stirShakenStatus, finalScore, thresholdApplied,
+                            outcome, category, processingLatencyMs, shadowModeActive, callDurationSec,
+                            triggeredRulesJson, userFeedback, syncStatus
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """.trimIndent(),
+                        arrayOf<Any?>(
+                            row.id,
+                            row.timestamp,
+                            row.deviceId,
+                            row.rawNumber,
+                            row.normalizedNumber,
+                            row.ddd,
+                            row.prefix7,
+                            row.carrierGuess,
+                            row.lineType,
+                            row.stirShakenStatus,
+                            row.finalScore,
+                            row.thresholdApplied,
+                            row.outcome,
+                            row.category,
+                            row.processingLatencyMs,
+                            if (row.shadowModeActive) 1 else 0,
+                            row.callDurationSec,
+                            row.triggeredRulesJson,
+                            row.userFeedback,
+                            row.syncStatus
+                        )
+                    )
+                }
+            }
+        }
+
+        private fun readTelemetry(cursor: Cursor): CallTelemetryEntity {
+            fun string(name: String): String = cursor.getString(cursor.getColumnIndexOrThrow(name))
+            fun stringOrNull(name: String): String? {
+                val index = cursor.getColumnIndexOrThrow(name)
+                return if (cursor.isNull(index)) null else cursor.getString(index)
+            }
+            fun int(name: String): Int = cursor.getInt(cursor.getColumnIndexOrThrow(name))
+            fun intOrNull(name: String): Int? {
+                val index = cursor.getColumnIndexOrThrow(name)
+                return if (cursor.isNull(index)) null else cursor.getInt(index)
+            }
+            return CallTelemetryEntity(
+                id = string("id"),
+                timestamp = cursor.getLong(cursor.getColumnIndexOrThrow("timestamp")),
+                deviceId = string("deviceId"),
+                rawNumber = string("rawNumber"),
+                normalizedNumber = string("normalizedNumber"),
+                ddd = string("ddd"),
+                prefix7 = string("prefix7"),
+                carrierGuess = stringOrNull("carrierGuess"),
+                lineType = string("lineType"),
+                stirShakenStatus = string("stirShakenStatus"),
+                finalScore = int("finalScore"),
+                thresholdApplied = int("thresholdApplied"),
+                outcome = string("outcome"),
+                category = string("category"),
+                processingLatencyMs = cursor.getDouble(cursor.getColumnIndexOrThrow("processingLatencyMs")),
+                shadowModeActive = int("shadowModeActive") != 0,
+                callDurationSec = intOrNull("callDurationSec"),
+                triggeredRulesJson = string("triggeredRulesJson"),
+                userFeedback = string("userFeedback"),
+                syncStatus = string("syncStatus")
+            )
         }
 
         fun initialRulesSeed(now: Long = System.currentTimeMillis()): List<ActiveRuleEntity> = listOf(

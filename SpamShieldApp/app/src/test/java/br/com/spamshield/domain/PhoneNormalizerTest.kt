@@ -1,6 +1,7 @@
 package br.com.spamshield.domain
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PhoneNormalizerTest {
@@ -10,7 +11,7 @@ class PhoneNormalizerTest {
         val result = PhoneNormalizer.normalize("03141011230")
         assertEquals("+553141011230", result.normalizedNumber)
         assertEquals("31", result.ddd)
-        assertEquals("3141011", result.prefix7)
+        assertEquals("31410112", result.prefix7)
         assertEquals("314101", result.prefix6)
         assertEquals("FIXED_OR_VOIP", result.lineType)
     }
@@ -20,9 +21,9 @@ class PhoneNormalizerTest {
         val result = PhoneNormalizer.normalize("+553198621040")
         assertEquals("+553198621040", result.normalizedNumber)
         assertEquals("31", result.ddd)
-        assertEquals("3198621", result.prefix7)
+        assertEquals("31986210", result.prefix7)
         assertEquals("319862", result.prefix6)
-        assertEquals("MOBILE", result.lineType)
+        assertEquals("MALFORMED_OR_SPOOFED", result.lineType)
     }
 
     @Test
@@ -30,7 +31,7 @@ class PhoneNormalizerTest {
         val result = PhoneNormalizer.normalize("31983211420")
         assertEquals("+5531983211420", result.normalizedNumber)
         assertEquals("31", result.ddd)
-        assertEquals("3198321", result.prefix7)
+        assertEquals("31983211", result.prefix7)
         assertEquals("319832", result.prefix6)
         assertEquals("MOBILE", result.lineType)
     }
@@ -40,7 +41,7 @@ class PhoneNormalizerTest {
         val result = PhoneNormalizer.normalize("0153141011230")
         assertEquals("+553141011230", result.normalizedNumber)
         assertEquals("31", result.ddd)
-        assertEquals("3141011", result.prefix7)
+        assertEquals("31410112", result.prefix7)
         assertEquals("314101", result.prefix6)
         assertEquals("FIXED_OR_VOIP", result.lineType)
     }
@@ -50,7 +51,7 @@ class PhoneNormalizerTest {
         val result = PhoneNormalizer.normalize("03198621040")
         assertEquals("+553198621040", result.normalizedNumber)
         assertEquals("31", result.ddd)
-        assertEquals("3198621", result.prefix7)
+        assertEquals("31986210", result.prefix7)
         assertEquals("319862", result.prefix6)
     }
 
@@ -77,43 +78,44 @@ class PhoneNormalizerTest {
         val r0041 = PhoneNormalizer.normalize("004131939995971")
         assertEquals("+5531939995971", r0041.normalizedNumber)
         assertEquals("31", r0041.ddd)
-        assertEquals("3193999", r0041.prefix7)
-        assertEquals("TIM", r0041.carrierHint)
+        assertEquals("31939995", r0041.prefix7)
+        assertEquals("Claro", r0041.carrierHint)
 
         val r10315 = PhoneNormalizer.normalize("03110315")
-        assertEquals("+553110315", r10315.normalizedNumber)
+        assertEquals("10315", r10315.normalizedNumber)
         assertEquals("31", r10315.ddd)
-        assertEquals("3110315", r10315.prefix7)
+        assertEquals(null, r10315.storedPrefix7)
         assertEquals("TOLL_FREE_OR_SPECIAL", r10315.lineType)
-        assertEquals("VoIP", r10315.carrierHint)
+        assertEquals("Vivo", r10315.carrierHint)
+        assertTrue(r10315.isShortOrUtilityCode)
     }
 
     @Test
     fun `normalizes and infers carriers for real call history numbers from S23 Ultra`() {
         val c1 = PhoneNormalizer.normalize("031987806827")
         assertEquals("+5531987806827", c1.normalizedNumber)
-        assertEquals("3198780", c1.prefix7)
+        assertEquals("31987806", c1.prefix7)
         assertEquals("Claro", c1.carrierHint)
 
         val c2 = PhoneNormalizer.normalize("04111910862316")
         assertEquals("+5511910862316", c2.normalizedNumber)
         assertEquals("11", c2.ddd)
-        assertEquals("1191086", c2.prefix7)
+        assertEquals("11910862", c2.prefix7)
         assertEquals("TIM", c2.carrierHint)
 
         val c3 = PhoneNormalizer.normalize("031976199037")
         assertEquals("+5531976199037", c3.normalizedNumber)
-        assertEquals("3197619", c3.prefix7)
+        assertEquals("31976199", c3.prefix7)
         assertEquals("TIM", c3.carrierHint)
 
         val c4 = PhoneNormalizer.normalize("031986333446")
         assertEquals("+5531986333446", c4.normalizedNumber)
-        assertEquals("3198633", c4.prefix7)
+        assertEquals("31986333", c4.prefix7)
         assertEquals("TIM", c4.carrierHint)
 
         val c5 = PhoneNormalizer.normalize("031939321258")
         assertEquals("+5531939321258", c5.normalizedNumber)
-        assertEquals("3193932", c5.prefix7)
+        assertEquals("31939321", c5.prefix7)
         assertEquals("Claro", c5.carrierHint)
     }
 

@@ -1,23 +1,27 @@
 package br.com.spamshield.domain
 
-import com.google.i18n.phonenumbers.PhoneNumberUtil
-import com.google.i18n.phonenumbers.PhoneNumberUtil.PhoneNumberFormat
-
 data class NormalizedPhone(
     val rawNumber: String,
-    val normalizedNumber: String, // E.164 format e.g. +553141011230
-    val nationalDigits: String,   // e.g. 3141011230
-    val ddd: String,              // e.g. 31
-    val prefix7: String,          // e.g. 3141011 or 3198621 (7 dígitos, bloco de 10.000 números)
-    val prefix8: String = nationalDigits.take(8), // e.g. 31982042 (8 dígitos, bloco de 1.000 números)
-    val prefix6: String,          // e.g. 314101 or 319862
-    val lineType: String,         // MOBILE | FIXED_OR_VOIP | TOLL_FREE_OR_SPECIAL | UNKNOWN
-    val carrierHint: String? = null // TIM | Claro | Vivo | VoIP / Fixo | Outros
-)
+    val normalizedNumber: String,
+    val nationalDigits: String,
+    val ddd: String,
+    val prefix7: String,
+    val prefix8: String = "",
+    val prefix6: String,
+    val lineType: String,
+    val carrierHint: String? = null,
+    val subscriberNumber: String = "",
+    val cspExtracted: String? = null,
+    val isShortOrUtilityCode: Boolean = false
+) {
+    /** Eight national digits, or null for short codes and non-geographic numbers. */
+    val storedPrefix7: String?
+        get() = prefix7.takeIf {
+            it.length == 8 && lineType != "TOLL_FREE_OR_SPECIAL" && !isShortOrUtilityCode
+        }
+}
 
 object PhoneNormalizer {
-
-    private val phoneUtil: PhoneNumberUtil by lazy { PhoneNumberUtil.getInstance() }
 
     private val VALID_DDDS = setOf(
         "11", "12", "13", "14", "15", "16", "17", "18", "19",
@@ -31,147 +35,176 @@ object PhoneNormalizer {
         "91", "92", "93", "94", "95", "96", "97", "98", "99"
     )
 
+    private val CSP_CODES = setOf("12", "14", "15", "21", "31", "41", "43", "99")
+    private val UTILITY_103 = Regex("^103\\d{2}$")
+    private val UTILITY_105 = Regex("^105\\d$")
+    private val UTILITY_106 = Regex("^106\\d{2}$")
+    private val UTILITY_1XX = Regex("^1\\d{2}$")
+
     fun normalize(rawInput: String, defaultDdd: String = "31"): NormalizedPhone {
         val raw = rawInput.trim()
         val digitsOnly = raw.filter { it.isDigit() }
 
         if (digitsOnly.isEmpty()) {
-            return NormalizedPhone(
-                rawNumber = raw,
-                normalizedNumber = "",
-                nationalDigits = "",
-                ddd = "",
-                prefix7 = "",
-                prefix8 = "",
-                prefix6 = "",
-                lineType = "UNKNOWN",
-                carrierHint = null
-            )
+            return emptyPhone(raw)
         }
 
-        // Check special non-geographic prefixes first (0300, 0303, 0800, 0500, 4004, 3003, 4003)
-        if (digitsOnly.startsWith("0300") ||
-            digitsOnly.startsWith("0303") ||
-            digitsOnly.startsWith("0800") ||
-            digitsOnly.startsWith("0500") ||
-            digitsOnly.startsWith("4004") ||
-            digitsOnly.startsWith("3003") ||
-            digitsOnly.startsWith("4003")
-        ) {
-            val cleanSpecial = digitsOnly
-            val p7 = cleanSpecial.take(7)
-            val p6 = cleanSpecial.take(6)
-            return NormalizedPhone(
-                rawNumber = raw,
-                normalizedNumber = "+55${cleanSpecial.removePrefix("0")}",
-                nationalDigits = cleanSpecial,
-                ddd = "00",
-                prefix7 = p7,
-                prefix6 = p6,
-                lineType = "TOLL_FREE_OR_SPECIAL",
-                carrierHint = "VoIP"
-            )
-        }
+        matchUtility(raw, digitsOnly, defaultDdd)?.let { return it }
 
-        // Check short SIP codes or carrier telemarketing codes (e.g. 005, 10315, 03110315)
-        if (digitsOnly.length < 8 ||
-            (digitsOnly.length == 8 && digitsOnly.startsWith("0") && digitsOnly.substring(1, 3) in VALID_DDDS && digitsOnly.substring(3).startsWith("10"))
-        ) {
-            val cleanCode = if (digitsOnly.length == 8 && digitsOnly.startsWith("0")) {
-                digitsOnly.substring(1) // e.g. 3110315
-            } else {
-                "$defaultDdd$digitsOnly"
-            }
-            return NormalizedPhone(
-                rawNumber = raw,
-                normalizedNumber = "+55$cleanCode",
-                nationalDigits = cleanCode,
-                ddd = defaultDdd,
-                prefix7 = cleanCode.take(7),
-                prefix6 = cleanCode.take(6),
-                lineType = "TOLL_FREE_OR_SPECIAL",
-                carrierHint = "VoIP"
-            )
-        }
-
-        val cspCarrier = extractCspCarrier(digitsOnly)
-        val national = extractBrazilianNationalDigits(digitsOnly, defaultDdd)
-
-        val ddd = if (national.length >= 10 && national.take(2) in VALID_DDDS) {
-            national.take(2)
+        val parsed = parseGeographic(digitsOnly, defaultDdd)
+        val lineType = classifyLineType(parsed.subscriber)
+        val cluster = if (lineType == "TOLL_FREE_OR_SPECIAL") {
+            ""
         } else {
-            defaultDdd
+            parsed.national.take(8).takeIf { it.length == 8 }.orEmpty()
         }
-
-        val subscriber = if (national.length >= 10 && national.startsWith(ddd)) {
-            national.substring(2)
+        val carrierHint = if (lineType == "MOBILE" || lineType == "MALFORMED_OR_SPOOFED") {
+            guessCarrierBySubscriber(parsed.subscriber, if (lineType == "MOBILE") "MOBILE" else "MOBILE", cluster)
         } else {
-            national
-        }
-
-        val fullNational = "$ddd$subscriber"
-
-        val e164 = try {
-            val parsed = phoneUtil.parse("+55$fullNational", "BR")
-            if (phoneUtil.isPossibleNumber(parsed)) {
-                phoneUtil.format(parsed, PhoneNumberFormat.E164)
-            } else {
-                "+55$fullNational"
-            }
-        } catch (_: Exception) {
-            "+55$fullNational"
-        }
-
-        val prefix8 = fullNational.take(8)
-        val prefix7 = fullNational.take(7)
-        val prefix6 = fullNational.take(6)
-        val lineType = classifyLineType(subscriber)
-        val carrierHint = if (lineType == "MOBILE") {
-            cspCarrier ?: guessCarrierBySubscriber(subscriber, lineType, prefix7)
-        } else {
-            guessCarrierBySubscriber(subscriber, lineType, prefix7)
+            guessCarrierBySubscriber(parsed.subscriber, lineType, cluster)
         }
 
         return NormalizedPhone(
             rawNumber = raw,
-            normalizedNumber = e164,
-            nationalDigits = fullNational,
-            ddd = ddd,
-            prefix7 = prefix7,
-            prefix8 = prefix8,
-            prefix6 = prefix6,
+            normalizedNumber = "+55${parsed.national}",
+            nationalDigits = parsed.national,
+            ddd = parsed.ddd,
+            prefix7 = cluster,
+            prefix8 = cluster,
+            prefix6 = if (cluster.length == 8) parsed.national.take(6) else "",
             lineType = lineType,
-            carrierHint = carrierHint
+            carrierHint = carrierHint,
+            subscriberNumber = parsed.subscriber,
+            cspExtracted = parsed.cspExtracted,
+            isShortOrUtilityCode = false
         )
     }
 
-    private fun extractCspCarrier(digits: String): String? {
-        if (digits.startsWith("00") && digits.length in 14..15) {
-            val csp = digits.substring(2, 4)
-            val candidateDdd = digits.substring(4, 6)
-            if (candidateDdd in VALID_DDDS) {
-                return when (csp) {
-                    "41" -> "TIM"
-                    "21" -> "Claro"
-                    "15" -> "Vivo"
-                    else -> null
-                }
+    private fun matchUtility(raw: String, digits: String, defaultDdd: String): NormalizedPhone? {
+        if (digits.startsWith("0") && digits.length >= 4) {
+            val ddd = digits.substring(1, 3)
+            val rest = digits.substring(3)
+            if (ddd in VALID_DDDS && rest.length < 8 && isUtilityToken(rest)) {
+                return utilityPhone(raw, rest, ddd)
             }
         }
-        if (digits.startsWith("0") && digits.length in 13..14) {
-            val csp = digits.substring(1, 3)
-            val candidateDdd = digits.substring(3, 5)
-            if (candidateDdd in VALID_DDDS) {
-                return when (csp) {
-                    "41" -> "TIM"
-                    "21" -> "Claro"
-                    "15" -> "Vivo"
-                    else -> null
-                }
-            }
+        if (digits.length < 8 || isLongUtility(digits)) {
+            return utilityPhone(raw, digits, defaultDdd)
         }
         return null
     }
+
+    private fun isUtilityToken(code: String): Boolean {
+        return UTILITY_103.matches(code) ||
+            UTILITY_105.matches(code) ||
+            UTILITY_106.matches(code) ||
+            UTILITY_1XX.matches(code) ||
+            code.startsWith("0800") ||
+            code.startsWith("0300") ||
+            code.startsWith("0303") ||
+            code.startsWith("0500") ||
+            code.startsWith("400") ||
+            code.startsWith("3003") ||
+            code.startsWith("4003") ||
+            code.startsWith("4004")
+    }
+
+    private fun isLongUtility(digits: String): Boolean {
+        return digits.startsWith("0800") ||
+            digits.startsWith("0300") ||
+            digits.startsWith("0303") ||
+            digits.startsWith("0500") ||
+            digits.startsWith("4004") ||
+            digits.startsWith("4003") ||
+            digits.startsWith("3003") ||
+            (digits.startsWith("400") && digits.length <= 8)
+    }
+
+    private fun utilityPhone(raw: String, code: String, ddd: String): NormalizedPhone {
+        return NormalizedPhone(
+            rawNumber = raw,
+            normalizedNumber = code,
+            nationalDigits = code,
+            ddd = ddd,
+            prefix7 = "",
+            prefix8 = "",
+            prefix6 = "",
+            lineType = "TOLL_FREE_OR_SPECIAL",
+            carrierHint = utilityCarrier(code),
+            subscriberNumber = code,
+            cspExtracted = null,
+            isShortOrUtilityCode = true
+        )
+    }
+
+    private fun utilityCarrier(code: String): String {
+        val csp = if (code.length >= 5 && code.startsWith("103")) code.substring(3, 5) else null
+        return when (csp) {
+            "15" -> "Vivo"
+            "21", "14" -> "Claro"
+            "41" -> "TIM"
+            else -> "VoIP"
+        }
+    }
+
+    private data class GeographicParts(
+        val ddd: String,
+        val subscriber: String,
+        val national: String,
+        val cspExtracted: String?
+    )
+
+    private fun parseGeographic(digits: String, defaultDdd: String): GeographicParts {
+        if (digits.startsWith("00") && digits.length >= 14) {
+            val csp = digits.substring(2, 4)
+            val ddd = digits.substring(4, 6)
+            if (csp in CSP_CODES && ddd in VALID_DDDS) {
+                val subscriber = digits.substring(6)
+                return GeographicParts(ddd, subscriber, "$ddd$subscriber", "00$csp")
+            }
+        }
+        if (digits.startsWith("0") && digits.length >= 13) {
+            val csp = digits.substring(1, 3)
+            val ddd = digits.substring(3, 5)
+            if (csp in CSP_CODES && ddd in VALID_DDDS) {
+                val subscriber = digits.substring(5)
+                return GeographicParts(ddd, subscriber, "$ddd$subscriber", "0$csp")
+            }
+        }
+        if (digits.startsWith("0") && digits.length in 11..12) {
+            val ddd = digits.substring(1, 3)
+            if (ddd in VALID_DDDS) {
+                val subscriber = digits.substring(3)
+                return GeographicParts(ddd, subscriber, digits.substring(1), null)
+            }
+        }
+        if (digits.startsWith("55") && digits.length >= 12) {
+            val ddd = digits.substring(2, 4)
+            if (ddd in VALID_DDDS) {
+                val subscriber = digits.substring(4)
+                return GeographicParts(ddd, subscriber, digits.substring(2), null)
+            }
+        }
+        if (digits.length in 10..11 && digits.take(2) in VALID_DDDS) {
+            return GeographicParts(digits.take(2), digits.drop(2), digits, null)
+        }
+        if (digits.length in 8..9) {
+            return GeographicParts(defaultDdd, digits, "$defaultDdd$digits", null)
+        }
+        return GeographicParts(defaultDdd, digits, digits, null)
+    }
+
+    private fun emptyPhone(raw: String) = NormalizedPhone(
+        rawNumber = raw,
+        normalizedNumber = "",
+        nationalDigits = "",
+        ddd = "",
+        prefix7 = "",
+        prefix8 = "",
+        prefix6 = "",
+        lineType = "UNKNOWN",
+        carrierHint = null
+    )
 
     fun isVoipPrefixOrSubscriber(
         subscriber: String,
@@ -217,15 +250,17 @@ object PhoneNormalizer {
         lineType: String,
         prefix7: String = ""
     ): String {
-        if (lineType == "TOLL_FREE_OR_SPECIAL") {
-            return "VoIP"
-        }
+        if (lineType == "TOLL_FREE_OR_SPECIAL") return "VoIP"
         if (lineType == "FIXED_OR_VOIP") {
             return if (isVoipPrefixOrSubscriber(subscriber, prefix7)) "VoIP" else "Fixo"
         }
         if (subscriber.length in 8..9 && subscriber.first() in '6'..'9') {
-            val normalizedSub = if (subscriber.length == 8) "9$subscriber" else subscriber
-            val p3 = normalizedSub.take(3) // e.g. 987, 986, 976, 999
+            val normalizedSub = if (subscriber.length == 8 && subscriber.first() != '9') {
+                "9$subscriber"
+            } else {
+                subscriber
+            }
+            val p3 = if (normalizedSub.first() == '9') normalizedSub.take(3) else subscriber.take(3)
             return when (p3) {
                 "910", "920", "971", "972", "976", "981", "982", "983", "985", "986", "991", "992", "993" -> "TIM"
                 "933", "937", "938", "939", "973", "974", "975", "980", "984", "987", "988", "989", "994" -> "Claro"
@@ -236,48 +271,21 @@ object PhoneNormalizer {
         return "Outros"
     }
 
-    /**
-     * Identifica se o número bruto apresenta cabeçalho de tronco/CSP anômalo de telemarketing:
-     * - CSP explícito de longa distância (041..., 015..., 021..., 13 a 15 dígitos) ou 00+CSP (004131...)
-     * - Prefixos não-geográficos 0300/0303/0800 ou códigos curtos de operadora (03110315, 005)
-     * - Discagem com zero para DDD externo (ex: 011... quando o usuário é DDD 31) ou linha fixa/VoIP (11 dígitos: 03141011230)
-     *
-     * NÃO penaliza o formato padrão de entrega CLI móvel local da operadora (ex: 031987381841, 12 dígitos no próprio DDD),
-     * evitando que chamadas móveis locais legítimas recebam +25 indevidamente.
-     */
     fun hasAbnormalTrunkOrCspHeader(rawNumber: String, userDdd: String = "31"): Boolean {
         val trimmed = rawNumber.trim()
         if (!trimmed.startsWith("0")) return false
         val digits = trimmed.filter { it.isDigit() }
         if (digits.isEmpty()) return false
-
-        // 0300, 0303, 0800 ou 00+CSP
         if (digits.startsWith("0300") || digits.startsWith("0303") || digits.startsWith("0800") || digits.startsWith("00")) {
             return true
         }
-        // Códigos curtos iniciados por 0 (ex: 03110315, 005)
-        if (digits.length < 11) {
-            return true
-        }
-        // Cabeçalho completo com CSP (0 + CSP(2) + DDD(2) + 8/9 dígitos = 13..15 dígitos, ex: 04111910862316)
-        if (digits.length >= 13) {
-            return true
-        }
-        // 11 ou 12 dígitos iniciados por 0 (0 + DDD + número)
+        if (digits.length < 11) return true
+        if (digits.length >= 13) return true
         val ddd = digits.substring(1, 3)
-        if (ddd != userDdd) {
-            // DDD externo com zero de tronco (ex: 01136586701)
-            return true
-        }
-        // No mesmo DDD: se tem 11 dígitos (031 + 8 dígitos fixo/VoIP) ou não começa com '9', é tronco fixo/VoIP
+        if (ddd != userDdd) return true
         return digits.length == 11 || digits.getOrNull(3) != '9'
     }
 
-    /**
-     * Identifica blocos /5 (DDD + 3 dígitos) que são faixas dedicadas de MVNO / telemarketing / chipeira GSM,
-     * sem penalizar blocos /5 móveis residenciais comuns (como 31987xx, 31999xx, 31984xx) a menos que tenham
-     * alta densidade de quarentenas.
-     */
     fun isKnownChipeiraFarmPrefix5(prefix5: String): Boolean {
         if (prefix5.length < 5) return false
         val sub3 = prefix5.substring(2, 5)
@@ -290,15 +298,9 @@ object PhoneNormalizer {
         isCorporatePabx: Boolean = false,
         prefix7: String = ""
     ): String {
-        if (lineType == "TOLL_FREE_OR_SPECIAL") {
-            return "VoIP"
-        }
+        if (lineType == "TOLL_FREE_OR_SPECIAL") return "VoIP"
         if (lineType == "FIXED_OR_VOIP" || isCorporatePabx) {
-            return if (isVoipPrefixOrSubscriber("", prefix7, rawCarrier, isCorporatePabx)) {
-                "VoIP"
-            } else {
-                "Fixo"
-            }
+            return if (isVoipPrefixOrSubscriber("", prefix7, rawCarrier, isCorporatePabx)) "VoIP" else "Fixo"
         }
         val upper = rawCarrier?.uppercase() ?: return "Outros"
         return when {
@@ -313,55 +315,16 @@ object PhoneNormalizer {
         }
     }
 
-    private fun extractBrazilianNationalDigits(digits: String, defaultDdd: String): String {
-        val working = digits
-
-        if (working.startsWith("00") && working.length in 14..15) {
-            val candidateDdd = working.substring(4, 6)
-            if (candidateDdd in VALID_DDDS) {
-                return working.substring(4)
-            }
-        }
-
-        if (working.startsWith("55") && working.length in 12..13) {
-            val candidateDdd = working.substring(2, 4)
-            if (candidateDdd in VALID_DDDS) {
-                return working.substring(2)
-            }
-        }
-
-        if (working.startsWith("0") && working.length in 13..14) {
-            val candidateDdd = working.substring(3, 5)
-            if (candidateDdd in VALID_DDDS) {
-                return working.substring(3)
-            }
-        }
-
-        if (working.startsWith("0") && working.length in 11..12) {
-            val candidateDdd = working.substring(1, 3)
-            if (candidateDdd in VALID_DDDS) {
-                return working.substring(1)
-            }
-        }
-
-        if (working.length in 10..11 && working.take(2) in VALID_DDDS) {
-            return working
-        }
-
-        if (working.length in 8..9) {
-            return "$defaultDdd$working"
-        }
-
-        return working
-    }
-
     private fun classifyLineType(subscriber: String): String {
         if (subscriber.isEmpty()) return "UNKNOWN"
-        val firstChar = subscriber.first()
+        val first = subscriber.first()
+        val length = subscriber.length
         return when {
-            subscriber.length == 9 && firstChar == '9' -> "MOBILE"
-            subscriber.length == 8 && (firstChar in '6'..'9') -> "MOBILE"
-            subscriber.length == 8 && (firstChar in '2'..'5') -> "FIXED_OR_VOIP"
+            first == '9' && length == 9 -> "MOBILE"
+            first == '9' -> "MALFORMED_OR_SPOOFED"
+            first in '2'..'5' && length == 8 -> "FIXED_OR_VOIP"
+            first in '2'..'5' -> "MALFORMED_OR_SPOOFED"
+            first in '6'..'8' -> "MALFORMED_OR_SPOOFED"
             else -> "UNKNOWN"
         }
     }
