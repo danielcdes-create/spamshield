@@ -508,6 +508,18 @@ class SpamScoringEngine @Inject constructor(
                 shadowModeActive = false, callDurationSec = callDurationSec, triggeredRulesJson = "[]"
             ).also { dao.insertTelemetry(it) }
         }
+        val existingObsTimestamps = dao.getDecisionEvents(target.id)
+            .asSequence()
+            .filter { it.eventType == "CALL_LOG_OBSERVATION" }
+            .mapNotNull { DecisionTrace.details(it).observedCallTimestamp }
+            .toList()
+        if (callTimestampMs != null && existingObsTimestamps.any { existingTs ->
+                existingTs != callTimestampMs &&
+                    kotlin.math.abs(existingTs - target.timestamp) < kotlin.math.abs(callTimestampMs - target.timestamp)
+            }
+        ) {
+            return false
+        }
         DecisionTrace.record(dao, target.id, "CALL_LOG_OBSERVATION", "ANDROID_CALL_LOG",
             DecisionDetails(systemCallType = callType, durationSec = callDurationSec,
                 rawNumber = rawNumber, normalizedNumber = normalizedNumber,
@@ -551,12 +563,22 @@ class SpamScoringEngine @Inject constructor(
             json.decodeFromString<List<TriggeredRuleDto>>(latest.triggeredRulesJson)
         }.getOrDefault(emptyList())
 
+        val arrivalEventRules = dao.getDecisionEvents(latest.id)
+            .firstOrNull { it.eventType == "SCREENING_DECISION" }
+            ?.let { DecisionTrace.details(it).rules }
+            .orEmpty()
+
         // Calcula o score limpo de chegada na borda (sem regras pós-chamada e sem o antigo falso-positivo de /6)
         val cleanArrivalRules = existingRules.filter {
             it.rule_id != "SYSTEM_CALLLOG_BLOCKED" &&
                 it.rule_id != "PING_CALL_PENALTY" &&
                 it.rule_id != "CONVERSATION_ANSWERED_BONUS" &&
                 it.rule_id != "PREFIX6_CLUSTER_HIT"
+        }.toMutableList()
+        for (ruleId in listOf("PREFIX6_NEIGHBOR_WARNING", "PREFIX5_CHIPEIRA_FARM")) {
+            if (cleanArrivalRules.none { it.rule_id == ruleId }) {
+                arrivalEventRules.firstOrNull { it.rule_id == ruleId }?.let { cleanArrivalRules.add(it) }
+            }
         }
         val cleanArrivalScore = if (cleanArrivalRules.isNotEmpty()) {
             cleanArrivalRules.sumOf { it.weight }
@@ -672,20 +694,27 @@ class SpamScoringEngine @Inject constructor(
                 if (qPrefix.length == 8 && latest.prefix7.length == 7 && latest.prefix7 != qPrefix) {
                     dao.deleteQuarantineByPrefix(latest.prefix7)
                 }
-                dao.upsertQuarantine(
-                    PrefixQuarantineEntity(
-                        prefix7 = qPrefix,
-                        ddd = latest.ddd,
-                        carrierGuess = latest.carrierGuess ?: "Outros",
-                        distinctNumbersJson = "[\"${latest.normalizedNumber}\"]",
-                        hitCount = (existingQ?.hitCount ?: 0) + 1,
-                        penaltyWeight = 70,
-                        reason = if (callType == android.provider.CallLog.Calls.BLOCKED_TYPE) "SYSTEM_CALLLOG_BLOCKED" else "DIALER_REJECTED",
-                        firstSeenAt = existingQ?.firstSeenAt ?: nowMillis,
-                        lastSeenAt = nowMillis,
-                        expiresAt = nowMillis + QUARANTINE_DEFAULT_TTL_MS
+                val expectedReason = if (callType == android.provider.CallLog.Calls.BLOCKED_TYPE) {
+                    "SYSTEM_CALLLOG_BLOCKED"
+                } else {
+                    "DIALER_REJECTED"
+                }
+                if (rulesChanged || existingQ == null || existingQ.prefix7 != qPrefix || existingQ.reason != expectedReason) {
+                    dao.upsertQuarantine(
+                        PrefixQuarantineEntity(
+                            prefix7 = qPrefix,
+                            ddd = latest.ddd,
+                            carrierGuess = latest.carrierGuess ?: "Outros",
+                            distinctNumbersJson = "[\"${latest.normalizedNumber}\"]",
+                            hitCount = if (rulesChanged || existingQ == null) (existingQ?.hitCount ?: 0) + 1 else existingQ.hitCount,
+                            penaltyWeight = 70,
+                            reason = expectedReason,
+                            firstSeenAt = existingQ?.firstSeenAt ?: nowMillis,
+                            lastSeenAt = nowMillis,
+                            expiresAt = nowMillis + QUARANTINE_DEFAULT_TTL_MS
+                        )
                     )
-                )
+                }
                 QuarantinePrefixIndex.add(qPrefix)
             }
             return rulesChanged

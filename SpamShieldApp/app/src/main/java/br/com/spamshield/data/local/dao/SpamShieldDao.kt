@@ -31,12 +31,21 @@ interface SpamShieldDao {
     @Query("UPDATE call_decision_events SET syncStatus = 'SYNCED' WHERE eventId IN (:eventIds)")
     suspend fun markDecisionEventsSynced(eventIds: List<String>)
 
+    @Query("DELETE FROM call_decision_events WHERE eventId IN (:eventIds)")
+    suspend fun deleteDecisionEvents(eventIds: List<String>)
+
+    @Query("UPDATE call_decision_events SET callId = :toCallId, syncStatus = 'PENDING' WHERE callId = :fromCallId")
+    suspend fun reassignDecisionEvents(fromCallId: String, toCallId: String)
+
     // ========================================================================
     // 1. Call Telemetry
     // ========================================================================
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTelemetry(telemetry: CallTelemetryEntity)
+
+    @Query("DELETE FROM call_telemetry WHERE id = :id")
+    suspend fun deleteTelemetryById(id: String)
 
     @Query("SELECT * FROM call_telemetry ORDER BY timestamp DESC")
     fun observeAllTelemetry(): Flow<List<CallTelemetryEntity>>

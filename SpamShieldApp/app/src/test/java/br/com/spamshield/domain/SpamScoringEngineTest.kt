@@ -29,6 +29,15 @@ open class FakeSpamShieldDao : SpamShieldDao {
     override suspend fun markDecisionEventsSynced(eventIds: List<String>) {
         decisionEvents.replaceAll { if (it.eventId in eventIds) it.copy(syncStatus = "SYNCED") else it }
     }
+    override suspend fun deleteDecisionEvents(eventIds: List<String>) {
+        val set = eventIds.toSet()
+        decisionEvents.removeAll { it.eventId in set }
+    }
+    override suspend fun reassignDecisionEvents(fromCallId: String, toCallId: String) {
+        decisionEvents.replaceAll {
+            if (it.callId == fromCallId) it.copy(callId = toCallId, syncStatus = "PENDING") else it
+        }
+    }
     val telemetries = mutableListOf<CallTelemetryEntity>()
     val rules = AppDatabase.initialRulesSeed(1_700_000_000_000L).toMutableList()
     val quarantines = AppDatabase.initialQuarantineSeed(1_700_000_000_000L).toMutableList()
@@ -38,6 +47,9 @@ open class FakeSpamShieldDao : SpamShieldDao {
     override suspend fun insertTelemetry(telemetry: CallTelemetryEntity) {
         telemetries.removeAll { it.id == telemetry.id }
         telemetries.add(0, telemetry)
+    }
+    override suspend fun deleteTelemetryById(id: String) {
+        telemetries.removeAll { it.id == id }
     }
 
     override fun observeAllTelemetry(): Flow<List<CallTelemetryEntity>> = MutableStateFlow(telemetries)

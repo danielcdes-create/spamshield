@@ -128,4 +128,24 @@ class PhoneNormalizerTest {
         assertEquals("Vivo", PhoneNormalizer.normalizeCarrierName("VIVO", "MOBILE", false))
         assertEquals("VoIP", PhoneNormalizer.normalizeCarrierName("ALGAR / VOIP MG", "FIXED_OR_VOIP", true, "3131920"))
     }
+
+    @Test
+    fun `normalizes 055 country header numbers 05531973350693 and 05531975474366 to E164 and 8-digit prefix`() {
+        val c1 = PhoneNormalizer.normalize("05531973350693")
+        assertEquals("+5531973350693", c1.normalizedNumber)
+        assertEquals("31", c1.ddd)
+        assertEquals("31973350", c1.prefix7)
+        assertEquals("319733", c1.prefix6)
+        assertEquals("MOBILE", c1.lineType)
+        assertEquals("Claro", c1.carrierHint)
+        assertEquals("055", c1.cspExtracted)
+
+        val c2 = PhoneNormalizer.normalize("05531975474366")
+        assertEquals("+5531975474366", c2.normalizedNumber)
+        assertEquals("31", c2.ddd)
+        assertEquals("31975474", c2.prefix7)
+        assertEquals("MOBILE", c2.lineType)
+        assertEquals("Claro", c2.carrierHint)
+        assertEquals("055", c2.cspExtracted)
+    }
 }

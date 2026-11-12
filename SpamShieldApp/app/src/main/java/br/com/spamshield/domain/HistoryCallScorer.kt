@@ -11,13 +11,29 @@ object HistoryCallScorer {
         input: ScoreInput,
         rejectedInDialer: Boolean = false,
         distinctNumbers: Int = 1,
-        userFeedback: String = "UNRATED"
+        userFeedback: String = "UNRATED",
+        prefix6NeighborRule: TriggeredRuleDto? = null,
+        prefix5ChipeiraRule: TriggeredRuleDto? = null
     ): ScoreResult {
         val base = HeuristicScorer.score(input)
         val rules = base.triggeredRules.toMutableList()
         if (
+            input.quarantineMatch == PrefixQuarantineMatch.NONE &&
+            prefix6NeighborRule != null &&
+            rules.none { it.rule_id == "PREFIX6_NEIGHBOR_WARNING" }
+        ) {
+            rules.add(prefix6NeighborRule)
+        }
+        if (
+            prefix5ChipeiraRule != null &&
+            rules.none { it.rule_id == "PREFIX5_CHIPEIRA_FARM" }
+        ) {
+            rules.add(prefix5ChipeiraRule)
+        }
+        val arrivalScore = HeuristicScorer.equation(rules)
+        if (
             rejectedInDialer &&
-            base.finalScore < input.thresholdApplied &&
+            arrivalScore < input.thresholdApplied &&
             rules.none { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }
         ) {
             rules.add(TriggeredRuleDto("SYSTEM_CALLLOG_BLOCKED", 45, "Rejeitado no Discador"))

@@ -242,3 +242,7 @@ scp ../SpamShieldApp/app/build/outputs/apk/debug/app-debug.apk ../SpamShieldApp/
 # 4. Reconstruir a imagem leve e reiniciar o container na VPS (leva ~3 segundos)
 ssh root@198.199.65.103 "cd /opt/spamshield && docker compose up -d --build"
 ```
+
+> **Histórico de Atualizações OTA na VPS:**
+> - **v1.2.9 (Build 13):** Primeiro deploy na VPS em container `scratch` + `x86_64-unknown-linux-musl`.
+> - **v1.3.1 (Build 15):** Atualização do backend (`accepted_event_ids` / `decision_events`) e publicação OTA do APK `v1.3.1` (veja [docs/TELEMETRIA-DECISOES.md](docs/TELEMETRIA-DECISOES.md)).

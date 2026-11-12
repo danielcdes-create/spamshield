@@ -520,8 +520,22 @@ O LLM Harness deve criar uma migração de base de dados (Room/SQLite Migration)
 ### 7.2. Checklist de Verificação Final (Gate de Saída para o LLM Harness)
 O LLM Harness só deve encerrar a tarefa quando todas as seguintes asserções retornarem `true` sobre o conjunto completo de $122$ eventos de `spamshield_telemetry.json`:
 
-* [ ] **Invariante 1 (Soma Algébrica):** Para $100\%$ dos registos, $\text{finalScore} == \max\left(0, \sum w_i\right)$.
-* [ ] **Invariante 2 (Proteção de Fixos Legítimos):** Nenhuma chamada com `stirShakenStatus == "PASSED"`, `carrierGuess == "Fixo"` e sem `PREFIX_QUARANTINE_HIT` possui $\text{finalScore} \ge 70$.
-* [ ] **Invariante 3 (Idempotência):** Não existem dois registos com o mesmo `normalizedNumber` cuja diferença de `timestamp` seja $\Delta t \le 15000\text{ ms}$.
-* [ ] **Invariante 4 (Consistência de Prefixo):** Para todo o registo com `lineType IN ("MOBILE", "FIXED_OR_VOIP")`, $\text{length}(\text{prefix7}) == 8$.
-* [ ] **Invariante 5 (Sincronização):** Nenhum registo permanece com `syncStatus == "PENDING"` após a execução do `TelemetrySyncWorker`.
+* [x] **Invariante 1 (Soma Algébrica):** Para $100\%$ dos registos, $\text{finalScore} == \max\left(0, \sum w_i\right)$.
+* [x] **Invariante 2 (Proteção de Fixos Legítimos):** Nenhuma chamada com `stirShakenStatus == "PASSED"`, `carrierGuess == "Fixo"` e sem `PREFIX_QUARANTINE_HIT` possui $\text{finalScore} \ge 70$.
+* [x] **Invariante 3 (Idempotência):** Não existem dois registos com o mesmo `normalizedNumber` cuja diferença de `timestamp` seja $\Delta t \le 15000\text{ ms}$.
+* [x] **Invariante 4 (Consistência de Prefixo):** Para todo o registo com `lineType IN ("MOBILE", "FIXED_OR_VOIP")`, $\text{length}(\text{prefix7}) == 8$.
+* [x] **Invariante 5 (Sincronização):** Nenhum registo permanece com `syncStatus == "PENDING"` após a execução do `TelemetrySyncWorker`.
+
+---
+
+## 8. STATUS DE IMPLEMENTAÇÃO (`v1.3.0` / `v1.3.1`)
+
+Todas as etapas desta Nota Técnica foram implementadas e verificadas por testes unitários automatizados (`testDebugUnitTest`):
+
+1. **Etapa 1 (`PhoneNormalizer.kt`):** Pipeline de descasque para códigos curtos/utilidade (`TOLL_FREE_OR_SPECIAL`, `prefix7 = ""`), extração de CSP (`012`..`099`, `00xx`) e cabeçalhos de país discados como tronco (`055`/`0055`), validação de cardinalidade móvel (`MALFORMED_OR_SPOOFED` $\rightarrow$ `MALFORMED_NUMBER_SPOOFING` `+85`) e inferência de operadora isolada do CSP.
+2. **Etapa 2 (`QuarantinePrefixIndex.kt` & `PhoneNormalizer.kt`):** Prefixo canônico de $8$ dígitos (`DDD + 6` primeiros dígitos do assinante) com peso determinístico `+70` (`PREFIX_QUARANTINE_HIT`, `EXACT8`) e fallback explícito de $7$ dígitos com peso `+60` (`PREFIX7_BROAD_QUARANTINE_HIT`, `BROAD7`).
+3. **Etapa 3 (`HeuristicScorer.kt`):** Separação estrita entre `Fixo` (`32xx`–`39xx`) e `VoIP`, grupo de exclusão mútua `VOIP_TRUNK_GROUP` (`BLACKLIST_MG_VOIP_PABX`, `REGEX_MG_VOIP_TRUNKS`, `ANATEL_PABX_VOIP_RANGE`) e restrição de `LEADING_ZERO_TRUNK_DIALING` (`+25`).
+4. **Etapa 4 (`ScreeningPatternCache.kt` & `QuarantinePrefixIndex.kt`):** Cache estático de expressões regulares compiladas e índice em memória $O(1)$ sincronizado em todas as mutações do DAO/reprocessamento.
+5. **Etapa 5 (`SpamScoringEngine.kt`, `CallHistoryAnalyzer.kt` & `HeuristicScorer.kt`):** Coalescência de $15\text{ s}$ com proteção do vínculo `CALL_LOG_OBSERVATION` mais próximo, preservação de `stirShakenStatus` válido e intervalos contínuos de duração (`1..5s` $\rightarrow$ `PING_CALL_PENALTY` `+55`, `6..11s` $\rightarrow$ `SHORT_ROBOCALL_PENALTY` `+30`, `>= 12s` $\rightarrow$ `CONVERSATION_ANSWERED_BONUS` `-40`) com `outcome = "FLAGGED_POST_CALL_QUARANTINED"` para chamadas atendidas com score $\ge 70$.
+6. **Etapa 6 (`UserFeedbackAudit.kt` & `SyncRepository.kt`):** Adição auditável de `USER_CONFIRMED_SPAM_OVERRIDE` (`+100`), transição de `ALLOWED_LOW_SCORE` para `USER_BLOCKED_RETROACTIVE` (`category = "USER_REPORTED_SPAM"`) e disparo imediato de sincronização (`TelemetrySyncScheduler.enqueueImmediateSync`).
+7. **Etapa 7 (`AppDatabase.kt` `MIGRATION_2_3` / `MIGRATION_3_4`, `TelemetrySanitizer.kt`, `DecisionTrace.kt` & `CallHistoryAnalyzer.kt`):** Saneamento retroativo da base SQLite, deduplicação de registros concorrentes/legados (`calllog-...` e códigos curtos), preservação causal de regras de chegada (`SCREENING_DECISION`) durante reprocessamento e diário de decisões em `call_decision_events` (documentado em [docs/TELEMETRIA-DECISOES.md](docs/TELEMETRIA-DECISOES.md)).

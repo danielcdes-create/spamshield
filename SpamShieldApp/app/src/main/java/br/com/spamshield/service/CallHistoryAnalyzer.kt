@@ -480,30 +480,43 @@ class CallHistoryAnalyzer @Inject constructor(
 
                 val now = System.currentTimeMillis()
                 var readCount = 0
+                val collected = mutableListOf<RawSystemCall>()
 
                 while (cursor.moveToNext() && readCount < maxRecords) {
                     readCount++
                     val rawNumber = cursor.getString(numIdx) ?: continue
                     val callType = cursor.getInt(typeIdx)
                     val durationSec = cursor.getInt(durIdx)
-                    val callDate = if (dateIdx >= 0) cursor.getLong(dateIdx) else null
+                    val callDate = if (dateIdx >= 0) cursor.getLong(dateIdx) else 0L
                     val systemBlockReason = if (blockReasonIdx >= 0 && !cursor.isNull(blockReasonIdx)) cursor.getInt(blockReasonIdx) else null
-                    val isSystemBlocked = (systemBlockReason ?: 0) != 0
                     val screeningComponent = if (screeningComponentIdx >= 0) cursor.getString(screeningComponentIdx) else null
+                    collected.add(
+                        RawSystemCall(
+                            rawNumber = rawNumber,
+                            timestamp = callDate,
+                            durationSec = durationSec,
+                            callType = callType,
+                            blockReason = systemBlockReason,
+                            screeningComponent = screeningComponent
+                        )
+                    )
+                }
 
-                    val norm = PhoneNormalizer.normalize(rawNumber)
+                for (call in collected.asReversed()) {
+                    val norm = PhoneNormalizer.normalize(call.rawNumber)
                     if (norm.normalizedNumber.isEmpty()) continue
+                    val isSystemBlocked = (call.blockReason ?: 0) != 0
 
                     val changed = spamScoringEngine.evaluatePostCallLogVerdict(
                         normalizedNumber = norm.normalizedNumber,
-                        callType = callType,
-                        callDurationSec = durationSec,
+                        callType = call.callType,
+                        callDurationSec = call.durationSec,
                         isSystemBlocked = isSystemBlocked,
-                        systemBlockReason = systemBlockReason,
-                        rawNumber = rawNumber,
-                        systemScreeningComponent = screeningComponent,
-                        systemScreeningAppIsSpamShield = screeningComponent?.let { it.substringBefore('/') == "br.com.spamshield" },
-                        callTimestampMs = callDate,
+                        systemBlockReason = call.blockReason,
+                        rawNumber = call.rawNumber,
+                        systemScreeningComponent = call.screeningComponent,
+                        systemScreeningAppIsSpamShield = call.screeningComponent?.let { it.substringBefore('/') == "br.com.spamshield" },
+                        callTimestampMs = call.timestamp.takeIf { it > 0L },
                         nowMillis = now
                     )
                     if (changed) {
@@ -538,14 +551,17 @@ internal suspend fun reprocessStoredTelemetry(
             runCatching { Regex(rule.pattern!!) to rule }.getOrNull()
         }
 
+        var updatedCount = deduplicateStoredTelemetryRows(dao, settings.userDdd)
+
         val allTelemetry = dao.getAllTelemetry().sortedBy { it.timestamp }
         val prefixDistinctNumbers = mutableMapOf<String, MutableSet<String>>()
         val confirmedOrRejectedPrefixes = mutableSetOf<String>()
 
         for (row in allTelemetry) {
             val norm = PhoneNormalizer.normalize(row.rawNumber, settings.userDdd)
-            val p8 = norm.prefix8
-            val p7 = norm.prefix7.ifEmpty { row.prefix7 }
+            val isUtility = norm.isShortOrUtilityCode || norm.lineType == "TOLL_FREE_OR_SPECIAL"
+            val p8 = if (isUtility) "" else norm.prefix8
+            val p7 = if (isUtility) "" else norm.prefix7.ifEmpty { row.prefix7 }
             val e164 = norm.normalizedNumber.ifEmpty { row.normalizedNumber }
             val dur = row.callDurationSec ?: 0
             if (p7.isNotEmpty() && e164.isNotEmpty() && row.outcome != "ALLOWED_CONTACT" && dur < 10) {
@@ -563,20 +579,44 @@ internal suspend fun reprocessStoredTelemetry(
             ) {
                 if (p8.length == 8) {
                     confirmedOrRejectedPrefixes.add(p8)
-                } else {
+                } else if (p7.isNotEmpty()) {
                     confirmedOrRejectedPrefixes.add(p7)
                 }
             }
         }
 
         // 1. Limpar quarentenas legadas /7 de número único móvel local sem evidência real de spam
-        // e migrar quarentenas de rejeição para /8 (escopo de milhar)
+        // e migrar quarentenas de rejeição ou com prefixo malformado 055 para /8 (escopo de milhar)
         val officialSeedPrefixes = setOf(
             "3141011", "3141013", "3198780", "3197619", "3198633",
             "3198621", "3198321", "3198586", "1191086", "1148581", "1150391"
         )
         val allQuarantines = dao.getAllQuarantines()
         for (q in allQuarantines) {
+            if (q.prefix7.startsWith("055") && q.prefix7.length >= 8) {
+                dao.deleteQuarantineByPrefix(q.prefix7)
+                QuarantinePrefixIndex.remove(q.prefix7)
+                val migratedPrefixes = prefixDistinctNumbers.keys.filter { p ->
+                    p.length == 8 && p.startsWith(q.prefix7.drop(3))
+                }
+                for (migrated in migratedPrefixes) {
+                    val nums = prefixDistinctNumbers[migrated]?.toList().orEmpty()
+                    val sampleNorm = nums.firstOrNull()?.let { PhoneNormalizer.normalize(it, settings.userDdd) }
+                    val migratedCarrier = sampleNorm?.carrierHint ?: "Claro"
+                    dao.upsertQuarantine(
+                        q.copy(
+                            prefix7 = migrated,
+                            ddd = migrated.take(2),
+                            carrierGuess = migratedCarrier,
+                            distinctNumbersJson = json.encodeToString(nums),
+                            hitCount = maxOf(q.hitCount, nums.size, 1)
+                        )
+                    )
+                    QuarantinePrefixIndex.add(migrated)
+                }
+                continue
+            }
+
             val isFixed = q.prefix7.drop(2).firstOrNull() in '2'..'5' ||
                 q.prefix7.startsWith("000") ||
                 q.prefix7.startsWith("030") ||
@@ -589,6 +629,7 @@ internal suspend fun reprocessStoredTelemetry(
             // Remove quarentena /7 se foi substituída pelo escopo /8 (ex: 3198204 -> 31982042)
             if (q.prefix7 == "3198204") {
                 dao.deleteQuarantineByPrefix("3198204")
+                QuarantinePrefixIndex.remove("3198204")
                 continue
             }
 
@@ -602,6 +643,7 @@ internal suspend fun reprocessStoredTelemetry(
 
             if (!shouldKeepQuarantine) {
                 dao.deleteQuarantineByPrefix(q.prefix7)
+                QuarantinePrefixIndex.remove(q.prefix7)
                 continue
             }
 
@@ -614,19 +656,20 @@ internal suspend fun reprocessStoredTelemetry(
             if (newCarrier != q.carrierGuess) {
                 dao.upsertQuarantine(q.copy(carrierGuess = newCarrier))
             }
+            QuarantinePrefixIndex.add(q.prefix7)
         }
 
         // 2. Reprocessar todas as chamadas em call_telemetry respeitando a causalidade no momento da chamada
-        var updatedCount = 0
         for (row in allTelemetry) {
             val norm = PhoneNormalizer.normalize(row.rawNumber, settings.userDdd)
+            val isUtility = norm.isShortOrUtilityCode || norm.lineType == "TOLL_FREE_OR_SPECIAL"
             val effectiveNormalized = norm.normalizedNumber.ifEmpty { row.normalizedNumber }
             val effectiveDdd = norm.ddd.ifEmpty { row.ddd }
-            val effectivePrefix7 = norm.prefix7.ifEmpty { row.prefix7.take(7) }
-            val storagePrefix = if (norm.prefix8.length == 8 && (row.deviceId != "s23-ultra-history" || row.prefix7.length == 8)) {
-                norm.prefix8
-            } else {
-                effectivePrefix7
+            val effectivePrefix7 = if (isUtility) "" else norm.prefix7.ifEmpty { row.prefix7.take(7) }
+            val storagePrefix = when {
+                isUtility -> ""
+                norm.prefix8.length == 8 && (row.deviceId != "s23-ultra-history" || row.prefix7.length == 8) -> norm.prefix8
+                else -> effectivePrefix7
             }
 
             val anatelInfo = if (effectivePrefix7.isNotEmpty()) {
@@ -634,9 +677,13 @@ internal suspend fun reprocessStoredTelemetry(
             } else {
                 null
             }
-            val resolvedLineType = anatelInfo?.lineType ?: norm.lineType
+            val resolvedLineType = if (isUtility || norm.lineType == "MALFORMED_OR_SPOOFED") {
+                norm.lineType
+            } else {
+                anatelInfo?.lineType ?: norm.lineType
+            }
             val newCarrierGuess = when {
-                anatelInfo != null -> PhoneNormalizer.normalizeCarrierName(
+                anatelInfo != null && !isUtility && norm.lineType != "MALFORMED_OR_SPOOFED" -> PhoneNormalizer.normalizeCarrierName(
                     anatelInfo.carrier,
                     resolvedLineType,
                     anatelInfo.isCorporatePabxRange,
@@ -678,9 +725,23 @@ internal suspend fun reprocessStoredTelemetry(
                 json.decodeFromString<List<TriggeredRuleDto>>(row.triggeredRulesJson)
             }.getOrDefault(emptyList())
 
+            val arrivalEvent = dao.getDecisionEvents(row.id)
+                .firstOrNull { it.eventType == "SCREENING_DECISION" }
+                ?.let { DecisionTrace.details(it) }
+            val arrivalRules = arrivalEvent?.rules.orEmpty()
+
             val isRealTimeCall = row.deviceId != "s23-ultra-history"
-            val hadQuarantineAtArrival = existingRules.any { it.rule_id == "PREFIX_QUARANTINE_HIT" }
-            val hadBurstAtArrival = existingRules.any { it.rule_id == "PREFIX_NEIGHBORHOOD_BURST" }
+            val hadQuarantineAtArrival = existingRules.any {
+                it.rule_id == "PREFIX_QUARANTINE_HIT" || it.rule_id == "PREFIX7_BROAD_QUARANTINE_HIT"
+            } || arrivalRules.any {
+                it.rule_id == "PREFIX_QUARANTINE_HIT" || it.rule_id == "PREFIX7_BROAD_QUARANTINE_HIT"
+            }
+            val hadBurstAtArrival = existingRules.any { it.rule_id == "PREFIX_NEIGHBORHOOD_BURST" } ||
+                arrivalRules.any { it.rule_id == "PREFIX_NEIGHBORHOOD_BURST" }
+            val prefix6NeighborRule = existingRules.firstOrNull { it.rule_id == "PREFIX6_NEIGHBOR_WARNING" }
+                ?: arrivalRules.firstOrNull { it.rule_id == "PREFIX6_NEIGHBOR_WARNING" }
+            val prefix5ChipeiraRule = existingRules.firstOrNull { it.rule_id == "PREFIX5_CHIPEIRA_FARM" }
+                ?: arrivalRules.firstOrNull { it.rule_id == "PREFIX5_CHIPEIRA_FARM" }
 
             // Restaura SYSTEM_CALLLOG_BLOCKED na chamada de 18:27 (+5531982042364) caso o Build 11 tenha sobrescrito com PREFIX6_CLUSTER_HIT
             val wasSystemBlocked = existingRules.any { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" } ||
@@ -699,8 +760,15 @@ internal suspend fun reprocessStoredTelemetry(
             val quarantineMatch = when {
                 wasSystemBlocked -> PrefixQuarantineMatch.NONE
                 activeQ == null -> PrefixQuarantineMatch.NONE
+                arrivalEvent != null -> if (hadQuarantineAtArrival) quarantineMatchOf(norm.prefix7, activeQ.prefix7) else PrefixQuarantineMatch.NONE
                 !isRealTimeCall || hadQuarantineAtArrival || activeQ.prefix7.length >= 8 -> quarantineMatchOf(norm.prefix7, activeQ.prefix7)
                 else -> PrefixQuarantineMatch.NONE
+            }
+            val effectiveDistinctNumbers = when {
+                wasSystemBlocked -> 1
+                arrivalEvent != null -> if (hadBurstAtArrival) (arrivalEvent.distinctNumbers24h ?: maxOf(distinctInCluster, 2)) else 1
+                isRealTimeCall && !hadBurstAtArrival -> 1
+                else -> distinctInCluster
             }
             val compiledRules = regexRules.map { (regex, rule) ->
                 CompiledRegexRule(rule.ruleId, rule.weight, rule.pattern.orEmpty(), regex)
@@ -726,8 +794,10 @@ internal suspend fun reprocessStoredTelemetry(
                     extraRegexRules = compiledRules
                 ),
                 rejectedInDialer = wasSystemBlocked,
-                distinctNumbers = if (wasSystemBlocked) 1 else distinctInCluster,
-                userFeedback = row.userFeedback
+                distinctNumbers = effectiveDistinctNumbers,
+                userFeedback = row.userFeedback,
+                prefix6NeighborRule = prefix6NeighborRule,
+                prefix5ChipeiraRule = prefix5ChipeiraRule
             )
             val triggered = decision.triggeredRules
             val score = decision.finalScore
@@ -772,7 +842,12 @@ internal suspend fun reprocessStoredTelemetry(
                     ?: prefixDistinctNumbers[effectivePrefix7]?.toList()
                     ?: listOf(effectiveNormalized)
                 val existingQ = dao.getActiveQuarantineForPrefix(qTargetPrefix, 0L)
-                if (existingQ == null || existingQ.carrierGuess != newCarrierGuess || learnedFromRejection) {
+                val desiredReason = if (learnedFromRejection) "DIALER_REJECTED" else (existingQ?.reason ?: newCategory)
+                val needsUpsert = existingQ == null ||
+                    existingQ.carrierGuess != newCarrierGuess ||
+                    (learnedFromRejection && existingQ.reason != "DIALER_REJECTED")
+                if (needsUpsert) {
+                    val newExpiresAt = maxOf(existingQ?.expiresAt ?: 0L, now + SpamScoringEngine.QUARANTINE_DEFAULT_TTL_MS)
                     dao.upsertQuarantine(
                         PrefixQuarantineEntity(
                             prefix7 = qTargetPrefix,
@@ -781,23 +856,78 @@ internal suspend fun reprocessStoredTelemetry(
                             distinctNumbersJson = json.encodeToString(allNums),
                             hitCount = maxOf((existingQ?.hitCount ?: 0), allNums.size, 1),
                             penaltyWeight = existingQ?.penaltyWeight ?: if (wasPingCall) 65 else 70,
-                            reason = if (learnedFromRejection) "DIALER_REJECTED" else newCategory,
+                            reason = desiredReason,
                             firstSeenAt = minOf(existingQ?.firstSeenAt ?: row.timestamp, row.timestamp),
                             lastSeenAt = maxOf(existingQ?.lastSeenAt ?: row.timestamp, row.timestamp),
-                            expiresAt = maxOf(existingQ?.expiresAt ?: 0L, now + SpamScoringEngine.QUARANTINE_DEFAULT_TTL_MS)
+                            expiresAt = newExpiresAt
                         )
                     )
+                    QuarantinePrefixIndex.add(qTargetPrefix)
                     DecisionTrace.record(dao, row.id, "QUARANTINE_UPDATED", "HISTORY_REPROCESSOR",
-                        DecisionDetails(prefix = qTargetPrefix, reason = "${if (learnedFromRejection) "DIALER_REJECTED" else newCategory}; expiresAt=${maxOf(existingQ?.expiresAt ?: 0L, now + SpamScoringEngine.QUARANTINE_DEFAULT_TTL_MS)}"))
+                        DecisionDetails(prefix = qTargetPrefix, reason = "$desiredReason; expiresAt=$newExpiresAt"))
                 }
             }
         }
 
+        DecisionTrace.pruneRedundantEvents(dao, dao.getAllTelemetry())
+
         if (updatedCount > 0) {
-        onUpdated()
+            onUpdated()
         }
         updatedCount
     }
+
+private suspend fun deduplicateStoredTelemetryRows(
+    dao: SpamShieldDao,
+    userDdd: String
+): Int {
+    val rows = dao.getAllTelemetry()
+    var removed = 0
+
+    // 1. Remove legacy "calllog-..." rows that collide within 15s with a UUID row for the same number
+    val legacyCalllogRows = rows.filter { it.id.startsWith("calllog-") }
+    for (legacy in legacyCalllogRows) {
+        val normLegacy = PhoneNormalizer.normalize(legacy.rawNumber, userDdd).normalizedNumber.ifEmpty { legacy.normalizedNumber }
+        val match = rows.firstOrNull { candidate ->
+            candidate.id != legacy.id &&
+                !candidate.id.startsWith("calllog-") &&
+                PhoneNormalizer.normalize(candidate.rawNumber, userDdd).normalizedNumber.ifEmpty { candidate.normalizedNumber } == normLegacy &&
+                kotlin.math.abs(candidate.timestamp - legacy.timestamp) <= TelemetryCoalescer.WINDOW_MS
+        }
+        if (match != null) {
+            dao.reassignDecisionEvents(legacy.id, match.id)
+            dao.deleteTelemetryById(legacy.id)
+            removed++
+        }
+    }
+
+    // 2. Remove same-timestamp duplicates for the same normalized number (e.g. utility codes 10315, 005)
+    val remaining = dao.getAllTelemetry()
+    val byTimestampAndNum = remaining.groupBy { row ->
+        val norm = PhoneNormalizer.normalize(row.rawNumber, userDdd).normalizedNumber.ifEmpty { row.normalizedNumber }
+        row.timestamp to norm
+    }
+    for ((key, group) in byTimestampAndNum) {
+        if (group.size < 2) continue
+        val (ts, normNum) = key
+        val canonicalHistoryId = UUID.nameUUIDFromBytes("calllog-$ts-$normNum".toByteArray()).toString()
+        val keeper = group.maxWithOrNull(
+            compareBy<CallTelemetryEntity> { it.deviceId != "s23-ultra-history" }
+                .thenBy { it.id == canonicalHistoryId }
+                .thenBy { it.triggeredRulesJson.contains("SYSTEM_CALLLOG_BLOCKED") }
+                .thenBy { it.finalScore }
+        ) ?: group.first()
+        for (dup in group) {
+            if (dup.id != keeper.id) {
+                dao.reassignDecisionEvents(dup.id, keeper.id)
+                dao.deleteTelemetryById(dup.id)
+                removed++
+            }
+        }
+    }
+
+    return removed
+}
 
 internal fun quarantineMatchOf(callPrefix: String, storedPrefix: String?): PrefixQuarantineMatch {
     if (storedPrefix.isNullOrEmpty() || callPrefix.isEmpty()) return PrefixQuarantineMatch.NONE

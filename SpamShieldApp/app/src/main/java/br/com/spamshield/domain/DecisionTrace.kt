@@ -88,14 +88,93 @@ object DecisionTrace {
         val encoded = json.encodeToString(details)
         // Repeated observations/reprocessing with unchanged evidence do not grow the journal.
         if (key == null && type != "SCREENING_DECISION" && type != "SCREENING_RESPONSE_SUBMITTED") {
-            val latest = dao.getDecisionEvents(callId).lastOrNull { it.eventType == type && it.source == source }
-            if (latest?.detailsJson == encoded) return
+            val existing = dao.getDecisionEvents(callId)
+            if (type == "QUARANTINE_UPDATED") {
+                val baseReason = details.reason?.substringBefore("; expiresAt=")
+                val alreadyRecorded = existing.any { ev ->
+                    ev.eventType == "QUARANTINE_UPDATED" &&
+                        details(ev).let { d ->
+                            d.prefix == details.prefix &&
+                                d.reason?.substringBefore("; expiresAt=") == baseReason
+                        }
+                }
+                if (alreadyRecorded) return
+            } else {
+                val latest = existing.lastOrNull { it.eventType == type && it.source == source }
+                if (latest != null) {
+                    if (latest.detailsJson == encoded) return
+                    if (type == "POST_CALL_EVALUATION" || type == "REPROCESS_EVALUATION" || type == "HISTORY_ASSESSMENT") {
+                        if (sameEvaluationOutcome(details(latest), details)) return
+                    }
+                }
+            }
         }
         val id = key?.let { UUID.nameUUIDFromBytes("$callId|$type|$source|$it".toByteArray()).toString() }
             ?: UUID.randomUUID().toString()
         dao.insertDecisionEvent(CallDecisionEventEntity(
             id, callId, at, type, source, "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", encoded
         ))
+    }
+
+    internal fun sameEvaluationOutcome(a: DecisionDetails, b: DecisionDetails): Boolean =
+        a.outcome == b.outcome &&
+            a.score == b.score &&
+            a.threshold == b.threshold &&
+            a.category == b.category &&
+            a.prefix == b.prefix &&
+            a.rules == b.rules
+
+    suspend fun pruneRedundantEvents(dao: SpamShieldDao, rows: List<CallTelemetryEntity>) {
+        val rowById = rows.associateBy { it.id }
+        val allEvents = dao.getAllDecisionEvents()
+        val toDelete = mutableListOf<String>()
+
+        for ((callId, events) in allEvents.groupBy { it.callId }) {
+            val row = rowById[callId]
+            val obsEvents = events.filter { it.eventType == "CALL_LOG_OBSERVATION" }
+            val closestObsTimestamp = if (row != null && obsEvents.size > 1) {
+                obsEvents.mapNotNull { details(it).observedCallTimestamp }
+                    .minByOrNull { kotlin.math.abs(it - row.timestamp) }
+            } else {
+                null
+            }
+
+            val seenQuarantine = mutableSetOf<Pair<String?, String?>>()
+            val lastEvalByTypeSource = mutableMapOf<Pair<String, String>, DecisionDetails>()
+
+            for (ev in events) {
+                val d = details(ev)
+                when (ev.eventType) {
+                    "CALL_LOG_OBSERVATION" -> {
+                        val obsTs = d.observedCallTimestamp
+                        if (closestObsTimestamp != null && obsTs != null && obsTs != closestObsTimestamp) {
+                            toDelete.add(ev.eventId)
+                        }
+                    }
+                    "QUARANTINE_UPDATED" -> {
+                        val qKey = d.prefix to d.reason?.substringBefore("; expiresAt=")
+                        if (!seenQuarantine.add(qKey)) {
+                            toDelete.add(ev.eventId)
+                        }
+                    }
+                    "POST_CALL_EVALUATION", "REPROCESS_EVALUATION", "HISTORY_ASSESSMENT" -> {
+                        val tsKey = ev.eventType to ev.source
+                        val prev = lastEvalByTypeSource[tsKey]
+                        if (prev != null && sameEvaluationOutcome(prev, d)) {
+                            toDelete.add(ev.eventId)
+                        } else {
+                            lastEvalByTypeSource[tsKey] = d
+                        }
+                    }
+                }
+            }
+        }
+
+        if (toDelete.isNotEmpty()) {
+            toDelete.chunked(500).forEach { chunk ->
+                dao.deleteDecisionEvents(chunk)
+            }
+        }
     }
 
     fun eventLabel(type: String): String = when (type) {

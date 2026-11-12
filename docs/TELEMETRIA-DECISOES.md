@@ -1,4 +1,4 @@
-# Telemetria de decisões — v1.3.1 / Build 15
+# Telemetria de decisões — v1.3.1 / v1.3.2 (Build 15–16)
 
 Uma recusa no discador enquanto a chamada toca não é um bloqueio preventivo do SpamShield. O score e o `outcome` reprocessados descrevem a classificação atual; não comprovam a resposta enviada na chegada. A implementação acrescenta um diário de eventos separado para preservar essa distinção.
 
@@ -21,6 +21,24 @@ A migração Room 3 → 4 cria `call_decision_events` sem reescrever a telemetri
 `details.schemaVersion = 1` identifica o formato. `details.engineRevision = decision-journal-v1` identifica essa implementação. Horários são epoch em milissegundos. A versão do app é independente da versão do contrato.
 
 O timestamp original da chamada e o horário em que uma observação foi gravada são distintos. Observações repetidas do mesmo estado têm chave determinística. Uma mudança posterior de tipo, duração ou motivo gera outro evento. As decisões de chamadas com horários diferentes mantêm IDs próprios, mesmo quando ocorrem dentro de 15 segundos. A associação ao CallLog escolhe a ocorrência mais próxima do timestamp informado; se não houver correspondência, cria um registro de histórico sem inventar uma decisão original.
+
+## Idempotência Semântica, Coalescência e Fidelidade Causal (Refinamentos v1.3.1 — 11/11/2026)
+
+A análise da telemetria real exportada do dispositivo (`v1.3.1` / Build `15`) levou às seguintes garantias adicionais no motor e no diário de decisões:
+
+1. **Deduplicação Semântica e Poda de Eventos Redundantes (`DecisionTrace`):**
+   - `QUARANTINE_UPDATED`: deduplicado por `(callId, prefix, baseReason)`, ignorando variações de milissegundos no sufixo `; expiresAt=...` geradas por múltiplas passagens do reconciliador ou do reprocessador. Além disso, `applyPostCallLogVerdict` e `reprocessStoredTelemetry` só persistem/emitem `QUARANTINE_UPDATED` quando o prefixo é novo na quarentena ou seu motivo base (`reason`) efetivamente muda.
+   - `POST_CALL_EVALUATION`, `REPROCESS_EVALUATION` e `HISTORY_ASSESSMENT`: deduplicados por equivalência de resultado (`sameEvaluationOutcome`: mesmo `score`, `outcome`, `category`, `reason` e vetor `triggeredRules`).
+   - `DecisionTrace.pruneRedundantEvents`: durante o reprocessamento, expurga do SQLite eventos `QUARANTINE_UPDATED` e avaliações repetidas já armazenadas em execuções anteriores, preservando apenas a primeira ocorrência de cada transição semântica.
+2. **Proteção de Vínculo `CALL_LOG_OBSERVATION` contra Rediscagens na Janela de 15s:**
+   - `reconcileRecentCallsWithCallLog` processa as entradas do `CallLog` em ordem cronológica crescente (do mais antigo para o mais recente).
+   - Em `SpamScoringEngine.evaluatePostCallLogVerdict`, caso uma chamada já possua uma `CALL_LOG_OBSERVATION` cujo `callLogTimestamp` esteja mais próximo (ou empatado) do `timestamp` da entidade do que uma nova entrada candidata dentro da janela de 15s, a observação de uma rediscagem subsequente é ignorada para aquela entidade, impedindo oscilação (*ping-pong*) entre `DIALER_USER_REJECTED_RINGING` (`REJECTED`) e `SYSTEM_CALLLOG_BLOCKED` (`BLOCKED`).
+3. **Fidelidade Causal no Reprocessamento (`reprocessStoredTelemetry` & `HistoryCallScorer`):**
+   - Chamadas que possuem evento `SCREENING_DECISION` preservam no reprocessamento o estado de quarentena (`quarantineMatch`: `EXACT8`, `BROAD7` ou `NONE`) e a contagem de vizinhança (`distinctNumbers24h`) observados no instante real de chegada, evitando que uma quarentena ou rajada futura adicione retroativamente `PREFIX_QUARANTINE_HIT` ou `PREFIX_NEIGHBORHOOD_BURST` a chamadas anteriores.
+   - Regras contextuais de vizinhança disparadas na chegada (`PREFIX6_NEIGHBOR_WARNING` `+15` e `PREFIX5_CHIPEIRA_FARM` `+35`) são preservadas em `HistoryCallScorer.score` a partir do registro/evento `SCREENING_DECISION`.
+4. **Normalização de Cabeçalhos `055` / `0055` e Deduplicação de Códigos Curtos / Legados:**
+   - `PhoneNormalizer.parseGeographic` reconhece e descasca prefixos de país discados como tronco nacional (`055` e `0055`) antes de DDDs válidos (ex.: `05531973350693` $\rightarrow$ `+5531973350693`, `ddd = "31"`, `prefix7 = "31973350"`, `cspExtracted = "055"`, `carrierGuess = "Claro"`), migrando quarentenas legadas `055...` para o prefixo canônico de 8 dígitos.
+   - `deduplicateStoredTelemetryRows` unifica registros duplicados de mesmo `(normalizedNumber, timestamp)` (incluindo códigos de utilidade como `10315` e `005` com `prefix7 = ""`) e absorve registros órfãos `calllog-...` dentro da janela de 15s, reatribuindo seus `decisionEvents` ao registro canônico antes da remoção.
 
 ## O que o painel pode afirmar
 
@@ -47,7 +65,7 @@ Servidor antigo que não confirmar os eventos deixa o diário pendente no aparel
 
 Os registros anteriores à atualização não ganham uma decisão de chegada inventada. Reconciliar o CallLog pode acrescentar observações antigas ainda disponíveis, mas não recupera respostas originalmente não registradas. O comportamento depende das informações e permissões fornecidas pelo Android/OEM. Falhas no próprio armazenamento são relatadas no log do serviço; não é possível garantir persistência quando o banco/disco está indisponível.
 
-Testes JVM cobrem recusa manual, separação entre pedido e resultado observado, autoria de bloqueio, legado/simulação, preservação após reprocessamento, idempotência das observações, chamadas próximas, associação por timestamp, exportação e confirmação de eventos durante sincronização. Os testes Rust verificam o contrato JSON/BSON e compatibilidade com payload antigo.
+Testes JVM cobrem recusa manual, separação entre pedido e resultado observado, autoria de bloqueio, legado/simulação, preservação após reprocessamento, idempotência das observações, chamadas próximas, associação por timestamp, exportação, normalização `055`/`0055`, poda de eventos redundantes e confirmação de eventos durante sincronização. Os testes Rust verificam o contrato JSON/BSON e compatibilidade com payload antigo.
 
 O teste Rust que usa MongoDB real fica ignorado por padrão e exige banco com nome terminado em `_test` antes de conectar. Não executar testes de integração contra a base operacional. A validação padrão usa `cargo test --locked` sem habilitar o teste ignorado.
 

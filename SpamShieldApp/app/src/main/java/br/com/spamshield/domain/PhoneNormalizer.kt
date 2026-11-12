@@ -155,12 +155,26 @@ object PhoneNormalizer {
     )
 
     private fun parseGeographic(digits: String, defaultDdd: String): GeographicParts {
+        if (digits.startsWith("0055") && digits.length >= 14) {
+            val ddd = digits.substring(4, 6)
+            if (ddd in VALID_DDDS) {
+                val subscriber = digits.substring(6)
+                return GeographicParts(ddd, subscriber, "$ddd$subscriber", "0055")
+            }
+        }
         if (digits.startsWith("00") && digits.length >= 14) {
             val csp = digits.substring(2, 4)
             val ddd = digits.substring(4, 6)
             if (csp in CSP_CODES && ddd in VALID_DDDS) {
                 val subscriber = digits.substring(6)
                 return GeographicParts(ddd, subscriber, "$ddd$subscriber", "00$csp")
+            }
+        }
+        if (digits.startsWith("055") && digits.length >= 13) {
+            val ddd = digits.substring(3, 5)
+            if (ddd in VALID_DDDS) {
+                val subscriber = digits.substring(5)
+                return GeographicParts(ddd, subscriber, "$ddd$subscriber", "055")
             }
         }
         if (digits.startsWith("0") && digits.length >= 13) {
