@@ -14,7 +14,7 @@ use chrono::{Duration, Utc};
 use mongodb::options::ReturnDocument;
 use std::collections::HashMap;
 
-/// Atomic pipeline: first event with a given ID is immutable, including concurrent retries.
+/// Atomic pipeline: retain every stored event; append only previously unseen IDs.
 pub(crate) fn telemetry_merge_stage(call: &CallTelemetryDoc, now: BsonDateTime) -> Document {
     let full = call.to_bson_document();
     let events = full
@@ -39,8 +39,8 @@ pub(crate) fn telemetry_merge_stage(call: &CallTelemetryDoc, now: BsonDateTime) 
         "audit.feedback_recorded_at": { "$max": [{ "$ifNull": ["$audit.feedback_recorded_at", 0_i64] }, feedback_at] },
         "audit.synced_at": { "$literal": now },
         "decision_events": { "$reduce": {
-            "input": { "$concatArrays": [{ "$ifNull": ["$decision_events", []] }, { "$literal": events }] },
-            "initialValue": [],
+            "input": { "$literal": events },
+            "initialValue": { "$ifNull": ["$decision_events", []] },
             "in": { "$cond": [
                 { "$in": ["$$this.event_id", { "$map": { "input": "$$value", "as": "stored", "in": "$$stored.event_id" } }] },
                 "$$value", { "$concatArrays": ["$$value", ["$$this"]] }
@@ -49,19 +49,65 @@ pub(crate) fn telemetry_merge_stage(call: &CallTelemetryDoc, now: BsonDateTime) 
     } }
 }
 
+/// v1 clients replayed through v1.3.3 materialize exactly these additive defaults.
+/// Normalize copies for comparison only: persisted evidence is never rewritten.
+fn without_materialized_v1_defaults(event: &Bson) -> Bson {
+    let mut event = event.clone();
+    let Some(details) = event
+        .as_document_mut()
+        .and_then(|document| document.get_document_mut("details").ok())
+    else {
+        return event;
+    };
+    if !matches!(
+        details.get("schemaVersion"),
+        Some(Bson::Int32(1) | Bson::Int64(1))
+    ) {
+        return event;
+    }
+    for key in ["appVersionName", "appVersionCode"] {
+        if matches!(details.get(key), Some(Bson::Null)) {
+            details.remove(key);
+        }
+    }
+    if let Ok(rules) = details.get_array_mut("evaluatedRules") {
+        for rule in rules {
+            if let Some(rule) = rule.as_document_mut() {
+                if rule.get_bool("enabled").ok() == Some(true) {
+                    rule.remove("enabled");
+                }
+            }
+        }
+    }
+    event
+}
+
+fn equivalent_immutable_event(incoming: &Bson, stored: &Bson) -> bool {
+    without_materialized_v1_defaults(incoming) == without_materialized_v1_defaults(stored)
+}
+
 pub(crate) fn events_match_persisted(call: &CallTelemetryDoc, stored: &Document) -> bool {
     let Ok(events) = stored.get_array("decision_events") else {
         return call.decision_events.is_empty();
     };
-    let by_id: HashMap<&str, &Bson> = events
-        .iter()
-        .filter_map(|event| {
-            let id = event.as_document()?.get_str("event_id").ok()?;
-            Some((id, event))
-        })
-        .collect();
+    let mut by_id: HashMap<&str, Vec<&Bson>> = HashMap::new();
+    for event in events {
+        if let Some(id) = event
+            .as_document()
+            .and_then(|event| event.get_str("event_id").ok())
+        {
+            by_id.entry(id).or_default().push(event);
+        }
+    }
     call.decision_events.iter().all(|event| {
-        bson::to_bson(event).ok().as_ref() == by_id.get(event.event_id.as_str()).copied()
+        let Ok(incoming) = bson::to_bson(event) else {
+            return false;
+        };
+        by_id.get(event.event_id.as_str()).is_some_and(|variants| {
+            variants
+                .iter()
+                .any(|stored| equivalent_immutable_event(&incoming, stored))
+        })
     })
 }
 
@@ -342,6 +388,146 @@ mod journal_regression_tests {
         })).unwrap()
     }
 
+    fn legacy_call_with_event() -> CallTelemetryDoc {
+        let mut call = call_with_event();
+        call.decision_events[0].app_version = "1.3.1 (15)".into();
+        call.decision_events[0].details = serde_json::json!({
+            "schemaVersion": 1, "engineRevision": "decision-journal-v1", "score": 25,
+            "ruleSetFingerprint": "original-configuration", "unknownLegacyFact": "preserve-me",
+            "evaluatedRules": [{ "ruleId": "NOT_IN_CONTACTS", "ruleType": "HEURISTIC_WEIGHT",
+                "pattern": null, "weight": 25, "priority": 12 }]
+        });
+        call
+    }
+
+    fn materialize_v1_3_3_defaults(call: &mut CallTelemetryDoc) {
+        let details = &mut call.decision_events[0].details;
+        details["appVersionName"] = serde_json::Value::Null;
+        details["appVersionCode"] = serde_json::Value::Null;
+        details["evaluatedRules"][0]["enabled"] = serde_json::json!(true);
+    }
+
+    #[test]
+    fn legacy_replay_accepts_only_additive_v1_3_3_defaults_without_mutating_evidence() {
+        for version in ["1.3.1 (15)", "1.3.2 (16)"] {
+            let mut legacy = legacy_call_with_event();
+            legacy.decision_events[0].app_version = version.into();
+            let stored_original = legacy.to_bson_document();
+            let before = stored_original.clone();
+            let mut replay = legacy.clone();
+            materialize_v1_3_3_defaults(&mut replay);
+            assert!(events_match_persisted(&replay, &stored_original));
+            assert!(events_match_persisted(&legacy, &replay.to_bson_document()));
+            assert_eq!(stored_original, before);
+        }
+    }
+
+    #[test]
+    fn legacy_replay_still_rejects_changed_facts_types_schema_and_unknown_keys() {
+        let legacy = legacy_call_with_event();
+        let stored = legacy.to_bson_document();
+        let mut compatible = legacy.clone();
+        materialize_v1_3_3_defaults(&mut compatible);
+        for (key, changed) in [
+            ("score", serde_json::json!(99)),
+            ("schemaVersion", serde_json::json!(2)),
+            ("engineRevision", serde_json::json!("decision-journal-v2")),
+            (
+                "ruleSetFingerprint",
+                serde_json::json!("changed-configuration"),
+            ),
+            ("appVersionName", serde_json::json!("1.3.3")),
+            ("appVersionCode", serde_json::json!(17)),
+            ("unknownLegacyFact", serde_json::json!("changed")),
+            ("newUnknownFact", serde_json::Value::Null),
+        ] {
+            let mut changed_call = compatible.clone();
+            changed_call.decision_events[0].details[key] = changed;
+            assert!(
+                !events_match_persisted(&changed_call, &stored),
+                "must reject changed {key}"
+            );
+        }
+        let mut disabled = compatible.clone();
+        disabled.decision_events[0].details["evaluatedRules"][0]["enabled"] =
+            serde_json::json!(false);
+        assert!(!events_match_persisted(&disabled, &stored));
+        let mut missing_unknown = compatible.clone();
+        missing_unknown.decision_events[0]
+            .details
+            .as_object_mut()
+            .unwrap()
+            .remove("unknownLegacyFact");
+        assert!(!events_match_persisted(&missing_unknown, &stored));
+        let mut changed_envelope = compatible.clone();
+        changed_envelope.decision_events[0].recorded_at += 1;
+        assert!(!events_match_persisted(&changed_envelope, &stored));
+        changed_envelope = compatible.clone();
+        changed_envelope.decision_events[0].app_version = "1.3.3 (17)".into();
+        assert!(!events_match_persisted(&changed_envelope, &stored));
+        let mut changed_numeric_type = stored.clone();
+        changed_numeric_type
+            .get_array_mut("decision_events")
+            .unwrap()[0]
+            .as_document_mut()
+            .unwrap()
+            .get_document_mut("details")
+            .unwrap()
+            .insert("score", 25.0_f64);
+        assert!(!events_match_persisted(&compatible, &changed_numeric_type));
+    }
+
+    #[test]
+    fn v2_replay_is_strict_and_legacy_variants_remain_matchable_without_changes() {
+        let modern = call_with_event();
+        let mut missing_version = modern.clone();
+        missing_version.decision_events[0]
+            .details
+            .as_object_mut()
+            .unwrap()
+            .remove("appVersionCode");
+        assert!(!events_match_persisted(
+            &missing_version,
+            &modern.to_bson_document()
+        ));
+        let mut v2_null = modern.clone();
+        v2_null.decision_events[0].details["appVersionName"] = serde_json::Value::Null;
+        assert!(!events_match_persisted(
+            &v2_null,
+            &modern.to_bson_document()
+        ));
+        let legacy = legacy_call_with_event();
+        let mut other_variant = legacy.clone();
+        other_variant.decision_events[0].details["score"] = serde_json::json!(99);
+        let mut stored = legacy.to_bson_document();
+        stored
+            .get_array_mut("decision_events")
+            .unwrap()
+            .push(bson::to_bson(&other_variant.decision_events[0]).unwrap());
+        let before = stored.clone();
+        assert!(events_match_persisted(&legacy, &stored));
+        assert!(events_match_persisted(&other_variant, &stored));
+        assert_eq!(stored, before);
+    }
+
+    #[test]
+    fn bson_object_key_order_does_not_change_immutable_event_identity() {
+        let call = legacy_call_with_event();
+        let event = bson::to_bson(&call.decision_events[0]).unwrap();
+        let original = event.as_document().unwrap();
+        let reordered = original
+            .iter()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Document>();
+        assert!(equivalent_immutable_event(
+            &event,
+            &Bson::Document(reordered)
+        ));
+    }
+
     #[test]
     fn acknowledges_only_the_exact_immutable_event_returned_by_atomic_write() {
         let call = call_with_event();
@@ -482,6 +668,45 @@ mod journal_regression_tests {
             apk_metadata_path: std::path::PathBuf::new(),
             tailscale_ip: "127.0.0.1".into(),
         };
+        let mut legacy = legacy_call_with_event();
+        legacy.id = "legacy-variants".into();
+        let mut legacy_document = legacy.to_bson_document();
+        let mut variant = bson::to_bson(&legacy.decision_events[0]).unwrap();
+        variant
+            .as_document_mut()
+            .unwrap()
+            .get_document_mut("details")
+            .unwrap()
+            .insert("score", 99_i64);
+        legacy_document
+            .get_array_mut("decision_events")
+            .unwrap()
+            .push(variant);
+        let original_legacy_events = legacy_document
+            .get_array("decision_events")
+            .unwrap()
+            .clone();
+        app_db
+            .call_telemetry()
+            .insert_one(legacy_document)
+            .await
+            .unwrap();
+        materialize_v1_3_3_defaults(&mut legacy);
+        assert!(
+            post_telemetry_batch(State(state.clone()), Json(vec![legacy]))
+                .await
+                .is_ok()
+        );
+        let unchanged_legacy = app_db
+            .call_telemetry()
+            .find_one(doc! { "_id": "legacy-variants" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            unchanged_legacy.get_array("decision_events").unwrap(),
+            &original_legacy_events
+        );
         let mut handles = Vec::new();
         for index in 0..12 {
             let mut call = call_with_event();

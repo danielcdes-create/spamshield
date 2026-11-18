@@ -1,0 +1,10 @@
+{
+  "kind": "backend_legacy_replay_hotfix",
+  "binary_sha256": "dd24b6851a7b65ca317da7a3f5044b3603c3d7e93fc171841bc63965a6e5fd98",
+  "binary_size_bytes": 13847096,
+  "rust_tests_passed": 18,
+  "ignored_integrations": 2,
+  "normalization_scope": "schema1: absent/null appVersionName and appVersionCode; absent/true evaluatedRules.enabled only",
+  "stored_journal_rewrite": false,
+  "android_apk_required_for_server_fix": false
+}
