@@ -1,5 +1,7 @@
 # Privacidade e alerta do Play Protect
 
+Na 1.3.4, os avisos aguardam a leitura das preferências persistidas antes de serem exibidos. Isso corrige a apresentação breve de um consentimento já aceito na 1.3.3. A mudança não concede permissões automaticamente nem remove a classificação do Play Protect.
+
 ## O que o alerta informa
 
 A captura enviada em 17/11/2026 mostra o **Google Play Protect** classificando SpamShield BR como app nocivo, com a mensagem correspondente à categoria **spyware**, e informando remoção de permissões. Não é apenas a mensagem de aplicativo desconhecido. A indicação de SMS, fotos e áudio na mensagem é genérica da categoria; ela não prova acesso do SpamShield a cada um desses recursos.

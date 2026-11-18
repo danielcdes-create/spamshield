@@ -1,6 +1,12 @@
-# SpamShield BR (`v1.3.3` — Build `17`)
+# SpamShield BR (`v1.3.4` — Build `18`)
 
 Ecossistema privado de defesa local, telemetria auditável e inteligência contra chamadas de spam, robocall, chipeiras GSM e spoofing no Brasil.
+
+### Novidades da versão `v1.3.4` (Build `18`):
+- Corrigido o HTTP 409 provocado por defaults adicionados aos eventos antigos no reenvio da 1.3.3; o backend preserva o diário e aceita somente equivalências legadas conhecidas.
+- O APK envia os detalhes JSON originais, incluindo campos desconhecidos, sem materializar defaults.
+- Avisos e permissões aguardam a leitura real das preferências; o consentimento salvo deixa de aparecer e sumir rapidamente na abertura. Recusar o papel de bloqueador não abre outra janela automaticamente.
+- 90 testes Android e 18 Rust passaram. Endereço e chave Bearer atuais permanecem válidos. Veja [release 1.3.4](docs/RELEASE-1.3.4.md).
 
 ### Novidades da versão `v1.3.3` (Build `17`):
 - Quarentena com validade no cache; correções de grace para códigos especiais, aprendizado abaixo do limiar, rediscagens e chamadas efetuadas.

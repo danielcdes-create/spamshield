@@ -1,4 +1,12 @@
-# Telemetria de decisões — v1.3.1 a v1.3.3 (Build 15–17)
+# Telemetria de decisões — v1.3.1 a v1.3.4 (Build 15–18)
+
+## Transporte fiel e compatibilidade — 1.3.4
+
+O transporte usa o `detailsJson` armazenado como JSON bruto, preservando campos ausentes, desconhecidos e valores explícitos. A decodificação tipada continua servindo à interface e à proveniência; ela não reconstrói o payload enviado ao servidor.
+
+O hotfix do backend compara cópias dos eventos schema 1 ignorando somente os defaults aditivos introduzidos pela 1.3.3: versões de app nulas e `evaluatedRules.enabled=true`. Isso não altera o documento armazenado. Alterações reais de versão, score, regra, horário, schema, fingerprint ou campos desconhecidos continuam gerando conflito, e o ACK depende da equivalência com uma variante já persistida.
+
+A mescla começa com o array existente e acrescenta IDs inéditos. Variantes legadas já armazenadas não são apagadas durante o reenvio. O hotfix também atende clientes 1.3.3; o APK 1.3.4 evita a alteração de representação na origem.
 
 ## Versões explícitas na exportação — 1.3.3
 

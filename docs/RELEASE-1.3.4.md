@@ -24,3 +24,9 @@ Recusar o papel de bloqueador não abre automaticamente outra janela de configur
 - A chave Bearer e o endereço MagicDNS atuais permanecem os mesmos. Não é necessário cadastrar outra chave por causa desta atualização.
 
 O comportamento das janelas no Samsung físico e a classificação do Play Protect não foram verificados no aparelho. Evidências de build e implantação ficam em `audit/2026-11-18/`.
+
+## Publicação em 18/11/2026
+
+O hotfix de compatibilidade do backend foi implantado a partir do commit `2ec4f505db8f1f0ef3ecdd543d9905e2a8391245`; o APK 1.3.4 foi preparado a partir de `ad9a8370d86a0586e1934d68c6a1b9ab042320e2`. O canal OTA passou a informar versão 1.3.4/build 18, com saúde `ok`, MongoDB conectado e hash do download real conferido: `29bf8643ac4cab9034ace52248f06bb48ba15b769e00db3ec00b6e9bd0bdda4a`.
+
+O backend e os APKs anteriores permanecem disponíveis nos backups privados da VPS. A troca manteve a credencial atual e a porta limitada ao loopback, com acesso privado via Tailscale. Não foram apagados registros do telefone nem gravadas chamadas sintéticas na base operacional.
