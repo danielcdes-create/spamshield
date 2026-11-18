@@ -107,9 +107,9 @@ class MainViewModel @Inject constructor(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val settings: StateFlow<SpamShieldSettings> = settingsDataStore
+    val settings: StateFlow<SpamShieldSettings?> = settingsDataStore
         .settingsFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SpamShieldSettings())
+        .asSettingsUiState(viewModelScope)
 
     private val _tailscaleStatus = MutableStateFlow(TailscaleStatusUi())
     val tailscaleStatus: StateFlow<TailscaleStatusUi> = _tailscaleStatus.asStateFlow()

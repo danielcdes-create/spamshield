@@ -2,10 +2,10 @@ package br.com.spamshield.data.remote
 
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
 import br.com.spamshield.data.local.entity.CallDecisionEventEntity
-import br.com.spamshield.domain.DecisionDetails
-import br.com.spamshield.domain.DecisionTrace
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
@@ -51,11 +51,13 @@ data class DecisionEventRemoteDto(
     val event_type: String,
     val source: String,
     val app_version: String,
-    val details: DecisionDetails
+    val details: JsonElement
 )
 
+// The journal owns the event payload. A newer app must not inject its model defaults,
+// discard unknown fields or substitute an empty snapshot when old JSON is malformed.
 fun CallDecisionEventEntity.toRemoteEvent() = DecisionEventRemoteDto(
-    eventId, recordedAt, eventType, source, appVersion, DecisionTrace.details(this)
+    eventId, recordedAt, eventType, source, appVersion, Json.parseToJsonElement(detailsJson)
 )
 
 @Serializable

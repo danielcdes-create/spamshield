@@ -1,0 +1,106 @@
+{
+  "tests": 90,
+  "failures": 0,
+  "errors": 0,
+  "suites": [
+    {
+      "file": "TEST-br.com.spamshield.domain.DecisionTraceTest.xml",
+      "name": "br.com.spamshield.domain.DecisionTraceTest",
+      "tests": "11",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T08:22:39.776Z",
+      "hostname": "GBP360",
+      "time": "1.546"
+    },
+    {
+      "file": "TEST-br.com.spamshield.domain.EngineCorrectionsTest.xml",
+      "name": "br.com.spamshield.domain.EngineCorrectionsTest",
+      "tests": "20",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T08:22:41.342Z",
+      "hostname": "GBP360",
+      "time": "0.26"
+    },
+    {
+      "file": "TEST-br.com.spamshield.domain.NtSpamshield2026001Test.xml",
+      "name": "br.com.spamshield.domain.NtSpamshield2026001Test",
+      "tests": "17",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T08:22:41.611Z",
+      "hostname": "GBP360",
+      "time": "0.18"
+    },
+    {
+      "file": "TEST-br.com.spamshield.domain.PhoneNormalizerTest.xml",
+      "name": "br.com.spamshield.domain.PhoneNormalizerTest",
+      "tests": "9",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T08:22:41.795Z",
+      "hostname": "GBP360",
+      "time": "0.012"
+    },
+    {
+      "file": "TEST-br.com.spamshield.domain.SpamScoringEngineTest.xml",
+      "name": "br.com.spamshield.domain.SpamScoringEngineTest",
+      "tests": "11",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T08:22:41.820Z",
+      "hostname": "GBP360",
+      "time": "0.096"
+    },
+    {
+      "file": "TEST-br.com.spamshield.domain.TelemetryEventTransportTest.xml",
+      "name": "br.com.spamshield.domain.TelemetryEventTransportTest",
+      "tests": "5",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T08:22:41.923Z",
+      "hostname": "GBP360",
+      "time": "1.013"
+    },
+    {
+      "file": "TEST-br.com.spamshield.domain.TelemetryProvenanceTest.xml",
+      "name": "br.com.spamshield.domain.TelemetryProvenanceTest",
+      "tests": "8",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T08:22:42.949Z",
+      "hostname": "GBP360",
+      "time": "0.117"
+    },
+    {
+      "file": "TEST-br.com.spamshield.sync.SyncConsentTest.xml",
+      "name": "br.com.spamshield.sync.SyncConsentTest",
+      "tests": "6",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T08:22:43.070Z",
+      "hostname": "GBP360",
+      "time": "0.104"
+    },
+    {
+      "file": "TEST-br.com.spamshield.ui.SettingsReadinessTest.xml",
+      "name": "br.com.spamshield.ui.SettingsReadinessTest",
+      "tests": "3",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T08:22:43.187Z",
+      "hostname": "GBP360",
+      "time": "0.224"
+    }
+  ]
+}

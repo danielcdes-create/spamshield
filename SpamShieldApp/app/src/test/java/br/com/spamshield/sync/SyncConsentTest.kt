@@ -8,6 +8,9 @@ import br.com.spamshield.domain.FakeSpamShieldDao
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -88,8 +91,9 @@ class SyncConsentTest {
         assertEquals("ALLOWED_LOW_SCORE", wire.decision_vector.outcome)
         assertEquals("LEGITIMATE", wire.decision_vector.category)
         assertEquals("OUTGOING", wire.call_details.call_direction)
-        assertEquals("OUTGOING_CALL", wire.decision_events.single().details.outcome)
-        assertEquals(2, wire.decision_events.single().details.systemCallType)
+        val details = wire.decision_events.single().details.jsonObject
+        assertEquals("OUTGOING_CALL", details["outcome"]!!.jsonPrimitive.content)
+        assertEquals(2, details["systemCallType"]!!.jsonPrimitive.int)
         assertEquals("OUTGOING_CALL", row.outcome)
     }
 }

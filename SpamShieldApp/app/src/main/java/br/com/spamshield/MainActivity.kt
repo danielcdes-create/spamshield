@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.GppBad
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
@@ -95,7 +96,18 @@ class MainActivity : ComponentActivity() {
 fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val loadedSettings by viewModel.settings.collectAsStateWithLifecycle()
+    val settings = loadedSettings
+    if (settings == null) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                CircularProgressIndicator()
+                Text("Carregando preferências...")
+            }
+        }
+        return
+    }
     fun missingDataPermissions(): Boolean = listOf(
         Manifest.permission.READ_CONTACTS, Manifest.permission.READ_CALL_LOG,
         Manifest.permission.READ_PHONE_STATE
@@ -123,13 +135,7 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
     val roleLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) {
-        val held = RoleManagerHelper.isCallScreeningRoleHeld(context)
-        isScreeningRoleHeld = held
-        if (!held) {
-            runCatching {
-                context.startActivity(android.content.Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS))
-            }
-        }
+        isScreeningRoleHeld = RoleManagerHelper.isCallScreeningRoleHeld(context)
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
