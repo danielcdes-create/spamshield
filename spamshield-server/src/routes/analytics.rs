@@ -18,91 +18,109 @@ pub async fn get_analytics_summary(
 ) -> Result<Json<AnalyticsSummaryResponse>, (StatusCode, String)> {
     let db = &state.db;
     let latest = |event_type: &str, source: Option<&str>| {
-        let mut clauses = vec![bson::Bson::Document(doc! { "$eq": ["$$e.event_type", event_type] })];
-        if let Some(source) = source { clauses.push(bson::Bson::Document(doc! { "$eq": ["$$e.source", source] })); }
-        doc! { "$arrayElemAt": [{ "$filter": {
-            "input": { "$ifNull": ["$decision_events", []] }, "as": "e", "cond": { "$and": clauses }
-        }}, -1] }
-    };
-    let pipeline = vec![doc! { "$set": {
-        "_screening_response": latest("SCREENING_RESPONSE_SUBMITTED", Some("CALL_SCREENING_SERVICE")),
-        "_call_log_observation": latest("CALL_LOG_OBSERVATION", None),
-    }}, doc! { "$set": { "_confirmed_block": { "$and": [
-        { "$eq": ["$_screening_response.details.disallowCall", true] },
-        { "$eq": ["$_call_log_observation.details.systemCallType", 6] },
-        { "$eq": ["$_call_log_observation.details.systemBlockReason", 1] },
-        { "$ne": ["$_call_log_observation.details.systemScreeningAppIsSpamShield", false] }
-    ]}}}, doc! {
-        "$facet": {
-            "totals": [
-                {
-                    "$group": {
-                        "_id": null,
-                        "total_intercepted": { "$sum": 1 },
-                        "total_blocked": {
-                            "$sum": {
-                                "$cond": [
-                                    "$_confirmed_block",
-                                    1,
-                                    0
-                                ]
-                            }
-                        },
-                        "total_block_requests": { "$sum": { "$cond": [{ "$eq": ["$_screening_response.details.disallowCall", true] }, 1, 0] } },
-                        "total_dialer_rejected": { "$sum": { "$cond": [{ "$eq": ["$_call_log_observation.details.systemCallType", 5] }, 1, 0] } },
-                        "avg_latency": { "$avg": "$decision_vector.processing_latency_ms" }
-                    }
-                }
-            ],
-            "top_prefixes": [
-                {
-                    "$match": {
-                        "_confirmed_block": true
-                    }
-                },
-                {
-                    "$group": {
-                        "_id": "$call_details.prefix_7",
-                        "count": { "$sum": 1 }
-                    }
-                },
-                { "$sort": { "count": -1 } },
-                { "$limit": 10 }
-            ],
-            "by_carrier": [
-                {
-                    "$group": {
-                        "_id": { "$ifNull": ["$call_details.carrier_guess", "Desconhecida"] },
-                        "count": { "$sum": 1 }
-                    }
-                },
-                { "$sort": { "count": -1 } }
-            ],
-            "by_category": [
-                {
-                    "$group": {
-                        "_id": "$decision_vector.category",
-                        "count": { "$sum": 1 }
-                    }
-                },
-                { "$sort": { "count": -1 } }
-            ],
-            "by_hour": [
-                {
-                    "$group": {
-                        "_id": {
-                            "$hour": {
-                                "date": "$timestamp",
-                                "timezone": "America/Sao_Paulo"
-                            }
-                        },
-                        "count": { "$sum": 1 }
-                    }
-                },
-                { "$sort": { "_id": 1 } }
-            ]
+        let mut clauses = vec![bson::Bson::Document(
+            doc! { "$eq": ["$$e.event_type", event_type] },
+        )];
+        if let Some(source) = source {
+            clauses.push(bson::Bson::Document(doc! { "$eq": ["$$e.source", source] }));
         }
-    }];
+        // Concurrent uploads can append an older event after a newer one.
+        doc! { "$reduce": {
+            "input": { "$filter": {
+                "input": { "$ifNull": ["$decision_events", []] }, "as": "e", "cond": { "$and": clauses }
+            } },
+            "initialValue": null,
+            "in": { "$cond": [
+                { "$or": [ { "$eq": ["$$value", null] },
+                    { "$gte": ["$$this.recorded_at", "$$value.recorded_at"] } ] },
+                "$$this", "$$value"
+            ] }
+        } }
+    };
+    let pipeline = vec![
+        doc! { "$match": { "call_details.call_direction": { "$ne": "OUTGOING" }, "decision_vector.outcome": { "$ne": "OUTGOING_CALL" } } },
+        doc! { "$set": {
+            "_screening_response": latest("SCREENING_RESPONSE_SUBMITTED", Some("CALL_SCREENING_SERVICE")),
+            "_call_log_observation": latest("CALL_LOG_OBSERVATION", None),
+        }},
+        doc! { "$set": { "_confirmed_block": { "$and": [
+            { "$eq": ["$_screening_response.details.disallowCall", true] },
+            { "$eq": ["$_call_log_observation.details.systemCallType", 6] },
+            { "$eq": ["$_call_log_observation.details.systemBlockReason", 1] },
+            { "$ne": ["$_call_log_observation.details.systemScreeningAppIsSpamShield", false] }
+        ]}}},
+        doc! {
+            "$facet": {
+                "totals": [
+                    {
+                        "$group": {
+                            "_id": null,
+                            "total_intercepted": { "$sum": 1 },
+                            "total_blocked": {
+                                "$sum": {
+                                    "$cond": [
+                                        "$_confirmed_block",
+                                        1,
+                                        0
+                                    ]
+                                }
+                            },
+                            "total_block_requests": { "$sum": { "$cond": [{ "$eq": ["$_screening_response.details.disallowCall", true] }, 1, 0] } },
+                            "total_dialer_rejected": { "$sum": { "$cond": [{ "$eq": ["$_call_log_observation.details.systemCallType", 5] }, 1, 0] } },
+                            "avg_latency": { "$avg": "$decision_vector.processing_latency_ms" }
+                        }
+                    }
+                ],
+                "top_prefixes": [
+                    {
+                        "$match": {
+                            "_confirmed_block": true
+                        }
+                    },
+                    {
+                        "$group": {
+                            "_id": "$call_details.prefix_7",
+                            "count": { "$sum": 1 }
+                        }
+                    },
+                    { "$sort": { "count": -1 } },
+                    { "$limit": 10 }
+                ],
+                "by_carrier": [
+                    {
+                        "$group": {
+                            "_id": { "$ifNull": ["$call_details.carrier_guess", "Desconhecida"] },
+                            "count": { "$sum": 1 }
+                        }
+                    },
+                    { "$sort": { "count": -1 } }
+                ],
+                "by_category": [
+                    {
+                        "$group": {
+                            "_id": "$decision_vector.category",
+                            "count": { "$sum": 1 }
+                        }
+                    },
+                    { "$sort": { "count": -1 } }
+                ],
+                "by_hour": [
+                    {
+                        "$group": {
+                            "_id": {
+                                "$hour": {
+                                    "date": "$timestamp",
+                                    "timezone": "America/Sao_Paulo"
+                                }
+                            },
+                            "count": { "$sum": 1 }
+                        }
+                    },
+                    { "$sort": { "_id": 1 } }
+                ]
+            }
+        },
+    ];
 
     let mut cursor = db
         .call_telemetry()

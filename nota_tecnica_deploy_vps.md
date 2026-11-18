@@ -158,7 +158,7 @@ MONGODB_DB_NAME="spam_shield_db"
 SERVER_BIND_ADDR="0.0.0.0:8080"
 TAILSCALE_IP="100.101.23.111"
 RUST_LOG="info,spamshield_server=debug"
-SPAMSHIELD_API_KEY="LQ9aRpuuvCX3vucM3ZAb_Idp-I3MuAIY66YUV9_afPg"
+SPAMSHIELD_API_KEY="<REDACTED>"
 APK_STORAGE_PATH="/app/apk/app-debug.apk"
 APK_METADATA_PATH="/app/apk/output-metadata.json"
 ```

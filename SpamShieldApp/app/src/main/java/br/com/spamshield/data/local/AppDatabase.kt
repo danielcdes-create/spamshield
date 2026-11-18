@@ -13,6 +13,11 @@ import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.CallDecisionEventEntity
 import br.com.spamshield.data.local.entity.OutboundGraceEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
+import br.com.spamshield.data.local.entity.SyncMutationEntity
+import br.com.spamshield.data.local.entity.RemoteQuarantinePrefixEntity
+import br.com.spamshield.data.remote.FeedbackPatchRequestDto
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 @Database(
     entities = [
@@ -21,15 +26,46 @@ import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
         ActiveRuleEntity::class,
         PrefixQuarantineEntity::class,
         OutboundGraceEntity::class,
-        AnatelPrefixEntity::class
+        AnatelPrefixEntity::class,
+        SyncMutationEntity::class,
+        RemoteQuarantinePrefixEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun spamShieldDao(): SpamShieldDao
 
     companion object {
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS sync_mutations (
+                    mutationId TEXT NOT NULL PRIMARY KEY, kind TEXT NOT NULL, targetId TEXT NOT NULL,
+                    payloadJson TEXT NOT NULL, createdAt INTEGER NOT NULL)""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_sync_mutations_createdAt ON sync_mutations(createdAt)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS remote_quarantine_prefixes (prefix7 TEXT NOT NULL PRIMARY KEY)")
+                // Existing downloaded snapshots are deliberately not queued as fresh local changes.
+                // Replay explicit existing feedback once: older versions could lose an offline PATCH.
+                db.query("SELECT id, userFeedback, timestamp FROM call_telemetry WHERE userFeedback != 'UNRATED'").use { rows ->
+                    while (rows.moveToNext()) {
+                        val id = rows.getString(0)
+                        val feedback = rows.getString(1)
+                        val mutationId = "migration-v5-feedback-$id"
+                        var recordedAt = rows.getLong(2)
+                        var recordedAtSource = "LEGACY_CALL_TIME_LOWER_BOUND"
+                        db.query("SELECT recordedAt FROM call_decision_events WHERE callId = ? AND eventType = 'USER_FEEDBACK' ORDER BY recordedAt DESC LIMIT 1", arrayOf(id)).use { events ->
+                            if (events.moveToFirst()) {
+                                recordedAt = events.getLong(0)
+                                recordedAtSource = "USER_FEEDBACK_EVENT"
+                            }
+                        }
+                        val payload = Json.encodeToString(FeedbackPatchRequestDto(feedback, mutationId, recordedAt, recordedAtSource))
+                        db.execSQL("INSERT OR IGNORE INTO sync_mutations (mutationId,kind,targetId,payloadJson,createdAt) VALUES (?,?,?,?,?)",
+                            arrayOf<Any?>(mutationId, "FEEDBACK", id, payload, recordedAt))
+                    }
+                }
+            }
+        }
         val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // Keep legacy rows intact. No fabricated arrival/response events.

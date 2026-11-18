@@ -30,7 +30,7 @@ object HistoryCallScorer {
         ) {
             rules.add(prefix5ChipeiraRule)
         }
-        val arrivalScore = HeuristicScorer.equation(rules)
+        val arrivalScore = HeuristicScorer.equation(HeuristicScorer.configuredRules(rules, input))
         if (
             rejectedInDialer &&
             arrivalScore < input.thresholdApplied &&

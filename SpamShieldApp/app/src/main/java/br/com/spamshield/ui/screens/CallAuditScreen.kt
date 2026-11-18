@@ -39,6 +39,7 @@ import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
 import br.com.spamshield.data.local.entity.CallDecisionEventEntity
 import br.com.spamshield.domain.DecisionTrace
+import br.com.spamshield.domain.TelemetryProvenance
 import br.com.spamshield.domain.PhoneNormalizer
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -52,7 +53,7 @@ fun CallAuditScreen(
     onMarkFeedback: (CallTelemetryEntity, String) -> Unit
 ) {
     val context = LocalContext.current
-    val dateFormat = remember { SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault()) }
+    val dateFormat = remember { SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()) }
 
     Column(
         modifier = Modifier
@@ -60,7 +61,7 @@ fun CallAuditScreen(
             .padding(16.dp)
     ) {
         Text(
-            text = "Auditoria de Chamadas (Raio-X em Tempo Real)",
+            text = "Auditoria de chamadas",
             fontWeight = FontWeight.Bold,
             fontSize = 18.sp
         )
@@ -107,6 +108,7 @@ fun CallAuditScreen(
                         ) {
                             val callEvents = decisionEvents.filter { it.callId == item.id }
                             val evidence = DecisionTrace.evidence(item, callEvents)
+                            val provenance = TelemetryProvenance.forCall(item, callEvents)
                             val displayPrefix = item.prefix7.ifBlank { "sem prefixo" }
 
                             Row(
@@ -143,18 +145,29 @@ fun CallAuditScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            Text(
+                                text = "Versão na chegada: ${provenance.originalDecision?.appVersion?.label ?: "não registrada"}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
 
                             if (expanded) {
                                 HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
 
                                 Text("Linha do tempo da chamada", fontWeight = FontWeight.Bold)
+                                Text("Data da chamada: ${dateFormat.format(Date(item.timestamp))}. Os horários abaixo são de gravação dos eventos; podem ser posteriores à chamada.",
+                                    style = MaterialTheme.typography.bodySmall)
+                                if (provenance.originalDecision == null) {
+                                    Text("A versão na chegada é desconhecida. Versões de importação, reavaliação e exportação não identificam a versão que recebeu a chamada.",
+                                        style = MaterialTheme.typography.bodySmall)
+                                }
                                 if (callEvents.isEmpty()) {
                                     Text("O histórico antigo não preservou a decisão original. A classificação atual não comprova bloqueio antes do toque.",
                                         style = MaterialTheme.typography.bodySmall)
                                 }
-                                callEvents.forEach { event ->
+                                callEvents.sortedWith(compareBy({ it.recordedAt }, { it.eventId })).forEach { event ->
                                     val detail = DecisionTrace.details(event)
-                                    Text("${dateFormat.format(Date(event.recordedAt))} • ${DecisionTrace.eventLabel(event.eventType)}",
+                                    Text("Registrado em ${dateFormat.format(Date(event.recordedAt))} • ${DecisionTrace.eventLabel(event.eventType)}",
                                         fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
                                     val description = listOfNotNull(
                                         detail.outcome,
@@ -162,13 +175,14 @@ fun CallAuditScreen(
                                         detail.disallowCall?.let { if (it) "Pedido: bloquear" else "Pedido: permitir" },
                                         detail.systemCallType?.let { "Android: tipo $it; motivo ${detail.systemBlockReason ?: "não informado"}" },
                                         detail.durationSec?.let { "Duração: ${it}s" },
+                                        detail.observedCallTimestamp?.let { "Chamada observada em ${dateFormat.format(Date(it))}" },
                                         detail.reason
                                     ).joinToString(" • ")
                                     Text(description, style = MaterialTheme.typography.bodySmall)
                                     if (detail.rules.isNotEmpty()) Text(
                                         detail.rules.joinToString("; ") { "${it.rule_id} (${it.weight})" },
                                         style = MaterialTheme.typography.bodySmall)
-                                    Text("${event.source} • ${event.appVersion}", style = MaterialTheme.typography.labelSmall)
+                                    Text("${event.source} • App ${event.appVersion} • Motor ${detail.engineRevision}", style = MaterialTheme.typography.labelSmall)
                                 }
                                 HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
 
@@ -177,6 +191,17 @@ fun CallAuditScreen(
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 14.sp
                                 )
+                                val classification = provenance.currentClassification
+                                Text(
+                                    text = if (classification != null) {
+                                        "Registrada pelo app ${classification.appVersion.label} em ${dateFormat.format(Date(classification.recordedAt))} (${DecisionTrace.eventLabel(classification.eventType)})."
+                                    } else {
+                                        "Versão da classificação atual: desconhecida; nenhum evento correspondente foi preservado."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text("Versões presentes no diário: ${provenance.eventAppVersions.joinToString { it.label }.ifBlank { "nenhuma registrada" }}",
+                                    style = MaterialTheme.typography.bodySmall)
                                 Text(
                                     text = "STIR/SHAKEN: ${item.stirShakenStatus} | Categoria: ${item.category} | Latência: ${String.format(Locale.US, "%.2f", item.processingLatencyMs)} ms | Sync: ${item.syncStatus}",
                                     style = MaterialTheme.typography.bodySmall
@@ -291,6 +316,7 @@ private fun OutcomeBadge(outcome: String, score: Int, wasLearnedAfterRing: Boole
         outcome.startsWith("Bloqueio solicitado") -> "SOLICITADO" to Color(0xFFD97706)
         outcome.startsWith("Legado") -> "LEGADO" to Color(0xFF64748B)
         outcome == "Atendida" -> "ATENDIDA" to Color(0xFF16A34A)
+        outcome == "Chamada efetuada" -> "EFETUADA" to Color(0xFF64748B)
         else -> "AUDITADA" to Color(0xFF64748B)
     }
     Surface(

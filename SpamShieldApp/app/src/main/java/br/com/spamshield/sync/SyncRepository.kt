@@ -2,6 +2,7 @@ package br.com.spamshield.sync
 
 import android.util.Log
 import br.com.spamshield.data.local.SettingsDataStore
+import br.com.spamshield.data.local.SpamShieldSettings
 import br.com.spamshield.data.local.dao.SpamShieldDao
 import br.com.spamshield.data.local.entity.ActiveRuleEntity
 import br.com.spamshield.data.local.entity.AnatelPrefixEntity
@@ -12,6 +13,11 @@ import br.com.spamshield.domain.UserFeedbackAudit
 import br.com.spamshield.domain.DecisionTrace
 import br.com.spamshield.data.remote.toRemoteEvent
 import br.com.spamshield.data.local.entity.CallDecisionEventEntity
+import br.com.spamshield.data.local.entity.SyncMutationEntity
+import br.com.spamshield.domain.QuarantinePrefixIndex
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.UUID
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
 import br.com.spamshield.data.remote.ActiveRuleRemoteDto
 import br.com.spamshield.data.remote.ApkInfoResponseDto
@@ -52,6 +58,7 @@ class SyncRepository @Inject constructor(
     private val dao: SpamShieldDao,
     private val settingsDataStore: SettingsDataStore
 ) {
+    private val syncMutex = Mutex()
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
@@ -89,8 +96,7 @@ class SyncRepository @Inject constructor(
 
     suspend fun checkServerReachable(baseUrl: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            val token = settingsDataStore.getSnapshot().apiBearerToken
-            val resp = buildApi(baseUrl, token).getHealth()
+            val resp = buildApi(baseUrl, "").getHealth()
             resp.status == "ok" || resp.mongodb_connected
         } catch (_: Exception) {
             false
@@ -110,6 +116,7 @@ class SyncRepository @Inject constructor(
     suspend fun triggerProvidersSync(): SyncOutcome = withContext(Dispatchers.IO) {
         try {
             val settings = settingsDataStore.getSnapshot()
+            if (!settings.remoteSyncEnabled) return@withContext disabledSync()
             val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
             val summary = api.syncProviders()
             // Reset lastSyncTimestamp to 0 so all newly added Anatel prefixes are pulled
@@ -166,14 +173,18 @@ class SyncRepository @Inject constructor(
         }
     }
 
-    suspend fun performFullSync(): SyncOutcome = withContext(Dispatchers.IO) {
+    suspend fun performFullSync(): SyncOutcome = syncMutex.withLock { performFullSyncLocked() }
+
+    private suspend fun performFullSyncLocked(): SyncOutcome = withContext(Dispatchers.IO) {
         val settings = settingsDataStore.getSnapshot()
+        if (!settings.remoteSyncEnabled) return@withContext disabledSync()
         val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
 
         try {
             // 1. Push pending telemetry batches in chunks of 100
             var pushedCount = 0
             while (true) {
+                if (!syncStillAllowed(settings)) return@withContext disabledSync()
                 val pending = dao.getPendingTelemetry().take(100)
                 if (pending.isEmpty()) break
                 val events = pending.associate { it.id to dao.getDecisionEvents(it.id) }
@@ -195,35 +206,12 @@ class SyncRepository @Inject constructor(
                 }
             }
 
-            // 1b. Push locally learned 8-digit quarantines (e.g. DIALER_REJECTED / PING_CALL_ROBOCALL) to server
+            // Only durable local mutations are sent; downloaded snapshots are never echoed.
+            if (!flushMutationOutbox(api, settings)) return@withContext disabledSync()
             val now = System.currentTimeMillis()
-            val existingLocalQuarantines = dao.getAllQuarantines().filter { it.expiresAt > now }
-            val localBatch = existingLocalQuarantines
-                .filter { lq ->
-                    lq.prefix7.length >= 8 || lq.reason == "DIALER_REJECTED" || lq.reason == "PING_CALL_ROBOCALL"
-                }
-                .map { lq ->
-                    val distinctNumbers = runCatching {
-                        json.decodeFromString<List<String>>(lq.distinctNumbersJson)
-                    }.getOrDefault(emptyList())
-                    PrefixQuarantineRemoteDto(
-                        prefix_7 = lq.prefix7,
-                        ddd = lq.ddd,
-                        carrier_guess = lq.carrierGuess,
-                        distinct_numbers_seen = distinctNumbers,
-                        hit_count = lq.hitCount,
-                        penalty_weight = lq.penaltyWeight,
-                        reason = lq.reason,
-                        first_seen_at = Instant.ofEpochMilli(lq.firstSeenAt).toString(),
-                        last_seen_at = Instant.ofEpochMilli(lq.lastSeenAt).toString(),
-                        expires_at = Instant.ofEpochMilli(lq.expiresAt).toString()
-                    )
-                }
-            if (localBatch.isNotEmpty()) {
-                runCatching { api.upsertQuarantineBatch(localBatch) }
-            }
 
             // 2. Pull updated rules, quarantines, and Anatel prefixes
+            if (!syncStillAllowed(settings)) return@withContext disabledSync()
             val payload = api.getSyncPayload(
                 ddd = settings.userDdd,
                 sinceTimestamp = settings.lastSyncTimestamp
@@ -246,38 +234,22 @@ class SyncRepository @Inject constructor(
                         updatedAt = parseIsoToMillis(r.updated_at, now)
                     )
                 }
-                dao.insertRules(localRules)
+                dao.applyRemoteRules(localRules)
             }
 
-            if (payload.prefix_quarantine.isNotEmpty()) {
-                val preserved8DigitLocal = existingLocalQuarantines.filter {
-                    it.prefix7.length >= 8 || it.reason == "DIALER_REJECTED" || it.reason == "PING_CALL_ROBOCALL"
-                }.associateBy { it.prefix7 }
-
-                val remoteQuarantines = payload.prefix_quarantine
-                    .map { q ->
-                        PrefixQuarantineEntity(
-                            prefix7 = q.prefix_7,
-                            ddd = q.ddd,
-                            carrierGuess = q.carrier_guess,
-                            distinctNumbersJson = json.encodeToString(q.distinct_numbers_seen),
-                            hitCount = q.hit_count,
-                            penaltyWeight = q.penalty_weight,
-                            reason = q.reason,
-                            firstSeenAt = parseIsoToMillis(q.first_seen_at, now),
-                            lastSeenAt = parseIsoToMillis(q.last_seen_at, now),
-                            expiresAt = parseIsoToMillis(q.expires_at, now + 7L * 86_400_000L)
-                        )
-                    }
-
-                val mergedMap = remoteQuarantines.associateBy { it.prefix7 }.toMutableMap()
-                for ((k, v) in preserved8DigitLocal) {
-                    if (!mergedMap.containsKey(k)) {
-                        mergedMap[k] = v
-                    }
-                }
-                dao.replaceAllQuarantines(mergedMap.values.toList())
+            val remoteQuarantines = payload.prefix_quarantine.map { q ->
+                PrefixQuarantineEntity(q.prefix_7, q.ddd, q.carrier_guess,
+                    json.encodeToString(q.distinct_numbers_seen), q.hit_count, q.penalty_weight,
+                    q.reason, parseIsoToMillis(q.first_seen_at, now),
+                    parseIsoToMillis(q.last_seen_at, now), parseIsoToMillis(q.expires_at, now))
             }
+            if (payload.quarantine_snapshot_complete) {
+                dao.applyRemoteQuarantines(remoteQuarantines, payload.quarantine_deleted_prefixes)
+            } else if (remoteQuarantines.isNotEmpty()) {
+                // Old servers have no deletion contract: merge without losing local operations.
+                dao.applyRemoteQuarantines(remoteQuarantines)
+            }
+            QuarantinePrefixIndex.refreshActive { dao.getAllQuarantines() }
 
             if (payload.anatel_numbering_plan.isNotEmpty()) {
                 val localAnatel = payload.anatel_numbering_plan.map { a ->
@@ -320,15 +292,23 @@ class SyncRepository @Inject constructor(
 
     suspend fun submitFeedback(telemetryId: String, feedback: String, prefix7: String) =
         withContext(Dispatchers.IO) {
-            val current = dao.getTelemetryById(telemetryId)
-            if (current != null && feedback == "CONFIRMED_SPAM") {
-                dao.insertTelemetry(UserFeedbackAudit.applyConfirmedSpam(current))
-            } else {
-                dao.updateUserFeedback(telemetryId, feedback)
-                if (feedback == "CONFIRMED_SPAM" || feedback == "FALSE_POSITIVE") {
-                    TelemetrySyncScheduler.enqueueImmediateSync()
+            val current = dao.getTelemetryById(telemetryId) ?: return@withContext
+            val mutationId = UUID.randomUUID().toString()
+            val recordedAt = System.currentTimeMillis()
+            val mutation = SyncMutationEntity(mutationId, "FEEDBACK", telemetryId,
+                json.encodeToString(FeedbackPatchRequestDto(feedback, mutationId, recordedAt)), recordedAt)
+            val updatedRow = when (feedback) {
+                "CONFIRMED_SPAM" -> UserFeedbackAudit.applyConfirmedSpam(current)
+                "FALSE_POSITIVE" -> {
+                    val rules = UserFeedbackAudit.decode(current.triggeredRulesJson)
+                        .filter { it.rule_id !in setOf("USER_CONFIRMED_SPAM_OVERRIDE", "USER_FALSE_POSITIVE_OVERRIDE") } +
+                        TriggeredRuleDto("USER_FALSE_POSITIVE_OVERRIDE", -1000, "Feedback manual do utilizador")
+                    current.copy(userFeedback = feedback, outcome = "ALLOWED_CONTACT", category = "LEGITIMATE",
+                        finalScore = maxOf(0, rules.sumOf { it.weight }), triggeredRulesJson = json.encodeToString(rules), syncStatus = "PENDING")
                 }
+                else -> current.copy(userFeedback = feedback, syncStatus = "PENDING")
             }
+            dao.persistFeedbackUpdate(updatedRow, mutation)
             if (feedback == "FALSE_POSITIVE" && prefix7.isNotEmpty()) {
                 deleteManualQuarantine(prefix7)
                 if (prefix7.length == 8) {
@@ -365,77 +345,69 @@ class SyncRepository @Inject constructor(
                 TelemetrySyncScheduler.enqueueImmediateSync()
             }
 
-            try {
-                val settings = settingsDataStore.getSnapshot()
-                val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
-                api.patchTelemetryFeedback(telemetryId, FeedbackPatchRequestDto(feedback))
-                dao.markTelemetrySynced(listOf(telemetryId))
-            } catch (e: Exception) {
-                Log.w(TAG, "Deferred feedback sync for $telemetryId: ${e.message}")
-            }
+            QuarantinePrefixIndex.refreshActive { dao.getAllQuarantines() }
+            TelemetrySyncScheduler.enqueueImmediateSync()
         }
 
     suspend fun saveManualQuarantine(item: PrefixQuarantineEntity) = withContext(Dispatchers.IO) {
         dao.upsertQuarantine(item)
-        try {
-            val settings = settingsDataStore.getSnapshot()
-            val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
-            val distinctNumbers = runCatching {
-                json.decodeFromString<List<String>>(item.distinctNumbersJson)
-            }.getOrDefault(emptyList())
-            api.upsertQuarantine(
-                PrefixQuarantineRemoteDto(
-                    prefix_7 = item.prefix7,
-                    ddd = item.ddd,
-                    carrier_guess = item.carrierGuess,
-                    distinct_numbers_seen = distinctNumbers,
-                    hit_count = item.hitCount,
-                    penalty_weight = item.penaltyWeight,
-                    reason = item.reason,
-                    first_seen_at = Instant.ofEpochMilli(item.firstSeenAt).toString(),
-                    last_seen_at = Instant.ofEpochMilli(item.lastSeenAt).toString(),
-                    expires_at = Instant.ofEpochMilli(item.expiresAt).toString()
-                )
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Saved manual quarantine locally; remote sync deferred: ${e.message}")
-        }
+        QuarantinePrefixIndex.add(item.prefix7, item.expiresAt)
+        TelemetrySyncScheduler.enqueueImmediateSync()
     }
 
     suspend fun deleteManualQuarantine(prefix7: String) = withContext(Dispatchers.IO) {
         dao.deleteQuarantineByPrefix(prefix7)
-        try {
-            val settings = settingsDataStore.getSnapshot()
-            val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
-            api.deleteQuarantine(prefix7)
-        } catch (e: Exception) {
-            Log.w(TAG, "Deleted quarantine locally; remote sync deferred: ${e.message}")
-        }
+        QuarantinePrefixIndex.remove(prefix7)
+        TelemetrySyncScheduler.enqueueImmediateSync()
     }
 
     suspend fun saveCustomRule(rule: ActiveRuleEntity) = withContext(Dispatchers.IO) {
-        dao.upsertRule(rule)
-        try {
-            val settings = settingsDataStore.getSnapshot()
-            val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
-            api.upsertActiveRule(
-                ActiveRuleRemoteDto(
-                    rule_id = rule.ruleId,
-                    name = rule.name,
-                    rule_type = rule.ruleType,
-                    pattern = rule.pattern,
-                    weight = rule.weight,
-                    priority = rule.priority,
-                    enabled = rule.enabled,
-                    updated_at = Instant.ofEpochMilli(rule.updatedAt).toString()
-                )
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Saved rule locally; remote sync deferred: ${e.message}")
+        dao.persistRuleUpdate(rule, SyncMutationEntity(UUID.randomUUID().toString(), "RULE_UPSERT", rule.ruleId,
+            json.encodeToString(rule),
+            System.currentTimeMillis()))
+        TelemetrySyncScheduler.enqueueImmediateSync()
+    }
+
+    private fun disabledSync() = SyncOutcome(success = true,
+        message = "Sincronização remota desativada. Dados e alterações permanecem no aparelho.")
+
+    private fun PrefixQuarantineEntity.toRemoteQuarantine() = PrefixQuarantineRemoteDto(
+        prefix7, ddd, carrierGuess,
+        runCatching { json.decodeFromString<List<String>>(distinctNumbersJson) }.getOrDefault(emptyList()),
+        hitCount, penaltyWeight, reason, Instant.ofEpochMilli(firstSeenAt).toString(),
+        Instant.ofEpochMilli(lastSeenAt).toString(), Instant.ofEpochMilli(expiresAt).toString())
+
+    private suspend fun syncStillAllowed(expected: SpamShieldSettings): Boolean {
+        val current = settingsDataStore.getSnapshot()
+        return current.remoteSyncEnabled && current.tailscaleServerUrl.trimEnd('/') == expected.tailscaleServerUrl.trimEnd('/') &&
+            current.apiBearerToken == expected.apiBearerToken
+    }
+
+    private suspend fun flushMutationOutbox(api: SpamShieldApi, expected: SpamShieldSettings): Boolean {
+        while (true) {
+            val mutation = dao.getSyncMutations().firstOrNull() ?: return true
+            if (!syncStillAllowed(expected)) return false
+            when (mutation.kind) {
+                "QUARANTINE_UPSERT" -> {
+                    val evidence = json.decodeFromString<PrefixQuarantineEntity>(mutation.payloadJson)
+                    api.upsertQuarantine(evidence.toRemoteQuarantine(), evidence.lastSeenAt)
+                }
+                "QUARANTINE_DELETE" -> api.deleteQuarantine(mutation.targetId, mutation.createdAt)
+                "FEEDBACK" -> api.patchTelemetryFeedback(mutation.targetId,
+                    json.decodeFromString<FeedbackPatchRequestDto>(mutation.payloadJson))
+                "RULE_UPSERT" -> {
+                    val rule = json.decodeFromString<ActiveRuleEntity>(mutation.payloadJson)
+                    api.upsertActiveRule(ActiveRuleRemoteDto(rule.ruleId, rule.name, rule.ruleType, rule.pattern,
+                        rule.weight, rule.priority, rule.enabled, Instant.ofEpochMilli(rule.updatedAt).toString()))
+                }
+                else -> error("Operação local desconhecida: ${mutation.kind}")
+            }
+            // Remove only this immutable operation. A concurrent newer change stays queued.
+            dao.acknowledgeSyncMutation(mutation.mutationId)
         }
     }
 
-    private fun CallTelemetryEntity.toRemoteDto(events: List<CallDecisionEventEntity>): CallTelemetryRemoteDto {
+    internal fun CallTelemetryEntity.toRemoteDto(events: List<CallDecisionEventEntity>): CallTelemetryRemoteDto {
         val rules = runCatching {
             json.decodeFromString<List<TriggeredRuleDto>>(triggeredRulesJson)
         }.getOrDefault(emptyList())
@@ -451,13 +423,15 @@ class SyncRepository @Inject constructor(
                 prefix_7 = prefix7,
                 carrier_guess = carrierGuess,
                 line_type = lineType,
-                stir_shaken_status = stirShakenStatus
+                stir_shaken_status = stirShakenStatus,
+                call_direction = if (outcome == "OUTGOING_CALL") "OUTGOING" else null
             ),
             decision_vector = DecisionVectorRemoteDto(
                 final_score = finalScore,
                 threshold_applied = thresholdApplied,
-                outcome = outcome,
-                category = category,
+                // Older servers validate the original enum; direction and journal retain the fact.
+                outcome = if (outcome == "OUTGOING_CALL") "ALLOWED_LOW_SCORE" else outcome,
+                category = if (outcome == "OUTGOING_CALL") "LEGITIMATE" else category,
                 processing_latency_ms = processingLatencyMs,
                 shadow_mode_active = shadowModeActive,
                 call_duration_sec = callDurationSec,

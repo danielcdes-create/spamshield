@@ -4,8 +4,10 @@ import android.os.SystemClock
 import br.com.spamshield.data.local.SettingsDataStore
 import br.com.spamshield.data.local.dao.SpamShieldDao
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
+import br.com.spamshield.data.local.entity.ActiveRuleEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.util.UUID
@@ -97,6 +99,9 @@ class SpamScoringEngine @Inject constructor(
     ): CallEvaluationResult {
         val startNanos = safeElapsedNanos()
         val settings = settingsDataStore.getSnapshot()
+        if (!QuarantinePrefixIndex.isReady) {
+            QuarantinePrefixIndex.refreshActive(nowMillis) { dao.getAllQuarantines() }
+        }
 
         // Passo 1: Normalização Estrita
         val normalized = PhoneNormalizer.normalize(rawNumber, settings.userDdd)
@@ -156,7 +161,7 @@ class SpamScoringEngine @Inject constructor(
             stirShakenStatus != "FAILED" &&
             !PhoneNormalizer.hasAbnormalTrunkOrCspHeader(rawNumber, settings.userDdd)
         ) {
-            if (QuarantinePrefixIndex.match(normalized.storedPrefix7) == PrefixQuarantineMatch.NONE) {
+            if (QuarantinePrefixIndex.match(normalized.storedPrefix7, nowMillis) == PrefixQuarantineMatch.NONE) {
                 val recentSameNumberCount = dao.countRecentCallsFromNumber(
                     normalizedNumber = normalized.normalizedNumber,
                     sinceTimestamp = nowMillis - EMERGENCY_REPEAT_WINDOW_MS
@@ -167,7 +172,7 @@ class SpamScoringEngine @Inject constructor(
                         carrierGuess = carrierGuess,
                         lineType = resolvedLineType,
                         stirShakenStatus = stirShakenStatus,
-                        finalScore = -100,
+                        finalScore = 0,
                         threshold = settings.blockThresholdScore,
                         shadowMode = settings.shadowModeEnabled,
                         outcome = "ALLOWED_EMERGENCY_REPEAT",
@@ -203,7 +208,7 @@ class SpamScoringEngine @Inject constructor(
                     carrierGuess = carrierGuess,
                     lineType = resolvedLineType,
                     stirShakenStatus = stirShakenStatus,
-                    finalScore = -100,
+                    finalScore = 0,
                     threshold = settings.blockThresholdScore,
                     shadowMode = settings.shadowModeEnabled,
                     outcome = "ALLOWED_OUTBOUND_GRACE",
@@ -219,7 +224,10 @@ class SpamScoringEngine @Inject constructor(
         // Reinicia cronômetro após consultas IPC externas (Contacts/CallLog) para medir a árvore vetorial pura
         val engineStartNanos = safeElapsedNanos()
 
-        val enabledRules = dao.getEnabledRules().associateBy { it.ruleId }
+        val allRules = dao.observeAllRules().first()
+        val enabledRules = allRules.filter { it.enabled }.associateBy { it.ruleId }
+        val ruleWeights = allRules.associate { it.ruleId to it.weight }
+        val disabledRuleIds = allRules.filterNot { it.enabled }.map { it.ruleId }.toSet()
         val compiledRules = enabledRules.values.mapNotNull { rule ->
             val pattern = rule.pattern
             if (rule.ruleType != "REGEX_MATCH" || pattern.isNullOrBlank()) {
@@ -228,9 +236,8 @@ class SpamScoringEngine @Inject constructor(
                 CompiledRegexRule(rule.ruleId, rule.weight, pattern, ScreeningPatternCache.pattern(pattern))
             }
         }
-        val quarantineMatch = QuarantinePrefixIndex.match(normalized.storedPrefix7)
-        val decision = HeuristicScorer.score(
-            ScoreInput(
+        val quarantineMatch = QuarantinePrefixIndex.match(normalized.storedPrefix7, nowMillis)
+        val scoreInput = ScoreInput(
                 rawNumber = rawNumber,
                 normalizedNumber = normalized.normalizedNumber,
                 ddd = normalized.ddd,
@@ -247,9 +254,11 @@ class SpamScoringEngine @Inject constructor(
                 isShortOrUtilityCode = normalized.isShortOrUtilityCode,
                 shadowMode = settings.shadowModeEnabled,
                 unverifiedWeight = enabledRules["STIR_SHAKEN_UNVERIFIED"]?.weight ?: 20,
+                ruleWeights = ruleWeights,
+                disabledRuleIds = disabledRuleIds,
                 extraRegexRules = compiledRules
             )
-        )
+        val decision = HeuristicScorer.score(scoreInput)
         val triggeredRules = decision.triggeredRules.toMutableList()
 
         var distinctNumbers24h: Int? = null
@@ -278,7 +287,7 @@ class SpamScoringEngine @Inject constructor(
         }
 
         if (quarantineMatch == PrefixQuarantineMatch.NONE && normalized.prefix6.length >= 6) {
-            val neighborCount = QuarantinePrefixIndex.countWithPrefix(normalized.prefix6)
+            val neighborCount = QuarantinePrefixIndex.countWithPrefix(normalized.prefix6, nowMillis)
             if (neighborCount >= 1) {
                 triggeredRules.add(
                     TriggeredRuleDto(
@@ -292,7 +301,7 @@ class SpamScoringEngine @Inject constructor(
 
         val prefix5 = normalized.prefix7.take(5)
         if (prefix5.length == 5) {
-            val farmCount = QuarantinePrefixIndex.countWithPrefix(prefix5)
+            val farmCount = QuarantinePrefixIndex.countWithPrefix(prefix5, nowMillis)
             if (PhoneNormalizer.isKnownChipeiraFarmPrefix5(prefix5) || farmCount >= 6) {
                 triggeredRules.add(
                     TriggeredRuleDto(
@@ -314,6 +323,9 @@ class SpamScoringEngine @Inject constructor(
             )
         }
 
+        val effectiveRules = HeuristicScorer.configuredRules(triggeredRules, scoreInput)
+        triggeredRules.clear()
+        triggeredRules.addAll(effectiveRules)
         val score = HeuristicScorer.equation(triggeredRules)
         val threshold = settings.blockThresholdScore
         val outcome = HeuristicScorer.resolveOutcome(score, threshold, null, settings.shadowModeEnabled)
@@ -339,7 +351,7 @@ class SpamScoringEngine @Inject constructor(
                     expiresAt = nowMillis + QUARANTINE_DEFAULT_TTL_MS
                 )
                 dao.upsertQuarantine(updatedQuarantine)
-                QuarantinePrefixIndex.add(storagePrefix)
+                QuarantinePrefixIndex.add(storagePrefix, updatedQuarantine.expiresAt)
             }
         }
 
@@ -370,10 +382,10 @@ class SpamScoringEngine @Inject constructor(
 
         val persisted = insertCoalesced(telemetryEntity)
         DecisionTrace.record(dao, persisted.id, "SCREENING_DECISION", decisionSource,
-            DecisionTrace.configuredSnapshot(telemetryEntity, enabledRules.values).copy(
+            DecisionTrace.configuredSnapshot(telemetryEntity, allRules).copy(
                 quarantineMatch = quarantineMatch.name,
                 quarantineCacheReady = QuarantinePrefixIndex.isReady,
-                quarantineCacheSize = QuarantinePrefixIndex.size,
+                quarantineCacheSize = QuarantinePrefixIndex.activeSize(nowMillis),
                 distinctNumbers24h = distinctNumbers24h))
 
         if ((outcome == "BLOCKED" || outcome == "SHADOW_BLOCKED") && storagePrefix.length == 8) {
@@ -405,7 +417,8 @@ class SpamScoringEngine @Inject constructor(
         normalizedNumber: String,
         callDurationSec: Int,
         nowMillis: Long = System.currentTimeMillis(),
-        callId: String? = null
+        callId: String? = null,
+        configuration: Collection<ActiveRuleEntity>? = null
     ): Boolean {
         if (callDurationSec !in 1..11) return false
         val latest = (if (callId != null) dao.getTelemetryById(callId) else dao.getLatestTelemetryForNumber(normalizedNumber)) ?: return false
@@ -420,37 +433,35 @@ class SpamScoringEngine @Inject constructor(
             existingRules.add(band)
         }
 
+        val allRules = configuration ?: dao.observeAllRules().first()
+        val finalized = HeuristicScorer.finalize(existingRules, ScoreInput(
+            rawNumber = latest.rawNumber, stirShakenStatus = latest.stirShakenStatus,
+            thresholdApplied = latest.thresholdApplied, callDurationSec = callDurationSec,
+            ruleWeights = allRules.associate { it.ruleId to it.weight },
+            disabledRuleIds = allRules.filterNot { it.enabled }.map { it.ruleId }.toSet()
+        ))
         val qPrefix = extractQuarantinePrefix(latest.normalizedNumber, latest.prefix7)
-        val recomputed = HeuristicScorer.equation(existingRules)
-        val answeredOutcome = HeuristicScorer.resolveOutcome(
-            recomputed,
-            latest.thresholdApplied,
-            callDurationSec,
-            false
-        )
+        val recomputed = finalized.finalScore
         val updatedTelemetry = latest.copy(
             prefix7 = qPrefix.ifEmpty { latest.prefix7 },
-            outcome = answeredOutcome,
-            category = when (band?.rule_id) {
-                "PING_CALL_PENALTY" -> "PING_CALL_ROBOCALL"
-                "SHORT_ROBOCALL_PENALTY" -> "ROBOCALL_PREFIX_CLUSTER"
-                else -> latest.category
-            },
+            outcome = finalized.outcome,
+            category = finalized.category,
             finalScore = recomputed,
             callDurationSec = callDurationSec,
-            triggeredRulesJson = json.encodeToString(existingRules),
+            triggeredRulesJson = json.encodeToString(finalized.triggeredRules),
             syncStatus = "PENDING"
         )
         dao.insertTelemetry(updatedTelemetry)
 
-        if (qPrefix.isNotEmpty()) {
+        val evidenceAt = callEvidenceTimestamp(latest, nowMillis)
+        val evidenceExpiresAt = evidenceAt + QUARANTINE_DEFAULT_TTL_MS
+        if (qPrefix.length == 8 && recomputed >= latest.thresholdApplied && evidenceExpiresAt > nowMillis) {
             val existing = dao.getActiveQuarantineForPrefix(
                 prefix8 = qPrefix,
                 prefix7 = latest.prefix7,
                 now = nowMillis
             )
-            dao.upsertQuarantine(
-                PrefixQuarantineEntity(
+            val updatedQuarantine = PrefixQuarantineEntity(
                     prefix7 = qPrefix,
                     ddd = latest.ddd,
                     carrierGuess = latest.carrierGuess ?: "Desconhecida",
@@ -458,12 +469,12 @@ class SpamScoringEngine @Inject constructor(
                     hitCount = (existing?.hitCount ?: 0) + 1,
                     penaltyWeight = 65,
                     reason = "PING_CALL_ROBOCALL",
-                    firstSeenAt = existing?.firstSeenAt ?: nowMillis,
-                    lastSeenAt = nowMillis,
-                    expiresAt = nowMillis + QUARANTINE_DEFAULT_TTL_MS
+                    firstSeenAt = existing?.firstSeenAt ?: evidenceAt,
+                    lastSeenAt = maxOf(existing?.lastSeenAt ?: evidenceAt, evidenceAt),
+                    expiresAt = maxOf(existing?.expiresAt ?: 0L, evidenceExpiresAt)
                 )
-            )
-            QuarantinePrefixIndex.add(qPrefix)
+            dao.upsertQuarantine(updatedQuarantine)
+            QuarantinePrefixIndex.add(qPrefix, updatedQuarantine.expiresAt)
         }
         return true
     }
@@ -489,13 +500,21 @@ class SpamScoringEngine @Inject constructor(
         systemScreeningComponent: String? = null,
         systemScreeningAppIsSpamShield: Boolean? = null
     ): Boolean {
+        // Outgoing calls establish return-call grace; they are never incoming spam evidence.
+        if (callType == android.provider.CallLog.Calls.OUTGOING_TYPE) return false
         val latest = if (callTimestampMs != null) {
             dao.findRealTimeTelemetryNearTimestamp(normalizedNumber,
                 callTimestampMs - TelemetryCoalescer.WINDOW_MS,
                 callTimestampMs + TelemetryCoalescer.WINDOW_MS)
         } else dao.getLatestTelemetryForNumber(normalizedNumber)
-        // A timestamped observation must never be attached to an unrelated latest call.
-        val target = latest ?: run {
+        val candidateAlreadyBound = latest != null && callTimestampMs != null &&
+            dao.getDecisionEvents(latest.id).any {
+                it.eventType == "CALL_LOG_OBSERVATION" &&
+                    DecisionTrace.details(it).observedCallTimestamp?.let { ts -> ts != callTimestampMs } == true
+            }
+        // A different CallLog timestamp is a distinct call, even inside the 15s lookup window.
+        // Keep the earlier call's evidence and persist the unpaired redial with its own identity.
+        val target = latest?.takeUnless { candidateAlreadyBound } ?: run {
             val n = PhoneNormalizer.normalize(rawNumber ?: normalizedNumber)
             val callAt = callTimestampMs ?: nowMillis
             val id = UUID.nameUUIDFromBytes("calllog-$callAt-${n.normalizedNumber}".toByteArray()).toString()
@@ -508,18 +527,6 @@ class SpamScoringEngine @Inject constructor(
                 shadowModeActive = false, callDurationSec = callDurationSec, triggeredRulesJson = "[]"
             ).also { dao.insertTelemetry(it) }
         }
-        val existingObsTimestamps = dao.getDecisionEvents(target.id)
-            .asSequence()
-            .filter { it.eventType == "CALL_LOG_OBSERVATION" }
-            .mapNotNull { DecisionTrace.details(it).observedCallTimestamp }
-            .toList()
-        if (callTimestampMs != null && existingObsTimestamps.any { existingTs ->
-                existingTs != callTimestampMs &&
-                    kotlin.math.abs(existingTs - target.timestamp) < kotlin.math.abs(callTimestampMs - target.timestamp)
-            }
-        ) {
-            return false
-        }
         DecisionTrace.record(dao, target.id, "CALL_LOG_OBSERVATION", "ANDROID_CALL_LOG",
             DecisionDetails(systemCallType = callType, durationSec = callDurationSec,
                 rawNumber = rawNumber, normalizedNumber = normalizedNumber,
@@ -529,11 +536,12 @@ class SpamScoringEngine @Inject constructor(
             at = nowMillis, key = "$callTimestampMs|$callType|$callDurationSec|$systemBlockReason|$systemScreeningComponent")
         val prefix = extractQuarantinePrefix(target.normalizedNumber, target.prefix7)
         val beforeQ = dao.getAllQuarantines().firstOrNull { it.prefix7 == prefix }
+        val evaluatedRules = dao.observeAllRules().first()
         val changed = applyPostCallLogVerdict(target, normalizedNumber, callType, callDurationSec,
-            isSystemBlocked, nowMillis)
+            isSystemBlocked, nowMillis, evaluatedRules)
         val after = dao.getTelemetryById(target.id) ?: target
         DecisionTrace.record(dao, target.id, "POST_CALL_EVALUATION", "POST_CALL_ANALYZER",
-            DecisionTrace.snapshot(after).copy(reason = "CallLog type=$callType; blockReason=$systemBlockReason"), at = nowMillis)
+            DecisionTrace.configuredSnapshot(after, evaluatedRules).copy(reason = "CallLog type=$callType; blockReason=$systemBlockReason"), at = nowMillis)
         val afterQ = dao.getAllQuarantines().firstOrNull { it.prefix7 == prefix }
         if (afterQ != beforeQ) DecisionTrace.record(dao, target.id, "QUARANTINE_UPDATED", "POST_CALL_ANALYZER",
             DecisionDetails(prefix = prefix, reason = "${afterQ?.reason}; expiresAt=${afterQ?.expiresAt}"), at = nowMillis)
@@ -547,7 +555,8 @@ class SpamScoringEngine @Inject constructor(
         callType: Int,
         callDurationSec: Int,
         isSystemBlocked: Boolean,
-        nowMillis: Long
+        nowMillis: Long,
+        configuration: Collection<ActiveRuleEntity>
     ): Boolean {
         val currentDuration = latest.callDurationSec
 
@@ -562,6 +571,12 @@ class SpamScoringEngine @Inject constructor(
         val existingRules = runCatching {
             json.decodeFromString<List<TriggeredRuleDto>>(latest.triggeredRulesJson)
         }.getOrDefault(emptyList())
+
+        val allRules = configuration
+        val ruleWeights = allRules.associate { it.ruleId to it.weight }
+        val disabledRuleIds = allRules.filterNot { it.enabled }.map { it.ruleId }.toSet()
+        val evidenceAt = callEvidenceTimestamp(latest, nowMillis)
+        val evidenceExpiresAt = evidenceAt + QUARANTINE_DEFAULT_TTL_MS
 
         val arrivalEventRules = dao.getDecisionEvents(latest.id)
             .firstOrNull { it.eventType == "SCREENING_DECISION" }
@@ -614,6 +629,8 @@ class SpamScoringEngine @Inject constructor(
                     lineType = latest.lineType,
                     stirShakenStatus = latest.stirShakenStatus,
                     thresholdApplied = latest.thresholdApplied,
+                    ruleWeights = ruleWeights,
+                    disabledRuleIds = disabledRuleIds,
                     callDurationSec = callDurationSec
                 )
             )
@@ -659,6 +676,8 @@ class SpamScoringEngine @Inject constructor(
                     lineType = latest.lineType,
                     stirShakenStatus = latest.stirShakenStatus,
                     thresholdApplied = latest.thresholdApplied,
+                    ruleWeights = ruleWeights,
+                    disabledRuleIds = disabledRuleIds,
                     callDurationSec = callDurationSec
                 )
             )
@@ -685,7 +704,7 @@ class SpamScoringEngine @Inject constructor(
 
             val shouldQuarantine = finalized.outcome == "BLOCKED" ||
                 finalized.outcome == "FLAGGED_POST_CALL_QUARANTINED"
-            if (shouldQuarantine && qPrefix.isNotEmpty()) {
+            if (shouldQuarantine && qPrefix.isNotEmpty() && evidenceExpiresAt > nowMillis) {
                 val existingQ = dao.getActiveQuarantineForPrefix(
                     prefix8 = qPrefix,
                     prefix7 = latest.prefix7,
@@ -699,6 +718,7 @@ class SpamScoringEngine @Inject constructor(
                 } else {
                     "DIALER_REJECTED"
                 }
+                val quarantineExpiry = maxOf(existingQ?.expiresAt ?: 0L, evidenceExpiresAt)
                 if (rulesChanged || existingQ == null || existingQ.prefix7 != qPrefix || existingQ.reason != expectedReason) {
                     dao.upsertQuarantine(
                         PrefixQuarantineEntity(
@@ -709,20 +729,20 @@ class SpamScoringEngine @Inject constructor(
                             hitCount = if (rulesChanged || existingQ == null) (existingQ?.hitCount ?: 0) + 1 else existingQ.hitCount,
                             penaltyWeight = 70,
                             reason = expectedReason,
-                            firstSeenAt = existingQ?.firstSeenAt ?: nowMillis,
-                            lastSeenAt = nowMillis,
-                            expiresAt = nowMillis + QUARANTINE_DEFAULT_TTL_MS
+                            firstSeenAt = existingQ?.firstSeenAt ?: evidenceAt,
+                            lastSeenAt = maxOf(existingQ?.lastSeenAt ?: evidenceAt, evidenceAt),
+                            expiresAt = quarantineExpiry
                         )
                     )
                 }
-                QuarantinePrefixIndex.add(qPrefix)
+                QuarantinePrefixIndex.add(qPrefix, quarantineExpiry)
             }
             return rulesChanged
         }
 
         // 2. Chamada atendida: 1-5s ping, 6-11s robocall curto, >= 12s bônus
         if (callType == android.provider.CallLog.Calls.INCOMING_TYPE && callDurationSec in 1..11) {
-            return evaluatePostCallPingDetector(normalizedNumber, callDurationSec, nowMillis, latest.id)
+            return evaluatePostCallPingDetector(normalizedNumber, callDurationSec, nowMillis, latest.id, allRules)
         }
 
         // 3. Chamada Perdida / Não Atendida (MISSED_TYPE ou duration == 0)
@@ -748,14 +768,13 @@ class SpamScoringEngine @Inject constructor(
                 latest.prefix7.ifEmpty { qPrefix }
             )
             if (shouldQuarantineUnansweredBurst(recentCallsSameNum, recentCallsInPrefix, voipOrRobocall)) {
-                if (qPrefix.isNotEmpty()) {
+                if (qPrefix.isNotEmpty() && evidenceExpiresAt > nowMillis) {
                     val existingQ = dao.getActiveQuarantineForPrefix(
                         prefix8 = qPrefix,
                         prefix7 = latest.prefix7,
                         now = nowMillis
                     )
-                    dao.upsertQuarantine(
-                        PrefixQuarantineEntity(
+                    val updatedQuarantine = PrefixQuarantineEntity(
                             prefix7 = qPrefix,
                             ddd = latest.ddd,
                             carrierGuess = latest.carrierGuess ?: "Outros",
@@ -763,12 +782,12 @@ class SpamScoringEngine @Inject constructor(
                             hitCount = (existingQ?.hitCount ?: 0) + 1,
                             penaltyWeight = 65,
                             reason = "UNANSWERED_SPAM_BURST",
-                            firstSeenAt = existingQ?.firstSeenAt ?: nowMillis,
-                            lastSeenAt = nowMillis,
-                            expiresAt = nowMillis + QUARANTINE_DEFAULT_TTL_MS
+                            firstSeenAt = existingQ?.firstSeenAt ?: evidenceAt,
+                            lastSeenAt = maxOf(existingQ?.lastSeenAt ?: evidenceAt, evidenceAt),
+                            expiresAt = maxOf(existingQ?.expiresAt ?: 0L, evidenceExpiresAt)
                         )
-                    )
-                    QuarantinePrefixIndex.add(qPrefix)
+                    dao.upsertQuarantine(updatedQuarantine)
+                    QuarantinePrefixIndex.add(qPrefix, updatedQuarantine.expiresAt)
                     return true
                 }
             }
@@ -780,7 +799,9 @@ class SpamScoringEngine @Inject constructor(
             HeuristicScorer.durationRule(callDurationSec)?.let { band ->
                 if (rules.none { it.rule_id == band.rule_id }) rules.add(band)
             }
-            val recomputed = HeuristicScorer.equation(rules)
+            val effectiveRules = HeuristicScorer.configuredRules(rules, ScoreInput(rawNumber = latest.rawNumber,
+                ruleWeights = ruleWeights, disabledRuleIds = disabledRuleIds))
+            val recomputed = HeuristicScorer.equation(effectiveRules)
             val answeredOutcome = HeuristicScorer.resolveOutcome(
                 recomputed,
                 latest.thresholdApplied,
@@ -792,8 +813,8 @@ class SpamScoringEngine @Inject constructor(
                     callDurationSec = callDurationSec,
                     finalScore = recomputed,
                     outcome = answeredOutcome,
-                    category = HeuristicScorer.resolveCategory(latest.stirShakenStatus, answeredOutcome, rules),
-                    triggeredRulesJson = json.encodeToString(rules),
+                    category = HeuristicScorer.resolveCategory(latest.stirShakenStatus, answeredOutcome, effectiveRules),
+                    triggeredRulesJson = json.encodeToString(effectiveRules),
                     syncStatus = "PENDING"
                 )
             )
@@ -817,6 +838,9 @@ class SpamScoringEngine @Inject constructor(
             return entity
         }
     }
+
+    private fun callEvidenceTimestamp(row: CallTelemetryEntity, observedAt: Long): Long =
+        minOf(row.timestamp.takeIf { it > 0L } ?: observedAt, observedAt)
 
     private suspend fun buildShortCircuitResult(
         normalized: NormalizedPhone,

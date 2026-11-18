@@ -1,0 +1,84 @@
+{
+  "tests": 82,
+  "failures": 0,
+  "errors": 0,
+  "suites": [
+    {
+      "file": "TEST-br.com.spamshield.domain.DecisionTraceTest.xml",
+      "name": "br.com.spamshield.domain.DecisionTraceTest",
+      "tests": "11",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T02:29:42.807Z",
+      "hostname": "GBP360",
+      "time": "1.194"
+    },
+    {
+      "file": "TEST-br.com.spamshield.domain.EngineCorrectionsTest.xml",
+      "name": "br.com.spamshield.domain.EngineCorrectionsTest",
+      "tests": "20",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T02:29:44.033Z",
+      "hostname": "GBP360",
+      "time": "0.438"
+    },
+    {
+      "file": "TEST-br.com.spamshield.domain.NtSpamshield2026001Test.xml",
+      "name": "br.com.spamshield.domain.NtSpamshield2026001Test",
+      "tests": "17",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T02:29:44.498Z",
+      "hostname": "GBP360",
+      "time": "0.24"
+    },
+    {
+      "file": "TEST-br.com.spamshield.domain.PhoneNormalizerTest.xml",
+      "name": "br.com.spamshield.domain.PhoneNormalizerTest",
+      "tests": "9",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T02:29:44.753Z",
+      "hostname": "GBP360",
+      "time": "0.012"
+    },
+    {
+      "file": "TEST-br.com.spamshield.domain.SpamScoringEngineTest.xml",
+      "name": "br.com.spamshield.domain.SpamScoringEngineTest",
+      "tests": "11",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T02:29:39.479Z",
+      "hostname": "GBP360",
+      "time": "3.285"
+    },
+    {
+      "file": "TEST-br.com.spamshield.domain.TelemetryProvenanceTest.xml",
+      "name": "br.com.spamshield.domain.TelemetryProvenanceTest",
+      "tests": "8",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T02:29:44.780Z",
+      "hostname": "GBP360",
+      "time": "0.289"
+    },
+    {
+      "file": "TEST-br.com.spamshield.sync.SyncConsentTest.xml",
+      "name": "br.com.spamshield.sync.SyncConsentTest",
+      "tests": "6",
+      "skipped": "0",
+      "failures": "0",
+      "errors": "0",
+      "timestamp": "2026-11-18T02:29:45.088Z",
+      "hostname": "GBP360",
+      "time": "2.137"
+    }
+  ]
+}

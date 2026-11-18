@@ -40,6 +40,11 @@ class SyncWorker @AssistedInject constructor(
         private const val PERIODIC_WORK_NAME = "spamshield_periodic_tailscale_sync"
         private const val ONETIME_WORK_NAME = "spamshield_onetime_tailscale_sync"
 
+        fun cancelSync(context: Context) {
+            WorkManager.getInstance(context).cancelUniqueWork(PERIODIC_WORK_NAME)
+            WorkManager.getInstance(context).cancelUniqueWork(ONETIME_WORK_NAME)
+        }
+
         fun schedulePeriodicSync(context: Context) {
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.CONNECTED)

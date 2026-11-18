@@ -112,7 +112,7 @@ class CallStateBroadcastReceiver : BroadcastReceiver() {
                             expiresAt = now + SpamScoringEngine.OUTBOUND_GRACE_WINDOW_MS
                         )
                     )
-                    Log.d(TAG, "Registered Outbound Grace (2h) for ${normalized.normalizedNumber} (prefix6=${normalized.prefix6})")
+                    Log.d(TAG, "Registered outbound grace (2h); app=${br.com.spamshield.BuildConfig.VERSION_NAME}(${br.com.spamshield.BuildConfig.VERSION_CODE})")
                 } else {
                     val changed = spamScoringEngine.evaluatePostCallLogVerdict(
                         normalizedNumber = normalized.normalizedNumber,
@@ -130,8 +130,8 @@ class CallStateBroadcastReceiver : BroadcastReceiver() {
                         anyQuarantineTriggered = true
                         Log.d(
                             TAG,
-                            "Post-call verdict updated for ${normalized.normalizedNumber}: " +
-                                "type=$callType, dur=${durationSec}s, isBlocked=$isSystemBlocked. Prefix ${normalized.prefix8} quarantined."
+                            "Post-call verdict updated: type=$callType, dur=${durationSec}s, isBlocked=$isSystemBlocked; " +
+                                "app=${br.com.spamshield.BuildConfig.VERSION_NAME}(${br.com.spamshield.BuildConfig.VERSION_CODE})"
                         )
                     }
                 }

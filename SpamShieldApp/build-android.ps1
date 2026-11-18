@@ -1,3 +1,4 @@
+param([ValidateSet('debug', 'release')][string]$BuildType = 'release')
 $ErrorActionPreference = 'Stop'
 $env:JAVA_HOME = if ($env:JAVA_HOME) { $env:JAVA_HOME } else { 'C:\Program Files\Android\Android Studio\jbr' }
 $env:ANDROID_HOME = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALAPPDATA 'Android\Sdk' }
@@ -9,27 +10,37 @@ if ($env:JAVA_TOOL_OPTIONS -notmatch '--enable-native-access') {
 
 Push-Location $PSScriptRoot
 try {
-    & .\gradlew.bat testDebugUnitTest assembleDebug --console=plain
+    if ($BuildType -eq 'release') {
+        foreach ($settingName in @('SPAMSHIELD_KEYSTORE_PATH', 'SPAMSHIELD_KEYSTORE_PASSWORD', 'SPAMSHIELD_KEY_ALIAS', 'SPAMSHIELD_KEY_PASSWORD')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($settingName))) {
+                throw "Configure $settingName para assinar o APK de distribuicao. Nenhuma chave nova sera criada automaticamente."
+            }
+        }
+    }
+    $assemblyTask = if ($BuildType -eq 'release') { 'assembleRelease' } else { 'assembleDebug' }
+    & .\gradlew.bat testDebugUnitTest $assemblyTask --console=plain
     if ($LASTEXITCODE -ne 0) {
         throw "Falha no build Gradle (exit code $LASTEXITCODE)"
     }
-    $apkPath = Join-Path $PSScriptRoot 'app\build\outputs\apk\debug\app-debug.apk'
-    $metaPath = Join-Path $PSScriptRoot 'app\build\outputs\apk\debug\output-metadata.json'
+    $apkPath = Join-Path $PSScriptRoot "app\build\outputs\apk\$BuildType\app-$BuildType.apk"
+    $metaPath = Join-Path $PSScriptRoot "app\build\outputs\apk\$BuildType\output-metadata.json"
     if (Test-Path $apkPath) {
         $distDir = Join-Path $PSScriptRoot 'dist'
         if (-not (Test-Path $distDir)) {
             New-Item -ItemType Directory -Path $distDir -Force | Out-Null
         }
-        $targetApk = Join-Path $distDir 'SpamShieldBR-debug.apk'
+        $metaJson = Get-Content -LiteralPath $metaPath -Raw | ConvertFrom-Json
+        $versionInfo = $metaJson.elements[0]
+        $targetApk = Join-Path $distDir "SpamShieldBR-$($versionInfo.versionName)-$BuildType.apk"
         Copy-Item -Path $apkPath -Destination $targetApk -Force
         if (Test-Path $metaPath) {
-            Copy-Item -Path $metaPath -Destination (Join-Path $distDir 'output-metadata.json') -Force
+            Copy-Item -Path $metaPath -Destination (Join-Path $distDir "output-metadata-$($versionInfo.versionName)-$BuildType.json") -Force
         }
         $hash = (Get-FileHash -Path $targetApk -Algorithm SHA256).Hash.ToLowerInvariant()
         $size = (Get-Item $targetApk).Length
         $info = @{
-            version_code = 16
-            version_name = "1.3.2"
+            version_code = [int]$versionInfo.versionCode
+            version_name = [string]$versionInfo.versionName
             size_bytes = $size
             sha256_checksum = $hash
             download_path = "/apk"
@@ -43,9 +54,11 @@ try {
                 }
             } catch {}
         }
-        $info | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $distDir 'apk-info.json') -Encoding utf8
-        Write-Host "APK Debug gerado com sucesso em: $apkPath" -ForegroundColor Green
-        Write-Host "Publicado em: $targetApk (SHA-256: $hash, Tamanho: $size bytes)" -ForegroundColor Cyan
+        # A build prepares a candidate; it must not advance metadata for an older served APK.
+        $infoPath = Join-Path $distDir "apk-info-$($versionInfo.versionName)-$BuildType.json"
+        [System.IO.File]::WriteAllText($infoPath, ($info | ConvertTo-Json -Depth 4), [System.Text.UTF8Encoding]::new($false))
+        Write-Host "APK $BuildType gerado com sucesso em: $apkPath" -ForegroundColor Green
+        Write-Host "Preparado localmente: $targetApk (SHA-256: $hash, Tamanho: $size bytes)" -ForegroundColor Cyan
     }
 } finally {
     Pop-Location

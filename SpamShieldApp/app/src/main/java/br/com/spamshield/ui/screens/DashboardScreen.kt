@@ -63,10 +63,11 @@ fun DashboardScreen(
     val scrollState = rememberScrollState()
 
     // Global stats
-    val totalIntercepted = telemetryList.size
+    val incomingTelemetry = telemetryList.filter { it.outcome != "OUTGOING_CALL" }
+    val totalIntercepted = incomingTelemetry.size
     val byCall = decisionEvents.groupBy { it.callId }
-    val evidence = telemetryList.associate { it.id to DecisionTrace.evidence(it, byCall[it.id].orEmpty()) }
-    val blockedCalls = telemetryList.filter { evidence[it.id]?.blockObserved == true }
+    val evidence = incomingTelemetry.associate { it.id to DecisionTrace.evidence(it, byCall[it.id].orEmpty()) }
+    val blockedCalls = incomingTelemetry.filter { evidence[it.id]?.blockObserved == true }
     val requestedCount = evidence.values.count { it.blockRequested }
     val rejectedCount = evidence.values.count { it.dialerRejected }
     val totalBlocked = blockedCalls.size
@@ -83,7 +84,7 @@ fun DashboardScreen(
         set(Calendar.MILLISECOND, 0)
     }.timeInMillis
 
-    val todayCalls = telemetryList.filter { it.timestamp >= startOfTodayMillis }
+    val todayCalls = incomingTelemetry.filter { it.timestamp >= startOfTodayMillis }
     val todayIntercepted = todayCalls.size
     val todayBlocked = todayCalls.count { evidence[it.id]?.blockObserved == true }
     val todayRejected = todayCalls.count { evidence[it.id]?.dialerRejected == true }
@@ -298,10 +299,10 @@ fun DashboardScreen(
         CategoryHorizontalBarChartCard(telemetryList = blockedCalls)
 
         // 4. Gráfico Nativo 2: Rosca/Pizza — Proporção por Operadora (Claro e VoIP separados)
-        CarrierDonutChartCard(telemetryList = telemetryList)
+        CarrierDonutChartCard(telemetryList = incomingTelemetry)
 
         // 5. Gráfico Nativo 3: Heatmap Horário (00h às 23h)
-        HourlyHeatmapCard(telemetryList = telemetryList)
+        HourlyHeatmapCard(telemetryList = incomingTelemetry)
     }
 }
 

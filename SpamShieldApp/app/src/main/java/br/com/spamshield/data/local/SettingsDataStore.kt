@@ -26,7 +26,9 @@ data class SpamShieldSettings(
     val apiBearerToken: String = "",
     val hideBlockedFromSystemCallLog: Boolean = false,
     val userDdd: String = "31",
-    val lastSyncTimestamp: Long = 0L
+    val lastSyncTimestamp: Long = 0L,
+    val localDataDisclosureAccepted: Boolean = false,
+    val remoteSyncEnabled: Boolean = false
 )
 
 @Singleton
@@ -48,6 +50,8 @@ class SettingsDataStore internal constructor(
         val KEY_HIDE_FROM_CALL_LOG = booleanPreferencesKey("hide_blocked_from_system_call_log")
         val KEY_USER_DDD = stringPreferencesKey("user_ddd")
         val KEY_LAST_SYNC_TS = longPreferencesKey("last_sync_timestamp")
+        val KEY_LOCAL_DISCLOSURE = booleanPreferencesKey("local_data_disclosure_v1")
+        val KEY_REMOTE_SYNC = booleanPreferencesKey("remote_sync_consent_v1")
     }
 
     val settingsFlow: Flow<SpamShieldSettings> = context?.dataStore?.data?.map { prefs ->
@@ -58,11 +62,21 @@ class SettingsDataStore internal constructor(
             apiBearerToken = prefs[KEY_API_BEARER] ?: "",
             hideBlockedFromSystemCallLog = prefs[KEY_HIDE_FROM_CALL_LOG] ?: false,
             userDdd = prefs[KEY_USER_DDD] ?: "31",
-            lastSyncTimestamp = prefs[KEY_LAST_SYNC_TS] ?: 0L
+            lastSyncTimestamp = prefs[KEY_LAST_SYNC_TS] ?: 0L,
+            localDataDisclosureAccepted = prefs[KEY_LOCAL_DISCLOSURE] ?: false,
+            remoteSyncEnabled = prefs[KEY_REMOTE_SYNC] ?: false
         )
     } ?: flowOf(SpamShieldSettings())
 
     suspend fun getSnapshot(): SpamShieldSettings = settingsFlow.first()
+
+    suspend fun acceptLocalDataDisclosure() {
+        context?.dataStore?.edit { it[KEY_LOCAL_DISCLOSURE] = true }
+    }
+
+    suspend fun setRemoteSyncEnabled(enabled: Boolean) {
+        context?.dataStore?.edit { it[KEY_REMOTE_SYNC] = enabled }
+    }
 
     suspend fun setShadowMode(enabled: Boolean) {
         context?.dataStore?.edit { it[KEY_SHADOW_MODE] = enabled }
@@ -73,7 +87,12 @@ class SettingsDataStore internal constructor(
     }
 
     suspend fun setTailscaleServerUrl(url: String) {
-        context?.dataStore?.edit { it[KEY_TAILSCALE_URL] = url.trim().removeSuffix("/") }
+        val normalized = url.trim().removeSuffix("/")
+        context?.dataStore?.edit {
+            val previous = it[KEY_TAILSCALE_URL] ?: SpamShieldSettings().tailscaleServerUrl
+            if (previous != normalized) it[KEY_REMOTE_SYNC] = false
+            it[KEY_TAILSCALE_URL] = normalized
+        }
     }
 
     suspend fun setApiBearerToken(token: String) {

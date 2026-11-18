@@ -1,0 +1,8 @@
+{
+  "source": "SpamShieldDao.kt:248-250",
+  "query": "SELECT COUNT(*) FROM outbound_grace \n        WHERE (normalizedNumber = :normalizedNumber OR prefix6 = :prefix6) \n          AND expiresAt > :now",
+  "outgoing": "10315",
+  "incoming": "03031234567",
+  "prefix6": "",
+  "false_grace_hits": 1
+}

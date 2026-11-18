@@ -120,6 +120,7 @@ class MainViewModel @Inject constructor(
     init {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
+                if (!settingsDataStore.getSnapshot().localDataDisclosureAccepted) return@runCatching
                 dao.deduplicateHistoryRecords()
                 val reconciled = callHistoryAnalyzer.reconcileRecentCallsWithCallLog(100)
                 val updated = callHistoryAnalyzer.reprocessAllStoredTelemetry()
@@ -148,6 +149,12 @@ class MainViewModel @Inject constructor(
 
     fun syncNowWithMongoDb() {
         viewModelScope.launch {
+            if (!settingsDataStore.getSnapshot().remoteSyncEnabled) {
+                _tailscaleStatus.value = _tailscaleStatus.value.copy(
+                    lastSyncMessage = "Envio desativado. Ative a sincronização em Privacidade e envio de dados."
+                )
+                return@launch
+            }
             _tailscaleStatus.value = _tailscaleStatus.value.copy(
                 isSyncing = true,
                 lastSyncMessage = "Sincronizando via Tailscale..."
@@ -264,6 +271,22 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    fun acceptLocalDataDisclosure() {
+        viewModelScope.launch { settingsDataStore.acceptLocalDataDisclosure() }
+    }
+
+    fun setRemoteSyncEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsDataStore.setRemoteSyncEnabled(enabled)
+            if (enabled) {
+                br.com.spamshield.sync.SyncWorker.schedulePeriodicSync(appContext)
+                br.com.spamshield.sync.SyncWorker.enqueueOneTimeSync(appContext)
+            } else {
+                br.com.spamshield.sync.SyncWorker.cancelSync(appContext)
+            }
+        }
+    }
+
     fun setShadowMode(enabled: Boolean) {
         viewModelScope.launch { settingsDataStore.setShadowMode(enabled) }
     }
@@ -275,6 +298,9 @@ class MainViewModel @Inject constructor(
     fun setTailscaleUrl(url: String) {
         viewModelScope.launch {
             settingsDataStore.setTailscaleServerUrl(url)
+            if (!settingsDataStore.getSnapshot().remoteSyncEnabled) {
+                br.com.spamshield.sync.SyncWorker.cancelSync(appContext)
+            }
             refreshTailscaleStatus()
         }
     }
@@ -390,20 +416,30 @@ class MainViewModel @Inject constructor(
 
         val jsonFile = File(exportDir, "spamshield_telemetry.json")
         val events = dao.getAllDecisionEvents().groupBy { it.callId }
-        jsonFile.writeText(br.com.spamshield.domain.TelemetryExport.encode(all, events.values.flatten()))
+        val exportMetadata = br.com.spamshield.domain.TelemetryExportMetadata()
+        jsonFile.writeText(br.com.spamshield.domain.TelemetryExport.encode(all, events.values.flatten(), exportMetadata))
+        File(exportDir, "spamshield_telemetry_summary.json").writeText(
+            br.com.spamshield.domain.TelemetryExport.encodeSummary(all, events.values.flatten(), exportMetadata)
+        )
 
         val csvFile = File(exportDir, "spamshield_telemetry.csv")
         val sb = StringBuilder()
-        sb.appendLine("id,timestamp,rawNumber,normalizedNumber,ddd,prefix7,carrierGuess,lineType,stirShakenStatus,finalScore,thresholdApplied,outcome,category,processingLatencyMs,userFeedback,syncStatus,arrivalScore,observedResult,decisionEventsJson")
+        sb.appendLine("id,timestamp,rawNumber,normalizedNumber,ddd,prefix7,carrierGuess,lineType,stirShakenStatus,finalScore,thresholdApplied,outcome,category,processingLatencyMs,userFeedback,syncStatus,arrivalScore,observedResult,decisionEventsJson,originalAppVersion,originalVersionStatus,currentClassificationAppVersion,currentClassificationRecordedAt,currentClassificationVersionStatus,eventAppVersions,exportSchemaVersion,exportedAt,exporterVersionName,exporterVersionCode,provenanceJson")
         fun csv(value: String) = "\"" + value.replace("\"", "\"\"") + "\""
         for (row in all) {
             val callEvents = events[row.id].orEmpty()
             val evidence = DecisionTrace.evidence(row, callEvents)
+            val provenance = br.com.spamshield.domain.TelemetryProvenance.forCall(row, callEvents)
+            val serializedEvents = json.encodeToString(callEvents.map { it.toRemoteEvent() })
             sb.appendLine(
                 "${row.id},${row.timestamp},${row.rawNumber},${row.normalizedNumber},${row.ddd},${row.prefix7}," +
                     "\"${row.carrierGuess ?: ""}\",${row.lineType},${row.stirShakenStatus},${row.finalScore}," +
                     "${row.thresholdApplied},${row.outcome},${row.category},${row.processingLatencyMs},${row.userFeedback},${row.syncStatus}," +
-                    "${evidence.arrivalScore ?: ""},${csv(evidence.label)},${csv(json.encodeToString(callEvents.map { it.toRemoteEvent() }))}"
+                    "${evidence.arrivalScore ?: ""},${csv(evidence.label)},${csv(serializedEvents)}," +
+                    "${csv(provenance.originalDecision?.appVersion?.label.orEmpty())},${provenance.originalVersionStatus}," +
+                    "${csv(provenance.currentClassification?.appVersion?.label.orEmpty())},${provenance.currentClassification?.recordedAt ?: ""},${provenance.currentClassificationStatus}," +
+                    "${csv(provenance.eventAppVersions.joinToString("; ") { it.label })},${exportMetadata.schemaVersion},${exportMetadata.exportedAt}," +
+                    "${csv(exportMetadata.exporterVersionName)},${exportMetadata.exporterVersionCode},${csv(json.encodeToString(provenance))}"
             )
         }
         csvFile.writeText(sb.toString())

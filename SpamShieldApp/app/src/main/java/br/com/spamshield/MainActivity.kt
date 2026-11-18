@@ -2,11 +2,13 @@ package br.com.spamshield
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -24,6 +26,8 @@ import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.GppBad
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -91,6 +95,12 @@ class MainActivity : ComponentActivity() {
 fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    fun missingDataPermissions(): Boolean = listOf(
+        Manifest.permission.READ_CONTACTS, Manifest.permission.READ_CALL_LOG,
+        Manifest.permission.READ_PHONE_STATE
+    ).any { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
+    var hasMissingDataPermissions by remember { mutableStateOf(missingDataPermissions()) }
     var selectedTab by remember { mutableIntStateOf(0) }
     var isScreeningRoleHeld by remember {
         mutableStateOf(RoleManagerHelper.isCallScreeningRoleHeld(context))
@@ -101,6 +111,7 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
             if (event == Lifecycle.Event.ON_RESUME) {
                 isScreeningRoleHeld = RoleManagerHelper.isCallScreeningRoleHeld(context)
                 viewModel.refreshTailscaleStatus()
+                hasMissingDataPermissions = missingDataPermissions()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -123,13 +134,11 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { grants ->
-        if (grants[Manifest.permission.READ_CALL_LOG] == true) {
-            viewModel.importAndAnalyzePhoneCallHistory()
-        }
+    ) {
+        hasMissingDataPermissions = missingDataPermissions()
     }
 
-    LaunchedEffect(Unit) {
+    val requestDataPermissions = {
         val perms = mutableListOf(
             Manifest.permission.READ_CONTACTS,
             Manifest.permission.READ_CALL_LOG,
@@ -141,11 +150,25 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
         permissionLauncher.launch(perms.toTypedArray())
     }
 
+    if (!settings.localDataDisclosureAccepted) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Como o SpamShield usa seus dados") },
+            text = { Text("O app consulta contatos para permitir pessoas conhecidas e o histórico de ligações para analisar o resultado das chamadas. Esses dados são tratados no aparelho. A importação do histórico antigo é uma ação separada em Ajustes. Números, horários e decisões só são enviados ao servidor configurado se você ativar a sincronização em Ajustes. O app não solicita acesso a SMS, fotos ou microfone. Você pode rever os acessos nas configurações do Android.") },
+            confirmButton = { TextButton(onClick = {
+                viewModel.acceptLocalDataDisclosure()
+                requestDataPermissions()
+            }) { Text("Continuar e escolher acessos") } },
+            dismissButton = { TextButton(onClick = { viewModel.acceptLocalDataDisclosure() }) {
+                Text("Continuar sem novos acessos")
+            } }
+        )
+    }
+
     val telemetryList by viewModel.telemetryList.collectAsStateWithLifecycle()
     val decisionEvents by viewModel.decisionEvents.collectAsStateWithLifecycle()
     val activeRules by viewModel.activeRules.collectAsStateWithLifecycle()
     val activeQuarantines by viewModel.activeQuarantines.collectAsStateWithLifecycle()
-    val settings by viewModel.settings.collectAsStateWithLifecycle()
     val tailscaleStatus by viewModel.tailscaleStatus.collectAsStateWithLifecycle()
     val apkUpdateState by viewModel.apkUpdateState.collectAsStateWithLifecycle()
 
@@ -184,6 +207,16 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
 
     Scaffold(
         topBar = {
+            Column {
+            if (hasMissingDataPermissions && settings.localDataDisclosureAccepted) {
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+                    Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                        Text("Acesso a contatos ou ligações ausente", fontWeight = FontWeight.Bold)
+                        Text("O histórico e a proteção de contatos ficam limitados. Se o Play Protect removeu acessos, conclua a revisão do alerta antes de concedê-los novamente.", fontSize = 12.sp)
+                        TextButton(onClick = requestDataPermissions) { Text("Revisar permissões") }
+                    }
+                }
+            }
             if (!isScreeningRoleHeld) {
                 Surface(
                     color = Color(0xFFB91C1C),
@@ -204,7 +237,7 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
                                 fontSize = 13.sp
                             )
                             Text(
-                                text = "Ative o papel ROLE_CALL_SCREENING para interceptar chamadas em < 10 ms.",
+                                text = "Escolha o SpamShield como identificador e bloqueador de chamadas.",
                                 color = Color.White.copy(alpha = 0.9f),
                                 fontSize = 11.sp
                             )
@@ -220,6 +253,7 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
                         }
                     }
                 }
+            }
             }
         },
         bottomBar = {
@@ -283,6 +317,7 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
                     tailscaleStatus = tailscaleStatus,
                     apkUpdateState = apkUpdateState,
                     onToggleShadowMode = viewModel::setShadowMode,
+                    onToggleRemoteSync = viewModel::setRemoteSyncEnabled,
                     onSyncNow = viewModel::syncNowWithMongoDb,
                     onImportCallHistory = viewModel::importAndAnalyzePhoneCallHistory,
                     onSyncAnatelProviders = viewModel::syncAnatelAndBlacklistProviders,

@@ -17,11 +17,7 @@ use axum::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use tower_http::{
-    compression::CompressionLayer,
-    cors::CorsLayer,
-    trace::TraceLayer,
-};
+use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -134,14 +130,23 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/v1/sync/payload", get(rules::get_sync_payload))
         .route("/api/v1/rules", post(rules::upsert_active_rule))
-        .route("/api/v1/quarantine/batch", post(rules::upsert_quarantine_batch))
+        .route(
+            "/api/v1/quarantine/batch",
+            post(rules::upsert_quarantine_batch),
+        )
         .route("/api/v1/quarantine", post(rules::upsert_quarantine))
         .route(
             "/api/v1/quarantine/:prefix7",
             delete(rules::delete_quarantine),
         )
-        .route("/api/v1/analytics/summary", get(analytics::get_analytics_summary))
-        .layer(middleware::from_fn_with_state(state.clone(), require_bearer));
+        .route(
+            "/api/v1/analytics/summary",
+            get(analytics::get_analytics_summary),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer,
+        ));
 
     let public = Router::new()
         .route("/api/v1/health", get(health_check))

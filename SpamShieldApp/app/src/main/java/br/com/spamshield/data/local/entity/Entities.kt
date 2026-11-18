@@ -5,6 +5,21 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 import kotlinx.serialization.Serializable
 
+/** Durable local operations. Only this queue, never downloaded snapshots, is uploaded. */
+@Serializable
+@Entity(tableName = "sync_mutations", indices = [Index(value = ["createdAt"])])
+data class SyncMutationEntity(
+    @PrimaryKey val mutationId: String,
+    val kind: String,
+    val targetId: String,
+    val payloadJson: String,
+    val createdAt: Long
+)
+
+/** Tracks ownership of downloaded prefixes without treating them as new local evidence. */
+@Entity(tableName = "remote_quarantine_prefixes")
+data class RemoteQuarantinePrefixEntity(@PrimaryKey val prefix7: String)
+
 @Serializable
 data class TriggeredRuleDto(
     val rule_id: String,

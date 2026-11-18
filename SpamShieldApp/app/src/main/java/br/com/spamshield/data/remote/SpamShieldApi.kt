@@ -22,7 +22,8 @@ data class CallDetailsRemoteDto(
     val prefix_7: String,
     val carrier_guess: String? = null,
     val line_type: String,
-    val stir_shaken_status: String
+    val stir_shaken_status: String,
+    val call_direction: String? = null
 )
 
 @Serializable
@@ -117,12 +118,17 @@ data class SyncPayloadResponseDto(
     val active_rules: List<ActiveRuleRemoteDto> = emptyList(),
     val prefix_quarantine: List<PrefixQuarantineRemoteDto> = emptyList(),
     val anatel_numbering_plan: List<AnatelPlanRemoteDto> = emptyList(),
-    val server_timestamp: Long = 0L
+    val server_timestamp: Long = 0L,
+    val quarantine_snapshot_complete: Boolean = false,
+    val quarantine_deleted_prefixes: List<String> = emptyList()
 )
 
 @Serializable
 data class FeedbackPatchRequestDto(
-    val user_feedback: String
+    val user_feedback: String,
+    val mutation_id: String? = null,
+    val recorded_at: Long? = null,
+    val recorded_at_source: String = "USER_ACTION"
 )
 
 @Serializable
@@ -199,7 +205,8 @@ interface SpamShieldApi {
 
     @POST("/api/v1/quarantine")
     suspend fun upsertQuarantine(
-        @Body quarantine: PrefixQuarantineRemoteDto
+        @Body quarantine: PrefixQuarantineRemoteDto,
+        @Query("recorded_at") recordedAt: Long? = null
     ): PrefixQuarantineRemoteDto
 
     @POST("/api/v1/quarantine/batch")
@@ -209,6 +216,7 @@ interface SpamShieldApi {
 
     @DELETE("/api/v1/quarantine/{prefix7}")
     suspend fun deleteQuarantine(
-        @Path("prefix7") prefix7: String
+        @Path("prefix7") prefix7: String,
+        @Query("recorded_at") recordedAt: Long? = null
     )
 }

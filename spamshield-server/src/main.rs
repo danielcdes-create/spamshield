@@ -98,6 +98,7 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
             timestamp: Utc::now(),
             device_id: "pixel-9-pro-br".to_string(),
             call_details: CallDetails {
+                call_direction: None,
                 raw_number: "03141011230".to_string(),
                 normalized_number: "+553141011230".to_string(),
                 ddd: "31".to_string(),
@@ -128,9 +129,12 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
                 ],
             },
             decision_events: vec![crate::models::DecisionEventDoc {
-                event_id: "original-arrival".to_string(), recorded_at: 1794400000000,
-                event_type: "SCREENING_DECISION".to_string(), source: "CALL_SCREENING_SERVICE".to_string(),
-                app_version: "test".to_string(), details: serde_json::json!({"score":45,"outcome":"ALLOWED_LOW_SCORE"}),
+                event_id: "original-arrival".to_string(),
+                recorded_at: 1794400000000,
+                event_type: "SCREENING_DECISION".to_string(),
+                source: "CALL_SCREENING_SERVICE".to_string(),
+                app_version: "test".to_string(),
+                details: serde_json::json!({"score":45,"outcome":"ALLOWED_LOW_SCORE"}),
             }],
             audit: AuditInfo {
                 user_feedback: UserFeedback::UNRATED,
@@ -148,7 +152,14 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
         assert_eq!(bson_doc.get_str("_id").unwrap(), "test-uuid-1234");
         assert!(bson_doc.get_datetime("timestamp").is_ok());
         let events = bson_doc.get_array("decision_events").unwrap();
-        assert_eq!(events[0].as_document().unwrap().get_str("event_id").unwrap(), "original-arrival");
+        assert_eq!(
+            events[0]
+                .as_document()
+                .unwrap()
+                .get_str("event_id")
+                .unwrap(),
+            "original-arrival"
+        );
         assert_eq!(roundtrip.decision_events[0].details["score"], 45);
         let mut legacy = serde_json::to_value(&doc).unwrap();
         legacy.as_object_mut().unwrap().remove("decision_events");
@@ -160,7 +171,10 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
     #[ignore = "Requires explicit isolated MongoDB database ending in _test"]
     async fn test_mongodb_init_and_end_to_end_api() {
         let cfg = AppConfig::from_env();
-        assert!(cfg.mongodb_db_name.ends_with("_test"), "Integration tests must use an isolated database ending in _test");
+        assert!(
+            cfg.mongodb_db_name.ends_with("_test"),
+            "Integration tests must use an isolated database ending in _test"
+        );
         let app_db = AppDatabase::connect(&cfg)
             .await
             .expect("Failed to connect to MongoDB Atlas");
@@ -206,6 +220,7 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
             timestamp: Utc::now(),
             device_id: "android-harness-31".to_string(),
             call_details: CallDetails {
+                call_direction: None,
                 raw_number: "03141011230".to_string(),
                 normalized_number: "+553141011230".to_string(),
                 ddd: "31".to_string(),
@@ -244,9 +259,7 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
             .uri("/api/v1/telemetry/batch")
             .header("authorization", &bearer)
             .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::to_vec(&sample_telemetry).unwrap(),
-            ))
+            .body(Body::from(serde_json::to_vec(&sample_telemetry).unwrap()))
             .unwrap();
         let resp_batch = router.clone().oneshot(req_batch).await.unwrap();
         assert_eq!(resp_batch.status(), StatusCode::OK);
@@ -257,6 +270,9 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
 
         // 3. Test PATCH /api/v1/telemetry/:id/feedback
         let feedback_req = FeedbackPatchRequest {
+            mutation_id: None,
+            recorded_at: None,
+            recorded_at_source: None,
             user_feedback: UserFeedback::CONFIRMED_SPAM,
         };
         let req_patch = Request::builder()
@@ -316,7 +332,10 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
         assert!(!rendered.contains("C:\\Users\\danie"));
         assert!(!rendered.contains("Users\\danie"));
         let explicit = resolve_apk_storage_path(Some("artifacts/spamshield.apk"));
-        assert_eq!(explicit, std::path::PathBuf::from("artifacts/spamshield.apk"));
+        assert_eq!(
+            explicit,
+            std::path::PathBuf::from("artifacts/spamshield.apk")
+        );
         let meta = resolve_apk_metadata_path(&explicit, None);
         assert!(meta.ends_with("output-metadata.json"));
     }
@@ -371,7 +390,10 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
         assert_eq!(wrong_resp.status(), StatusCode::UNAUTHORIZED);
 
         assert!(!routes::bearer_is_accepted(None, ""));
-        assert!(!routes::bearer_is_accepted(Some("Bearer unit-test-key"), ""));
+        assert!(!routes::bearer_is_accepted(
+            Some("Bearer unit-test-key"),
+            ""
+        ));
         assert!(routes::bearer_is_accepted(
             Some("Bearer unit-test-key"),
             "unit-test-key"

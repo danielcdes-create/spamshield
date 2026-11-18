@@ -86,7 +86,7 @@ class SmartCallScreeningService : CallScreeningService() {
 
                 Log.d(
                     TAG,
-                    "Screened call from $rawNumber -> outcome=${evalResult.telemetry.outcome}, " +
+                    "callId=${evalResult.telemetry.id} app=${br.com.spamshield.BuildConfig.VERSION_NAME}(${br.com.spamshield.BuildConfig.VERSION_CODE}) outcome=${evalResult.telemetry.outcome}, " +
                         "score=${evalResult.telemetry.finalScore}, " +
                         "latency=${String.format("%.2f", evalResult.telemetry.processingLatencyMs)}ms"
                 )

@@ -29,6 +29,8 @@ data class ScoreInput(
     val isShortOrUtilityCode: Boolean = false,
     val shadowMode: Boolean = false,
     val unverifiedWeight: Int = 20,
+    val ruleWeights: Map<String, Int> = emptyMap(),
+    val disabledRuleIds: Set<String> = emptySet(),
     val extraRegexRules: List<CompiledRegexRule> = emptyList()
 )
 
@@ -110,10 +112,10 @@ object HeuristicScorer {
         val seenVoip = mutableSetOf<String>()
 
         fun considerVoip(ruleId: String, weight: Int, pattern: String, regex: Regex) {
-            if (ruleId in seenVoip) return
+            if (ruleId in seenVoip || ruleId in input.disabledRuleIds) return
             if (texts.any { regex.containsMatchIn(it) || regex.matches(it) }) {
                 seenVoip.add(ruleId)
-                voipCandidates.add(TriggeredRuleDto(ruleId, weight, pattern))
+                voipCandidates.add(TriggeredRuleDto(ruleId, input.ruleWeights[ruleId] ?: weight, pattern))
             }
         }
 
@@ -124,20 +126,21 @@ object HeuristicScorer {
                 rules.add(TriggeredRuleDto(rule.ruleId, rule.weight, rule.pattern))
             }
         }
-        considerVoip(
+        if (input.extraRegexRules.none { it.ruleId == "BLACKLIST_MG_VOIP_PABX" }) considerVoip(
             "BLACKLIST_MG_VOIP_PABX",
             80,
             ScreeningPatternCache.BLACKLIST_MG_VOIP_PABX_PATTERN,
             ScreeningPatternCache.blacklistMgVoipPabx()
         )
-        considerVoip(
+        if (input.extraRegexRules.none { it.ruleId == "REGEX_MG_VOIP_TRUNKS" }) considerVoip(
             "REGEX_MG_VOIP_TRUNKS",
             80,
             ScreeningPatternCache.REGEX_MG_VOIP_TRUNKS_PATTERN,
             ScreeningPatternCache.regexMgVoipTrunks()
         )
-        if (shouldApplyAnatel(input)) {
-            voipCandidates.add(TriggeredRuleDto("ANATEL_PABX_VOIP_RANGE", 35, input.carrierGuess))
+        if (shouldApplyAnatel(input) && "ANATEL_PABX_VOIP_RANGE" !in input.disabledRuleIds) {
+            voipCandidates.add(TriggeredRuleDto("ANATEL_PABX_VOIP_RANGE",
+                input.ruleWeights["ANATEL_PABX_VOIP_RANGE"] ?: 35, input.carrierGuess))
         }
         pickVoipWinner(voipCandidates)?.let { rules.add(it) }
 
@@ -188,6 +191,7 @@ object HeuristicScorer {
     fun shouldApplyLeadingZero(input: ScoreInput): Boolean {
         if (input.cspExtracted != null || hasExplicitCsp(input.rawNumber)) return true
         val digits = input.rawNumber.filter { it.isDigit() }
+        if (!digits.startsWith("0")) return false
         if (digits.startsWith("055")) return true
         if (input.stirShakenStatus == "FAILED") return true
         if (input.quarantineMatch == PrefixQuarantineMatch.EXACT8) return true
@@ -236,11 +240,22 @@ object HeuristicScorer {
     }
 
     fun finalize(rules: List<TriggeredRuleDto>, input: ScoreInput): ScoreResult {
-        val score = equation(rules)
+        val effectiveRules = configuredRules(rules, input)
+        val score = equation(effectiveRules)
         val outcome = resolveOutcome(score, input.thresholdApplied, input.callDurationSec, input.shadowMode)
-        val category = resolveCategory(input.stirShakenStatus, outcome, rules)
-        return ScoreResult(score, outcome, category, rules)
+        val category = resolveCategory(input.stirShakenStatus, outcome, effectiveRules)
+        return ScoreResult(score, outcome, category, effectiveRules)
     }
+
+    /** Explicit remote disable/weight wins; defaults apply only to absent configuration. */
+    fun configuredRules(rules: List<TriggeredRuleDto>, input: ScoreInput): List<TriggeredRuleDto> =
+        rules.filter { it.rule_id in PROTECTED_ALLOW_RULES || it.rule_id !in input.disabledRuleIds }
+            .map { rule ->
+                if (rule.rule_id in PROTECTED_ALLOW_RULES) rule
+                else input.ruleWeights[rule.rule_id]?.let { rule.copy(weight = it) } ?: rule
+            }
+
+    private val PROTECTED_ALLOW_RULES = setOf("CONTACT_WHITELIST", "OUTBOUND_GRACE_PERIOD", "EMERGENCY_REPEATED_CALL")
 
     private fun pickVoipWinner(candidates: List<TriggeredRuleDto>): TriggeredRuleDto? {
         if (candidates.isEmpty()) return null

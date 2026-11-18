@@ -33,9 +33,8 @@ impl AppConfig {
     pub fn from_env() -> Self {
         let _ = dotenvy::dotenv();
 
-        let mongodb_uri = env::var("MONGODB_URI").unwrap_or_else(|_| {
-            "mongodb://localhost:27017/spam_shield_db".to_string()
-        });
+        let mongodb_uri = env::var("MONGODB_URI")
+            .unwrap_or_else(|_| "mongodb://localhost:27017/spam_shield_db".to_string());
 
         let mongodb_direct_uri = env::var("MONGODB_DIRECT_URI").ok();
 
@@ -45,11 +44,11 @@ impl AppConfig {
         let server_bind_addr =
             env::var("SERVER_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
-        let tailscale_ip =
-            env::var("TAILSCALE_IP").unwrap_or_else(|_| "100.83.253.15".to_string());
+        let tailscale_ip = env::var("TAILSCALE_IP").unwrap_or_else(|_| "100.83.253.15".to_string());
 
         let api_key = env::var("SPAMSHIELD_API_KEY").unwrap_or_default();
-        let apk_storage_path = resolve_apk_storage_path(env::var("APK_STORAGE_PATH").ok().as_deref());
+        let apk_storage_path =
+            resolve_apk_storage_path(env::var("APK_STORAGE_PATH").ok().as_deref());
         let apk_metadata_path = resolve_apk_metadata_path(
             &apk_storage_path,
             env::var("APK_METADATA_PATH").ok().as_deref(),

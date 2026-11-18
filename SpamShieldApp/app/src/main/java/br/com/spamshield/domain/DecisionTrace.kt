@@ -13,13 +13,17 @@ import java.util.UUID
 
 @Serializable
 data class EvaluatedRule(
-    val ruleId: String, val ruleType: String, val pattern: String?, val weight: Int, val priority: Int
+    val ruleId: String, val ruleType: String, val pattern: String?, val weight: Int, val priority: Int,
+    val enabled: Boolean = true
 )
 
 @Serializable
 data class DecisionDetails(
     val schemaVersion: Int = 1,
     val engineRevision: String = "decision-journal-v1",
+    // Null on old events: never substitute the exporting app's version for a past event.
+    val appVersionName: String? = null,
+    val appVersionCode: Int? = null,
     val ruleSetFingerprint: String? = null,
     val evaluatedRules: List<EvaluatedRule> = emptyList(),
     val distinctNumbers24h: Int? = null,
@@ -59,6 +63,7 @@ data class CallEvidence(
 )
 
 object DecisionTrace {
+    const val CURRENT_ENGINE_REVISION = "decision-journal-v2"
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     fun details(event: CallDecisionEventEntity): DecisionDetails =
@@ -74,7 +79,7 @@ object DecisionTrace {
 
     fun configuredSnapshot(row: CallTelemetryEntity, rules: Collection<ActiveRuleEntity>): DecisionDetails {
         val configuration = rules.sortedBy { it.ruleId }.map {
-            EvaluatedRule(it.ruleId, it.ruleType, it.pattern, it.weight, it.priority)
+            EvaluatedRule(it.ruleId, it.ruleType, it.pattern, it.weight, it.priority, it.enabled)
         }
         val hash = java.security.MessageDigest.getInstance("SHA-256")
             .digest(json.encodeToString(configuration).toByteArray()).joinToString("") { "%02x".format(it) }
@@ -85,7 +90,13 @@ object DecisionTrace {
         dao: SpamShieldDao, callId: String, type: String, source: String,
         details: DecisionDetails, at: Long = System.currentTimeMillis(), key: String? = null
     ) {
-        val encoded = json.encodeToString(details)
+        val recordedDetails = details.copy(
+            schemaVersion = 2,
+            engineRevision = CURRENT_ENGINE_REVISION,
+            appVersionName = BuildConfig.VERSION_NAME,
+            appVersionCode = BuildConfig.VERSION_CODE
+        )
+        val encoded = json.encodeToString(recordedDetails)
         // Repeated observations/reprocessing with unchanged evidence do not grow the journal.
         if (key == null && type != "SCREENING_DECISION" && type != "SCREENING_RESPONSE_SUBMITTED") {
             val existing = dao.getDecisionEvents(callId)
@@ -104,7 +115,7 @@ object DecisionTrace {
                 if (latest != null) {
                     if (latest.detailsJson == encoded) return
                     if (type == "POST_CALL_EVALUATION" || type == "REPROCESS_EVALUATION" || type == "HISTORY_ASSESSMENT") {
-                        if (sameEvaluationOutcome(details(latest), details)) return
+                        if (sameEvaluationOutcome(details(latest), recordedDetails)) return
                     }
                 }
             }
@@ -122,7 +133,11 @@ object DecisionTrace {
             a.threshold == b.threshold &&
             a.category == b.category &&
             a.prefix == b.prefix &&
-            a.rules == b.rules
+            a.rules == b.rules &&
+            a.ruleSetFingerprint == b.ruleSetFingerprint &&
+            a.engineRevision == b.engineRevision &&
+            a.appVersionName == b.appVersionName &&
+            a.appVersionCode == b.appVersionCode
 
     suspend fun pruneRedundantEvents(dao: SpamShieldDao, rows: List<CallTelemetryEntity>) {
         val rowById = rows.associateBy { it.id }
@@ -140,7 +155,7 @@ object DecisionTrace {
             }
 
             val seenQuarantine = mutableSetOf<Pair<String?, String?>>()
-            val lastEvalByTypeSource = mutableMapOf<Pair<String, String>, DecisionDetails>()
+            val lastEvalByTypeSource = mutableMapOf<Triple<String, String, String>, DecisionDetails>()
 
             for (ev in events) {
                 val d = details(ev)
@@ -158,7 +173,7 @@ object DecisionTrace {
                         }
                     }
                     "POST_CALL_EVALUATION", "REPROCESS_EVALUATION", "HISTORY_ASSESSMENT" -> {
-                        val tsKey = ev.eventType to ev.source
+                        val tsKey = Triple(ev.eventType, ev.source, ev.appVersion)
                         val prev = lastEvalByTypeSource[tsKey]
                         if (prev != null && sameEvaluationOutcome(prev, d)) {
                             toDelete.add(ev.eventId)
@@ -192,7 +207,7 @@ object DecisionTrace {
     }
 
     fun evidence(row: CallTelemetryEntity, events: List<CallDecisionEventEntity>): CallEvidence {
-        val own = events.filter { it.callId == row.id }
+        val own = events.filter { it.callId == row.id }.sortedWith(compareBy({ it.recordedAt }, { it.eventId }))
         val arrival = own.firstOrNull { it.eventType == "SCREENING_DECISION" && it.source == "CALL_SCREENING_SERVICE" }?.let(::details)
         val response = own.lastOrNull { it.eventType == "SCREENING_RESPONSE_SUBMITTED" && it.source == "CALL_SCREENING_SERVICE" }?.let(::details)
         val observation = own.lastOrNull { it.eventType == "CALL_LOG_OBSERVATION" }?.let(::details)
@@ -202,6 +217,7 @@ object DecisionTrace {
         val observed = requested && observation?.systemCallType == 6 && observation.systemBlockReason == 1 &&
             observation.systemScreeningAppIsSpamShield != false
         val label = when {
+            observation?.systemCallType == 2 || row.outcome == "OUTGOING_CALL" -> "Chamada efetuada"
             rejected -> "Rejeitada no discador"
             observation?.systemCallType == 1 && (observation.durationSec ?: 0) > 0 -> "Atendida"
             observation?.systemCallType == 3 -> "Não atendida"

@@ -9,6 +9,8 @@ import br.com.spamshield.data.local.entity.CallDecisionEventEntity
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.OutboundGraceEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
+import br.com.spamshield.data.local.entity.SyncMutationEntity
+import br.com.spamshield.data.local.entity.RemoteQuarantinePrefixEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
@@ -19,6 +21,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 open class FakeSpamShieldDao : SpamShieldDao {
+    val remotePrefixes = mutableSetOf<String>()
+    override suspend fun getRemoteQuarantinePrefixes() = remotePrefixes.toList()
+    override suspend fun clearRemoteQuarantinePrefixes() { remotePrefixes.clear() }
+    override suspend fun insertRemoteQuarantinePrefixes(items: List<RemoteQuarantinePrefixEntity>) { remotePrefixes.addAll(items.map { it.prefix7 }) }
+    val syncMutations = mutableListOf<SyncMutationEntity>()
+    override suspend fun enqueueSyncMutation(mutation: SyncMutationEntity) { syncMutations.add(mutation) }
+    override suspend fun getSyncMutations() = syncMutations.toList()
+    override suspend fun acknowledgeSyncMutation(mutationId: String) { syncMutations.removeAll { it.mutationId == mutationId } }
     val decisionEvents = mutableListOf<CallDecisionEventEntity>()
     override suspend fun insertDecisionEvent(event: CallDecisionEventEntity) {
         if (decisionEvents.none { it.eventId == event.eventId }) decisionEvents.add(event)
@@ -119,7 +129,7 @@ open class FakeSpamShieldDao : SpamShieldDao {
     override suspend fun getEnabledRules(): List<ActiveRuleEntity> = rules.filter { it.enabled }.sortedBy { it.priority }
     override fun observeAllRules(): Flow<List<ActiveRuleEntity>> = MutableStateFlow(rules)
     override suspend fun insertRules(rules: List<ActiveRuleEntity>) {
-        this.rules.clear()
+        this.rules.removeAll { existing -> rules.any { it.ruleId == existing.ruleId } }
         this.rules.addAll(rules)
     }
     override suspend fun upsertRule(rule: ActiveRuleEntity) {
@@ -158,12 +168,12 @@ open class FakeSpamShieldDao : SpamShieldDao {
         quarantines.addAll(items)
     }
 
-    override suspend fun upsertQuarantine(item: PrefixQuarantineEntity) {
+    override suspend fun persistQuarantine(item: PrefixQuarantineEntity) {
         quarantines.removeAll { it.prefix7 == item.prefix7 }
         quarantines.add(item)
     }
 
-    override suspend fun deleteQuarantineByPrefix(prefix7: String) {
+    override suspend fun persistQuarantineDeletion(prefix7: String) {
         quarantines.removeAll { it.prefix7 == prefix7 }
     }
 
@@ -178,7 +188,7 @@ open class FakeSpamShieldDao : SpamShieldDao {
 
     override suspend fun hasActiveOutboundGrace(normalizedNumber: String, prefix6: String, now: Long): Int =
         outboundGraces.count {
-            (it.normalizedNumber == normalizedNumber || it.prefix6 == prefix6) && it.expiresAt > now
+            (it.normalizedNumber == normalizedNumber || (prefix6.isNotEmpty() && it.prefix6 == prefix6)) && it.expiresAt > now
         }
 
     override suspend fun purgeExpiredOutboundGrace(now: Long) {
@@ -346,8 +356,11 @@ class SpamScoringEngineTest {
         val updated = fakeDao.getTelemetryById("call-031981100234")
         assertNotNull(updated)
         assertEquals("BLOCKED", updated?.outcome)
-        assertEquals(85, updated?.finalScore)
+        // Current configuration uses UNVERIFIED=20; the stored arrival fixture used 15.
+        assertEquals(90, updated?.finalScore)
         assertTrue(updated!!.triggeredRulesJson.contains("SYSTEM_CALLLOG_BLOCKED"))
+        assertEquals(20, UserFeedbackAudit.decode(updated.triggeredRulesJson).single { it.rule_id == "STIR_SHAKEN_UNVERIFIED" }.weight)
+        assertEquals(HeuristicScorer.equation(UserFeedbackAudit.decode(updated.triggeredRulesJson)), updated.finalScore)
 
         val q = fakeDao.getActiveQuarantineForPrefix(prefix8 = "31981100", prefix7 = "3198110", now = now)
         assertNotNull(q)
@@ -401,8 +414,11 @@ class SpamScoringEngineTest {
         assertNotNull(recovered)
         assertEquals("31982042", recovered?.prefix7)
         assertEquals("BLOCKED", recovered?.outcome)
-        assertEquals(85, recovered?.finalScore)
+        // Recovered classification applies current UNVERIFIED=20 while preserving old events.
+        assertEquals(90, recovered?.finalScore)
         assertTrue(recovered!!.triggeredRulesJson.contains("SYSTEM_CALLLOG_BLOCKED"))
+        assertEquals(20, UserFeedbackAudit.decode(recovered.triggeredRulesJson).single { it.rule_id == "STIR_SHAKEN_UNVERIFIED" }.weight)
+        assertEquals(HeuristicScorer.equation(UserFeedbackAudit.decode(recovered.triggeredRulesJson)), recovered.finalScore)
         assertFalse(recovered.triggeredRulesJson.contains("PREFIX6_CLUSTER_HIT"))
 
         val q8 = fakeDao.getActiveQuarantineForPrefix("31982042", "3198204", now)

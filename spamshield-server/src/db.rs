@@ -145,6 +145,7 @@ impl AppDatabase {
                                     "ALLOWED_EMERGENCY_REPEAT",
                                     "ALLOWED_OUTBOUND_GRACE",
                                     "ALLOWED_LOW_SCORE",
+                                    "OUTGOING_CALL",
                                     "FLAGGED_POST_CALL_QUARANTINED",
                                     "USER_BLOCKED_RETROACTIVE"
                                 ]
@@ -210,23 +211,21 @@ impl AppDatabase {
 
         let telemetry_coll = self.call_telemetry();
         telemetry_coll
-            .create_indexes(
-                vec![
-                    IndexModel::builder().keys(doc! { "timestamp": -1 }).build(),
-                    IndexModel::builder()
-                        .keys(doc! { "call_details.prefix_7": 1, "timestamp": -1 })
-                        .build(),
-                    IndexModel::builder()
-                        .keys(doc! { "decision_vector.outcome": 1, "timestamp": -1 })
-                        .build(),
-                    IndexModel::builder()
-                        .keys(doc! { "decision_vector.category": 1, "timestamp": -1 })
-                        .build(),
-                    IndexModel::builder()
-                        .keys(doc! { "audit.user_feedback": 1 })
-                        .build(),
-                ],
-            )
+            .create_indexes(vec![
+                IndexModel::builder().keys(doc! { "timestamp": -1 }).build(),
+                IndexModel::builder()
+                    .keys(doc! { "call_details.prefix_7": 1, "timestamp": -1 })
+                    .build(),
+                IndexModel::builder()
+                    .keys(doc! { "decision_vector.outcome": 1, "timestamp": -1 })
+                    .build(),
+                IndexModel::builder()
+                    .keys(doc! { "decision_vector.category": 1, "timestamp": -1 })
+                    .build(),
+                IndexModel::builder()
+                    .keys(doc! { "audit.user_feedback": 1 })
+                    .build(),
+            ])
             .with_options(CreateIndexOptions::default())
             .await?;
 
@@ -455,10 +454,7 @@ impl AppDatabase {
         for q_doc in initial_quarantine {
             let prefix = q_doc.get_str("prefix_7").unwrap_or_default().to_string();
             quarantine_coll
-                .update_one(
-                    doc! { "prefix_7": &prefix },
-                    doc! { "$setOnInsert": q_doc },
-                )
+                .update_one(doc! { "prefix_7": &prefix }, doc! { "$setOnInsert": q_doc })
                 .with_options(UpdateOptions::builder().upsert(true).build())
                 .await?;
         }
@@ -528,10 +524,7 @@ impl AppDatabase {
         for a_doc in initial_anatel {
             let prefix = a_doc.get_str("prefix_7").unwrap_or_default().to_string();
             anatel_coll
-                .update_one(
-                    doc! { "prefix_7": &prefix },
-                    doc! { "$setOnInsert": a_doc },
-                )
+                .update_one(doc! { "prefix_7": &prefix }, doc! { "$setOnInsert": a_doc })
                 .with_options(UpdateOptions::builder().upsert(true).build())
                 .await?;
         }
@@ -775,6 +768,7 @@ impl AppDatabase {
             .delete_many(doc! {
                 "ddd": "31",
                 "hit_count": { "$lte": 1_i32 },
+                "deleted": { "$ne": true },
                 "reason": { "$nin": ["SYSTEM_CALLLOG_BLOCKED", "DIALER_REJECTED", "CONFIRMED_SPAM"] },
                 "prefix_7": {
                     "$regex": "^319[24-9]",
@@ -864,6 +858,9 @@ pub fn parse_active_rule(doc: &Document) -> Option<ActiveRuleDoc> {
 }
 
 pub fn parse_prefix_quarantine(doc: &Document) -> Option<PrefixQuarantineDoc> {
+    if doc.get_bool("deleted").unwrap_or(false) {
+        return None;
+    }
     let distinct_numbers_seen = doc
         .get_array("distinct_numbers_seen")
         .map(|arr| {

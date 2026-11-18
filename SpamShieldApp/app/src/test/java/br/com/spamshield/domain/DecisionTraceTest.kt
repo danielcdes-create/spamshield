@@ -17,7 +17,7 @@ class DecisionTraceTest {
     private fun dao() = FakeSpamShieldDao().apply { rules.clear(); quarantines.clear(); anatelPrefixes.clear() }
     private fun engine(dao: FakeSpamShieldDao) = SpamScoringEngine(dao, SettingsDataStore(), FakeContactLookup())
 
-    @Before fun reset() { QuarantinePrefixIndex.clear() }
+    @Before fun reset() { QuarantinePrefixIndex.replaceAll(emptyList()) }
     @After fun cleanup() { QuarantinePrefixIndex.clear() }
 
     @Test fun manualRejectionNeverBecomesEvidenceOfPreventiveBlocking() = runTest {
@@ -177,7 +177,7 @@ class DecisionTraceTest {
         assertEquals(1, events.count { it.eventType == "REPROCESS_EVALUATION" })
     }
 
-    @Test fun coalescedRedialDoesNotOverwriteExactCallLogObservationOrPingPongEvaluation() = runTest {
+    @Test fun coalescedRedialKeepsItsOwnObservationWithoutOverwritingTheFirstCall() = runTest {
         val dao = dao()
         val engine = engine(dao)
         val arrival = engine.evaluateIncomingCall("03136630946", "PASSED", at, "CALL_SCREENING_SERVICE").telemetry
@@ -186,11 +186,19 @@ class DecisionTraceTest {
         // Redial 11s later in CallLog (blocked at edge, type=6) falls within 15s window of `arrival`
         val changed = engine.evaluatePostCallLogVerdict(arrival.normalizedNumber, 6, 0,
             isSystemBlocked = true, callTimestampMs = at + 11_000, nowMillis = at + 12_000, systemBlockReason = 1)
-        assertFalse(changed)
+        assertTrue(changed)
         val events = dao.getDecisionEvents(arrival.id)
         assertEquals(1, events.count { it.eventType == "CALL_LOG_OBSERVATION" })
         assertEquals(1, events.count { it.eventType == "POST_CALL_EVALUATION" })
         assertEquals(1, events.count { it.eventType == "QUARANTINE_UPDATED" })
+        val redial = dao.getAllTelemetry().single { it.id != arrival.id }
+        val redialEvents = dao.getDecisionEvents(redial.id)
+        assertEquals(at + 11_000, redial.timestamp)
+        assertEquals(6, DecisionTrace.details(redialEvents.single { it.eventType == "CALL_LOG_OBSERVATION" }).systemCallType)
+        assertTrue(redialEvents.none { it.eventType == "SCREENING_DECISION" })
+        reprocessStored(dao)
+        assertNotNull(dao.getTelemetryById(redial.id))
+        assertEquals(1, dao.getDecisionEvents(arrival.id).count { it.eventType == "CALL_LOG_OBSERVATION" })
     }
 
     @Test fun reprocessDeduplicatesUtilityRowsAndMigrates055Prefixes() = runTest {

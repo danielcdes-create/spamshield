@@ -27,6 +27,7 @@ import br.com.spamshield.domain.TelemetryCoalescer
 import br.com.spamshield.sync.SyncWorker
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -126,7 +127,8 @@ class CallHistoryAnalyzer @Inject constructor(
 
             val settings = settingsDataStore.getSnapshot()
             dao.deduplicateHistoryRecords()
-            val enabledRules = dao.getEnabledRules().associateBy { it.ruleId }
+            val allRules = dao.observeAllRules().first()
+            val enabledRules = allRules.filter { it.enabled }.associateBy { it.ruleId }
             val regexRules = enabledRules.values.filter {
                 it.ruleType == "REGEX_MATCH" && !it.pattern.isNullOrBlank()
             }.mapNotNull { rule ->
@@ -283,7 +285,7 @@ class CallHistoryAnalyzer @Inject constructor(
                         )
                     )
                     dao.getTelemetryById(deterministicId)?.let { imported ->
-                        DecisionTrace.record(dao, imported.id, "HISTORY_ASSESSMENT", "HISTORY_IMPORT", DecisionTrace.configuredSnapshot(imported, enabledRules.values))
+                        DecisionTrace.record(dao, imported.id, "HISTORY_ASSESSMENT", "HISTORY_IMPORT", DecisionTrace.configuredSnapshot(imported, allRules))
                         DecisionTrace.record(dao, imported.id, "CALL_LOG_OBSERVATION", "ANDROID_CALL_LOG",
                             DecisionDetails(systemCallType = call.callType, durationSec = call.durationSec,
                                 observedCallTimestamp = call.timestamp, systemBlockReason = call.blockReason,
@@ -330,6 +332,8 @@ class CallHistoryAnalyzer @Inject constructor(
                         callDurationSec = call.durationSec.takeIf { it > 0 },
                         cspExtracted = norm.cspExtracted,
                         isShortOrUtilityCode = norm.isShortOrUtilityCode,
+                        ruleWeights = allRules.associate { it.ruleId to it.weight },
+                        disabledRuleIds = allRules.filterNot { it.enabled }.map { it.ruleId }.toSet(),
                         extraRegexRules = compiledRules
                     ),
                     rejectedInDialer = wasRejectedInDialer,
@@ -376,7 +380,7 @@ class CallHistoryAnalyzer @Inject constructor(
                     )
                 )
                 dao.getTelemetryById(deterministicId)?.let { imported ->
-                    DecisionTrace.record(dao, imported.id, "HISTORY_ASSESSMENT", "HISTORY_IMPORT", DecisionTrace.configuredSnapshot(imported, enabledRules.values))
+                    DecisionTrace.record(dao, imported.id, "HISTORY_ASSESSMENT", "HISTORY_IMPORT", DecisionTrace.configuredSnapshot(imported, allRules))
                     DecisionTrace.record(dao, imported.id, "CALL_LOG_OBSERVATION", "ANDROID_CALL_LOG",
                         DecisionDetails(systemCallType = call.callType, durationSec = call.durationSec,
                             observedCallTimestamp = call.timestamp, systemBlockReason = call.blockReason,
@@ -505,6 +509,17 @@ class CallHistoryAnalyzer @Inject constructor(
                 for (call in collected.asReversed()) {
                     val norm = PhoneNormalizer.normalize(call.rawNumber)
                     if (norm.normalizedNumber.isEmpty()) continue
+                    if (call.callType == CallLog.Calls.OUTGOING_TYPE) {
+                        val callAt = call.timestamp.takeIf { it > 0L } ?: now
+                        if (callAt >= now - SpamScoringEngine.OUTBOUND_GRACE_WINDOW_MS) {
+                            dao.upsertOutboundGrace(OutboundGraceEntity(
+                                normalizedNumber = norm.normalizedNumber,
+                                prefix6 = norm.prefix6,
+                                expiresAt = callAt + SpamScoringEngine.OUTBOUND_GRACE_WINDOW_MS
+                            ))
+                        }
+                        continue
+                    }
                     val isSystemBlocked = (call.blockReason ?: 0) != 0
 
                     val changed = spamScoringEngine.evaluatePostCallLogVerdict(
@@ -544,7 +559,8 @@ internal suspend fun reprocessStoredTelemetry(
         dao.deduplicateHistoryRecords()
         val settings = settingsDataStore.getSnapshot()
         val now = System.currentTimeMillis()
-        val enabledRules = dao.getEnabledRules().associateBy { it.ruleId }
+        val allRules = dao.observeAllRules().first()
+        val enabledRules = allRules.filter { it.enabled }.associateBy { it.ruleId }
         val regexRules = enabledRules.values.filter {
             it.ruleType == "REGEX_MATCH" && !it.pattern.isNullOrBlank()
         }.mapNotNull { rule ->
@@ -554,10 +570,20 @@ internal suspend fun reprocessStoredTelemetry(
         var updatedCount = deduplicateStoredTelemetryRows(dao, settings.userDdd)
 
         val allTelemetry = dao.getAllTelemetry().sortedBy { it.timestamp }
+        val eventsByCall = dao.getAllDecisionEvents().groupBy { it.callId }
+        val outgoingOnlyIds = eventsByCall.filterValues { events ->
+            events.none { it.eventType == "SCREENING_DECISION" } &&
+                events.filter { it.eventType == "CALL_LOG_OBSERVATION" }.let { observations ->
+                    observations.isNotEmpty() && observations.all {
+                        DecisionTrace.details(it).systemCallType == CallLog.Calls.OUTGOING_TYPE
+                    }
+                }
+        }.keys
         val prefixDistinctNumbers = mutableMapOf<String, MutableSet<String>>()
         val confirmedOrRejectedPrefixes = mutableSetOf<String>()
 
         for (row in allTelemetry) {
+            if (row.id in outgoingOnlyIds) continue
             val norm = PhoneNormalizer.normalize(row.rawNumber, settings.userDdd)
             val isUtility = norm.isShortOrUtilityCode || norm.lineType == "TOLL_FREE_OR_SPECIAL"
             val p8 = if (isUtility) "" else norm.prefix8
@@ -612,7 +638,7 @@ internal suspend fun reprocessStoredTelemetry(
                             hitCount = maxOf(q.hitCount, nums.size, 1)
                         )
                     )
-                    QuarantinePrefixIndex.add(migrated)
+                    QuarantinePrefixIndex.add(migrated, q.expiresAt)
                 }
                 continue
             }
@@ -656,11 +682,23 @@ internal suspend fun reprocessStoredTelemetry(
             if (newCarrier != q.carrierGuess) {
                 dao.upsertQuarantine(q.copy(carrierGuess = newCarrier))
             }
-            QuarantinePrefixIndex.add(q.prefix7)
+            QuarantinePrefixIndex.add(q.prefix7, q.expiresAt)
         }
 
         // 2. Reprocessar todas as chamadas em call_telemetry respeitando a causalidade no momento da chamada
         for (row in allTelemetry) {
+            val priorEvents = eventsByCall[row.id].orEmpty()
+            if (row.id in outgoingOnlyIds) {
+                val corrected = row.copy(outcome = "OUTGOING_CALL", category = "OUTGOING",
+                    finalScore = 0, triggeredRulesJson = "[]")
+                DecisionTrace.record(dao, row.id, "REPROCESS_EVALUATION", "HISTORY_REPROCESSOR",
+                    DecisionTrace.snapshot(corrected).copy(reason = "OUTGOING_CALL_LOG_CORRECTION"))
+                if (corrected != row) {
+                    dao.insertTelemetry(corrected.copy(syncStatus = "PENDING"))
+                    updatedCount++
+                }
+                continue
+            }
             val norm = PhoneNormalizer.normalize(row.rawNumber, settings.userDdd)
             val isUtility = norm.isShortOrUtilityCode || norm.lineType == "TOLL_FREE_OR_SPECIAL"
             val effectiveNormalized = norm.normalizedNumber.ifEmpty { row.normalizedNumber }
@@ -725,7 +763,7 @@ internal suspend fun reprocessStoredTelemetry(
                 json.decodeFromString<List<TriggeredRuleDto>>(row.triggeredRulesJson)
             }.getOrDefault(emptyList())
 
-            val arrivalEvent = dao.getDecisionEvents(row.id)
+            val arrivalEvent = priorEvents
                 .firstOrNull { it.eventType == "SCREENING_DECISION" }
                 ?.let { DecisionTrace.details(it) }
             val arrivalRules = arrivalEvent?.rules.orEmpty()
@@ -791,6 +829,8 @@ internal suspend fun reprocessStoredTelemetry(
                     cspExtracted = norm.cspExtracted,
                     isShortOrUtilityCode = norm.isShortOrUtilityCode,
                     unverifiedWeight = if (!isRealTimeCall) 15 else (enabledRules["STIR_SHAKEN_UNVERIFIED"]?.weight ?: 20),
+                    ruleWeights = allRules.associate { it.ruleId to it.weight },
+                    disabledRuleIds = allRules.filterNot { it.enabled }.map { it.ruleId }.toSet(),
                     extraRegexRules = compiledRules
                 ),
                 rejectedInDialer = wasSystemBlocked,
@@ -801,7 +841,7 @@ internal suspend fun reprocessStoredTelemetry(
             )
             val triggered = decision.triggeredRules
             val score = decision.finalScore
-            val isSpam = score >= settings.blockThresholdScore || decision.triggeredRules.any { it.rule_id == "PING_CALL_PENALTY" }
+            val isSpam = score >= settings.blockThresholdScore
             val learnedFromRejection = triggered.any { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }
             val newOutcome = decision.outcome
             val newCategory = decision.category
@@ -820,7 +860,7 @@ internal suspend fun reprocessStoredTelemetry(
                 triggeredRulesJson = newRulesJson
             )
 
-            DecisionTrace.record(dao, row.id, "REPROCESS_EVALUATION", "HISTORY_REPROCESSOR", DecisionTrace.configuredSnapshot(updatedRow, enabledRules.values).copy(reason = "REASSESSMENT_WITH_CURRENT_RULES; cluster_scope=ALL_STORED_HISTORY"))
+            DecisionTrace.record(dao, row.id, "REPROCESS_EVALUATION", "HISTORY_REPROCESSOR", DecisionTrace.configuredSnapshot(updatedRow, allRules).copy(reason = "REASSESSMENT_WITH_CURRENT_RULES; cluster_scope=ALL_STORED_HISTORY"))
             if (updatedRow != row) {
                 dao.insertTelemetry(updatedRow.copy(syncStatus = "PENDING"))
                 updatedCount++
@@ -862,7 +902,7 @@ internal suspend fun reprocessStoredTelemetry(
                             expiresAt = newExpiresAt
                         )
                     )
-                    QuarantinePrefixIndex.add(qTargetPrefix)
+                    QuarantinePrefixIndex.add(qTargetPrefix, newExpiresAt)
                     DecisionTrace.record(dao, row.id, "QUARANTINE_UPDATED", "HISTORY_REPROCESSOR",
                         DecisionDetails(prefix = qTargetPrefix, reason = "$desiredReason; expiresAt=$newExpiresAt"))
                 }

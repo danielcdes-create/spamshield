@@ -275,7 +275,7 @@ class NtSpamshield2026001Test {
             outcome = "ALLOWED_LOW_SCORE"
         ).copy(syncStatus = "PENDING")
         val updated = UserFeedbackAudit.applyConfirmedSpam(initial)
-        assertTrue(TelemetrySyncScheduler.enqueuedCount >= 1)
+        assertEquals(0, TelemetrySyncScheduler.enqueuedCount) // Scheduling follows the committed row/outbox transaction.
         assertEquals(140, updated.finalScore)
         assertEquals("USER_BLOCKED_RETROACTIVE", updated.outcome)
         assertEquals("USER_REPORTED_SPAM", updated.category)
@@ -466,7 +466,7 @@ class NtSpamshield2026001Test {
         assertFalse(service.contains("Pattern.compile"))
         assertFalse(service.contains("SELECT"))
 
-        QuarantinePrefixIndex.clear()
+        QuarantinePrefixIndex.replaceAll(emptyList())
         QuarantinePrefixIndex.add("31410112")
         val dao = object : FakeSpamShieldDao() {
             override suspend fun getActiveQuarantineForPrefix(prefix8: String, prefix7: String, now: Long): PrefixQuarantineEntity? {

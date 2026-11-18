@@ -22,6 +22,8 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -62,6 +64,7 @@ fun SettingsScreen(
     tailscaleStatus: TailscaleStatusUi,
     apkUpdateState: ApkUpdateUiState,
     onToggleShadowMode: (Boolean) -> Unit,
+    onToggleRemoteSync: (Boolean) -> Unit,
     onSyncNow: () -> Unit,
     onImportCallHistory: () -> Unit,
     onSyncAnatelProviders: () -> Unit,
@@ -88,6 +91,20 @@ fun SettingsScreen(
         mutableFloatStateOf(settings.blockThresholdScore.toFloat())
     }
     var exportMessage by remember { mutableStateOf("") }
+    var showRemoteConsent by remember { mutableStateOf(false) }
+
+    if (showRemoteConsent) {
+        AlertDialog(
+            onDismissRequest = { showRemoteConsent = false },
+            title = { Text("Enviar telemetria ao seu servidor?") },
+            text = { Text("Ao ativar, o SpamShield envia números de telefone, horários, duração, classificação, regras e eventos das chamadas armazenadas para ${settings.tailscaleServerUrl}, inclusive em segundo plano. Históricos importados também entram nesse envio. A lista de contatos, nomes da agenda, SMS, fotos e áudio não são enviados. O servidor mantém a cópia recebida; desativar interrompe novos envios e não apaga dados já sincronizados. Ative apenas se reconhecer e controlar esse servidor.") },
+            confirmButton = { TextButton(onClick = {
+                showRemoteConsent = false
+                onToggleRemoteSync(true)
+            }) { Text("Concordo, ativar envio") } },
+            dismissButton = { TextButton(onClick = { showRemoteConsent = false }) { Text("Manter no aparelho") } }
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -101,6 +118,21 @@ fun SettingsScreen(
             fontWeight = FontWeight.Bold,
             fontSize = 18.sp
         )
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Privacidade e envio de dados", fontWeight = FontWeight.Bold)
+                Text(if (settings.remoteSyncEnabled) "Sincronização autorizada com ${settings.tailscaleServerUrl}." else "Uso local: o envio de telemetria está desativado.")
+                Text("Contatos ajudam a permitir pessoas conhecidas. O histórico registra tipo e duração das ligações. SMS, fotos e microfone não são acessados. Exportações locais contêm números; compartilhe apenas com quem você escolher.", style = MaterialTheme.typography.bodySmall)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("Enviar chamadas ao servidor", modifier = Modifier.weight(1f))
+                    Switch(checked = settings.remoteSyncEnabled, onCheckedChange = { enabled ->
+                        if (enabled) showRemoteConsent = true else onToggleRemoteSync(false)
+                    })
+                }
+                Text("Desativar não apaga cópias já recebidas pelo servidor. Alterar o endereço do servidor exige nova autorização.", style = MaterialTheme.typography.bodySmall)
+            }
+        }
 
         // 1. Operações de Sincronização, Histórico, Provedores Anatel e Modo Sombra (Movido da capa)
         Card(
@@ -136,7 +168,7 @@ fun SettingsScreen(
                             text = if (settings.shadowModeEnabled) {
                                 "Ativo: deixa tocar e envia notificação de auditoria"
                             } else {
-                                "Inativo: bloqueio silencioso em < 10 ms"
+                                "Inativo: aplica o bloqueio calculado antes de permitir a chamada"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -150,7 +182,7 @@ fun SettingsScreen(
 
                 Button(
                     onClick = onSyncNow,
-                    enabled = !tailscaleStatus.isSyncing,
+                    enabled = settings.remoteSyncEnabled && !tailscaleStatus.isSyncing,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     if (tailscaleStatus.isSyncing) {
@@ -448,7 +480,8 @@ fun SettingsScreen(
                         scope.launch {
                             runCatching {
                                 val (jsonFile, csvFile) = onExportFiles()
-                                exportMessage = "Exportado com sucesso (${csvFile.length() / 1024} KB):\n• ${jsonFile.name}\n• ${csvFile.name}"
+                                val summaryFile = File(jsonFile.parentFile, "spamshield_telemetry_summary.json")
+                                exportMessage = "Exportado com sucesso (${csvFile.length() / 1024} KB):\n• ${jsonFile.name}\n• ${csvFile.name}\n• ${summaryFile.name}"
                                 val jsonUri = FileProvider.getUriForFile(
                                     context,
                                     "${context.packageName}.fileprovider",
@@ -459,13 +492,18 @@ fun SettingsScreen(
                                     "${context.packageName}.fileprovider",
                                     csvFile
                                 )
+                                val summaryUri = FileProvider.getUriForFile(
+                                    context,
+                                    "${context.packageName}.fileprovider",
+                                    summaryFile
+                                )
                                 val shareIntent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
                                     type = "*/*"
                                     putParcelableArrayListExtra(
                                         Intent.EXTRA_STREAM,
-                                        arrayListOf(jsonUri, csvUri)
+                                        arrayListOf(jsonUri, csvUri, summaryUri)
                                     )
-                                    putExtra(Intent.EXTRA_SUBJECT, "SpamShield BR - Telemetria (JSON & CSV)")
+                                    putExtra(Intent.EXTRA_SUBJECT, "SpamShield BR - Telemetria e resumo de versões")
                                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                 }
                                 context.startActivity(

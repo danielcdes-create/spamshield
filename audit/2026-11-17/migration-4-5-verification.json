@@ -1,0 +1,57 @@
+{
+  "result": "passed",
+  "sqlite_version": "3.50.4",
+  "source": "SpamShieldApp\\app\\src\\main\\java\\br\\com\\spamshield\\data\\local\\AppDatabase.kt",
+  "source_sha256": "5a0cca36442d9e18cf598b70098de50537b210a2861db796f59832a388c32fbe",
+  "migration": "4->5",
+  "sql_extracted_from_source": [
+    "CREATE TABLE IF NOT EXISTS sync_mutations (\n                    mutationId TEXT NOT NULL PRIMARY KEY, kind TEXT NOT NULL, targetId TEXT NOT NULL,\n                    payloadJson TEXT NOT NULL, createdAt INTEGER NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS index_sync_mutations_createdAt ON sync_mutations(createdAt)",
+    "CREATE TABLE IF NOT EXISTS remote_quarantine_prefixes (prefix7 TEXT NOT NULL PRIMARY KEY)",
+    "INSERT OR IGNORE INTO sync_mutations (mutationId,kind,targetId,payloadJson,createdAt) VALUES (?,?,?,?,?)"
+  ],
+  "queries_extracted_from_source": [
+    "SELECT id, userFeedback, timestamp FROM call_telemetry WHERE userFeedback != 'UNRATED'",
+    "SELECT recordedAt FROM call_decision_events WHERE callId = ? AND eventType = 'USER_FEEDBACK' ORDER BY recordedAt DESC LIMIT 1"
+  ],
+  "preserved_v4_tables": {
+    "call_telemetry": {
+      "rows": 3,
+      "sha256_before_and_after": "09e9ed911576dc224e3a633c8162f9310b247c1e918a0ef82ef1af80071cd8ae"
+    },
+    "call_decision_events": {
+      "rows": 3,
+      "sha256_before_and_after": "2532be5a6c676466e4b8b6dd50e7a9bb89e2b97c77e69a1375d38853a77d04fc"
+    },
+    "active_rules": {
+      "rows": 1,
+      "sha256_before_and_after": "7aad908db0619afe5f6be2a8063216fbf3f42288b16e547fa6f0fc4ceacd1035"
+    },
+    "prefix_quarantine": {
+      "rows": 2,
+      "sha256_before_and_after": "bc09f826f91f92cac600363b91b3845614b94bff93c15d28bc69b11faf9ee71c"
+    },
+    "outbound_grace": {
+      "rows": 1,
+      "sha256_before_and_after": "6d3f145537b69bdf4002b4e6adbee556bf2f80a031f5daeda4f81edac48ed98c"
+    },
+    "anatel_numbering_plan": {
+      "rows": 1,
+      "sha256_before_and_after": "21a8704394ec5fd3e6ba4a31d48d62d4867c8ea69186c5b77830313c48e8c1ed"
+    }
+  },
+  "queued_feedback_mutations": 2,
+  "unrated_calls_queued": 0,
+  "remote_snapshots_echoed_as_local_mutations": 0,
+  "second_run_identical": true,
+  "feedback_uses_latest_user_event_timestamp": true,
+  "known_feedback_time_source": "USER_FEEDBACK_EVENT",
+  "legacy_feedback_time_source": "LEGACY_CALL_TIME_LOWER_BOUND",
+  "legacy_call_time_is_only_an_ordering_lower_bound": true,
+  "legacy_feedback_time_is_not_presented_as_observed": true,
+  "original_call_version_and_arrival_event_unchanged": true,
+  "migration_fabricated_original_or_feedback_events": 0,
+  "integrity_check": "ok",
+  "network_access": false,
+  "limitation": "Actual SQLite SQL executed; the Kotlin feedback loop was reproduced against synthetic fixtures. Android Room migration runner was not executed."
+}

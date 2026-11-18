@@ -85,8 +85,7 @@ pub fn parse_anatel_csv_parallel(csv_data: &str) -> Vec<AnatelNumberingPlanDoc> 
         .into_par_iter()
         .filter_map(|row| {
             let ddd_digits: String = row.ddd.chars().filter(|c| c.is_ascii_digit()).collect();
-            let prefix_digits: String =
-                row.prefix.chars().filter(|c| c.is_ascii_digit()).collect();
+            let prefix_digits: String = row.prefix.chars().filter(|c| c.is_ascii_digit()).collect();
             if ddd_digits.len() != 2 || prefix_digits.is_empty() {
                 return None;
             }
@@ -130,7 +129,10 @@ pub fn parse_anatel_csv_parallel(csv_data: &str) -> Vec<AnatelNumberingPlanDoc> 
                         || prefix_7.contains("3003")
                         || prefix_7.contains("4004")));
 
-            let canonical_carrier = if line_type == LineType::FIXED_OR_VOIP || line_type == LineType::TOLL_FREE_OR_SPECIAL || is_pabx {
+            let canonical_carrier = if line_type == LineType::FIXED_OR_VOIP
+                || line_type == LineType::TOLL_FREE_OR_SPECIAL
+                || is_pabx
+            {
                 "VoIP".to_string()
             } else {
                 let c_up = row.carrier.trim().to_uppercase();
@@ -269,7 +271,7 @@ pub async fn sync_all_providers(
     for (p7, ddd, carrier, weight, reason) in known_clusters {
         let res = q_coll
             .update_one(
-                doc! { "prefix_7": p7 },
+                doc! { "prefix_7": p7, "deleted": { "$ne": true } },
                 doc! {
                     "$set": {
                         "ddd": ddd,

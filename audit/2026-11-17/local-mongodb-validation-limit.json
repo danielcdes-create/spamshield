@@ -1,0 +1,20 @@
+{
+  "mongodb_integration_result": "not_run",
+  "planned_endpoint": "mongodb://127.0.0.1:27028",
+  "docker_context": "desktop-linux",
+  "docker_endpoint": "npipe:////./pipe/dockerDesktopLinuxEngine",
+  "initial_state": "daemon inactive; local named pipe missing",
+  "startup_attempt": "Started the already installed Docker Desktop executable hidden; no software installed",
+  "observed_failure": "Error response from daemon: Docker Desktop is unable to start",
+  "containers_created": 0,
+  "production_accessed": false,
+  "dotenv_loaded": false,
+  "existing_mongodb_tests_executed": false,
+  "cleanup": "Stopped only the Docker processes started by this attempt and their Docker child processes",
+  "stopped_process_ids": [2824, 12888, 29208, 3924, 26856, 25768, 29612, 10740, 20352, 7388, 13164],
+  "available_isolated_test": "cargo test --locked local_mongo_atomic_journal_and_quarantine_regressions -- --ignored",
+  "available_test_safety": "The new ignored test hardcodes 127.0.0.1:27028 and a generated spamshield_review_*_test database, without loading .env",
+  "sqlite_fallback_result": "passed",
+  "sqlite_evidence": "audit/2026-11-17/migration-4-5-verification.json",
+  "sqlite_limit": "Executed migration SQL extracted from AppDatabase against synthetic SQLite fixtures; the Android Room migration runner was not executed"
+}

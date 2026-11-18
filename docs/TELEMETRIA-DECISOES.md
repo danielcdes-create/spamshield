@@ -1,4 +1,21 @@
-# Telemetria de decisões — v1.3.1 / v1.3.2 (Build 15–16)
+# Telemetria de decisões — v1.3.1 a v1.3.3 (Build 15–17)
+
+## Versões explícitas na exportação — 1.3.3
+
+O JSON mantém o array de chamadas e os campos anteriores. Cada linha acrescenta `provenance` e `exportMetadata`; `spamshield_telemetry_summary.json` acompanha JSON/CSV no compartilhamento e também representa exportações vazias.
+
+- `provenance.originalDecision.appVersion`: versão registrada no evento `SCREENING_DECISION` do serviço real. Sem esse evento, `originalVersionStatus=ORIGINAL_VERSION_UNKNOWN`; não se usa a versão do reprocessamento ou do exportador como substituta.
+- `provenance.currentClassification.appVersion`: versão do último snapshot de avaliação que corresponde à classificação atual. Se a correspondência não for demonstrável, o status é `CURRENT_CLASSIFICATION_VERSION_UNKNOWN`.
+- `provenance.eventAppVersions`: versões representadas no diário daquela chamada.
+- `exportMetadata.exporterVersionName/exporterVersionCode`: app que gerou o arquivo, sem atribuição dessa versão a chamadas antigas. `exportedAt`, `exportId` e as semânticas dos horários acompanham o arquivo.
+- O resumo apresenta, por versão, contagens e período das chamadas com decisão original, além de contagens e período dos eventos gravados. Esses dois períodos permanecem distintos.
+- CSV expõe os mesmos estados e versões em colunas; a tela de auditoria separa horário da chamada e horário de registro de cada evento.
+
+Uma chamada de novembro decidida pela 1.3.2, reavaliada pela 1.3.3 e exportada pela 1.3.3 mantém esses três papéis separados. O horário exato de instalação não é inferido da primeira atividade de uma versão.
+
+Eventos novos usam `details.schemaVersion=2`, `engineRevision=decision-journal-v2` e `appVersionName/appVersionCode`. Eventos antigos mantêm seu schema e seus campos originais; a decodificação não injeta a versão atual nos eventos antigos. Avaliações idênticas em versões ou configurações diferentes são preservadas como etapas distintas.
+
+Room `4→5` acrescenta a outbox e a origem das quarentenas remotas. A sincronização exige consentimento explícito; enquanto desativada, os dados e as mutações ficam no aparelho. O backend atualizado mescla eventos por ID atomicamente e só confirma o conjunto após persistência. Consulte [release 1.3.3](RELEASE-1.3.3.md).
 
 Uma recusa no discador enquanto a chamada toca não é um bloqueio preventivo do SpamShield. O score e o `outcome` reprocessados descrevem a classificação atual; não comprovam a resposta enviada na chegada. A implementação acrescenta um diário de eventos separado para preservar essa distinção.
 
@@ -37,7 +54,7 @@ A análise da telemetria real exportada do dispositivo (`v1.3.1` / Build `15`) l
    - Chamadas que possuem evento `SCREENING_DECISION` preservam no reprocessamento o estado de quarentena (`quarantineMatch`: `EXACT8`, `BROAD7` ou `NONE`) e a contagem de vizinhança (`distinctNumbers24h`) observados no instante real de chegada, evitando que uma quarentena ou rajada futura adicione retroativamente `PREFIX_QUARANTINE_HIT` ou `PREFIX_NEIGHBORHOOD_BURST` a chamadas anteriores.
    - Regras contextuais de vizinhança disparadas na chegada (`PREFIX6_NEIGHBOR_WARNING` `+15` e `PREFIX5_CHIPEIRA_FARM` `+35`) são preservadas em `HistoryCallScorer.score` a partir do registro/evento `SCREENING_DECISION`.
 4. **Normalização de Cabeçalhos `055` / `0055` e Deduplicação de Códigos Curtos / Legados:**
-   - `PhoneNormalizer.parseGeographic` reconhece e descasca prefixos de país discados como tronco nacional (`055` e `0055`) antes de DDDs válidos (ex.: `05531973350693` $\rightarrow$ `+5531973350693`, `ddd = "31"`, `prefix7 = "31973350"`, `cspExtracted = "055"`, `carrierGuess = "Claro"`), migrando quarentenas legadas `055...` para o prefixo canônico de 8 dígitos.
+   - `PhoneNormalizer.parseGeographic` reconhece e descasca prefixos de país discados como tronco nacional (`055` e `0055`) antes de DDDs válidos (exemplo sintético: `05531973350000` $\rightarrow$ `+5531973350000`, `ddd = "31"`, `prefix7 = "31973350"`, `cspExtracted = "055"`, `carrierGuess = "Claro"`), migrando quarentenas legadas `055...` para o prefixo canônico de 8 dígitos.
    - `deduplicateStoredTelemetryRows` unifica registros duplicados de mesmo `(normalizedNumber, timestamp)` (incluindo códigos de utilidade como `10315` e `005` com `prefix7 = ""`) e absorve registros órfãos `calllog-...` dentro da janela de 15s, reatribuindo seus `decisionEvents` ao registro canônico antes da remoção.
 
 ## O que o painel pode afirmar

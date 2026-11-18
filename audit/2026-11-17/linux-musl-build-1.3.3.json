@@ -1,0 +1,12 @@
+{
+  "artifact": "<WORKSPACE>\\spamshield-server\\target\\x86_64-unknown-linux-musl\\release\\spamshield-server",
+  "target": "x86_64-unknown-linux-musl",
+  "format": "ELF64 little endian",
+  "machine": "x86_64",
+  "dynamic_interpreter": null,
+  "dynamic_needed_entries": 0,
+  "size_bytes": 13844536,
+  "sha256": "17a56975a0ec33fc08820bfa1b7eee397ce51ac6c61af84df1065f4ff3fb9b0d",
+  "build_command": "cargo zigbuild --release --locked --target x86_64-unknown-linux-musl",
+  "status": "success"
+}

@@ -1,0 +1,7 @@
+{
+  "query_extracted_from_source": "SELECT COUNT(*) FROM outbound_grace\n        WHERE (normalizedNumber = :normalizedNumber OR (:prefix6 != '' AND prefix6 = :prefix6))\n          AND expiresAt > :now",
+  "unrelated_empty_prefix_hits": 0,
+  "same_number_hits": 1,
+  "result": "passed",
+  "network_access": false
+}

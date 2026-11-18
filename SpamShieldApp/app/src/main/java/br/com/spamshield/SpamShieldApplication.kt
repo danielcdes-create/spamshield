@@ -22,6 +22,7 @@ class SpamShieldApplication : Application(), Configuration.Provider {
     override fun onCreate() {
         super.onCreate()
         TelemetrySyncScheduler.install { SyncWorker.enqueueOneTimeSync(this) }
-        SyncWorker.schedulePeriodicSync(this)
+        // Existing work is gated by persisted consent in SyncRepository. New periodic work
+        // is scheduled only when the user explicitly enables remote synchronization.
     }
 }

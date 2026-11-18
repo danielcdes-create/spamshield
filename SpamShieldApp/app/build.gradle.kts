@@ -15,14 +15,27 @@ android {
         applicationId = "br.com.spamshield"
         minSdk = 29
         targetSdk = 35
-        versionCode = 16
-        versionName = "1.3.2"
+        versionCode = 17
+        versionName = "1.3.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        val keystorePath = providers.environmentVariable("SPAMSHIELD_KEYSTORE_PATH").orNull
+        if (!keystorePath.isNullOrBlank()) {
+            create("distribution") {
+                storeFile = file(keystorePath)
+                storePassword = providers.environmentVariable("SPAMSHIELD_KEYSTORE_PASSWORD").get()
+                keyAlias = providers.environmentVariable("SPAMSHIELD_KEY_ALIAS").get()
+                keyPassword = providers.environmentVariable("SPAMSHIELD_KEY_PASSWORD").get()
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.findByName("distribution")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

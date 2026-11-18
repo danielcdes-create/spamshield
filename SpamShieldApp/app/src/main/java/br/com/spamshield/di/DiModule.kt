@@ -60,11 +60,11 @@ object DatabaseModule {
                             dao.insertQuarantines(AppDatabase.initialQuarantineSeed(now))
                             dao.insertAnatelPrefixes(AppDatabase.initialAnatelSeed(now))
                         }
-                        QuarantinePrefixIndex.replaceAll(dao.getAllQuarantines().map { it.prefix7 })
+                        QuarantinePrefixIndex.refreshActive { dao.getAllQuarantines() }
                     }
                 }
             })
-            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4)
+            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, AppDatabase.MIGRATION_4_5)
             .build()
     }
 

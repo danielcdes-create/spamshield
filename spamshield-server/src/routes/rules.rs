@@ -1,4 +1,5 @@
 use super::AppState;
+use crate::db::AppDatabase;
 use crate::db::{parse_active_rule, parse_anatel_doc, parse_prefix_quarantine};
 use crate::models::{
     ActiveRuleDoc, AnatelNumberingPlanDoc, PrefixQuarantineDoc, SyncPayloadQuery,
@@ -10,9 +11,10 @@ use axum::{
     Json,
 };
 use bson::{doc, Bson, DateTime as BsonDateTime, Document};
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use futures::TryStreamExt;
 use mongodb::options::{FindOptions, UpdateOptions};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 /// GET /api/v1/sync/payload?ddd=31&since_timestamp=1700000000
@@ -25,7 +27,7 @@ pub async fn get_sync_payload(
     // 1. Active rules (enabled: true) sorted by priority ascending
     let rules_cursor = db
         .active_rules()
-        .find(doc! { "enabled": true })
+        .find(doc! {})
         .with_options(FindOptions::builder().sort(doc! { "priority": 1 }).build())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -41,7 +43,7 @@ pub async fn get_sync_payload(
     let now_bson = BsonDateTime::now();
     let quarantine_cursor = db
         .prefix_quarantine()
-        .find(doc! { "expires_at": { "$gt": now_bson } })
+        .find(doc! { "expires_at": { "$gt": now_bson }, "deleted": { "$ne": true } })
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -52,6 +54,20 @@ pub async fn get_sync_payload(
     let prefix_quarantine: Vec<PrefixQuarantineDoc> = quarantine_docs
         .iter()
         .filter_map(parse_prefix_quarantine)
+        .collect();
+
+    let deleted_docs: Vec<Document> = db
+        .prefix_quarantine()
+        .find(doc! { "deleted": true })
+        .projection(doc! { "prefix_7": 1 })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .try_collect()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let quarantine_deleted_prefixes = deleted_docs
+        .iter()
+        .filter_map(|d| d.get_str("prefix_7").ok().map(str::to_string))
         .collect();
 
     // 3. Anatel numbering plan: return user's DDD + all corporate PABX/VoIP ranges across Brazil
@@ -88,6 +104,8 @@ pub async fn get_sync_payload(
         anatel_docs.iter().filter_map(parse_anatel_doc).collect();
 
     Ok(Json(SyncPayloadResponse {
+        quarantine_snapshot_complete: true,
+        quarantine_deleted_prefixes,
         active_rules,
         prefix_quarantine,
         anatel_numbering_plan,
@@ -128,82 +146,142 @@ pub async fn upsert_active_rule(
     Ok(Json(rule))
 }
 
-/// POST /api/v1/quarantine
+#[derive(Debug, Default, Deserialize)]
+pub struct MutationQuery {
+    pub recorded_at: Option<i64>,
+}
+
+pub(crate) fn duplicate_key(error: &mongodb::error::Error) -> bool {
+    match error.kind.as_ref() {
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(e)) => {
+            e.code == 11000
+        }
+        mongodb::error::ErrorKind::Command(e) => e.code == 11000,
+        _ => false,
+    }
+}
+
+/// Timestamp filter and deletion live in the same document, so stale uploads cannot resurrect it.
+pub(crate) fn quarantine_revision_filter(prefix: &str, recorded_at: i64) -> Document {
+    doc! { "prefix_7": prefix, "$or": [
+        { "mutation_at": { "$lt": recorded_at } },
+        { "deleted": { "$ne": true }, "mutation_at": { "$lte": recorded_at } },
+        { "mutation_at": { "$exists": false } }
+    ] }
+}
+
+pub async fn store_quarantine(
+    db: &AppDatabase,
+    q: &PrefixQuarantineDoc,
+    recorded_at: i64,
+) -> Result<(), mongodb::error::Error> {
+    if q.expires_at <= Utc::now() || q.prefix_7.is_empty() {
+        return Ok(());
+    }
+    let expiry = BsonDateTime::from_chrono(q.expires_at);
+    let first = BsonDateTime::from_chrono(q.first_seen_at);
+    let last = BsonDateTime::from_chrono(q.last_seen_at);
+    let update = vec![doc! { "$set": {
+        "prefix_7": { "$literal": &q.prefix_7 },
+        "ddd": { "$literal": &q.ddd }, "carrier_guess": { "$literal": bson::to_bson(&q.carrier_guess).unwrap_or(Bson::Null) },
+        "reason": { "$literal": &q.reason }, "penalty_weight": q.penalty_weight,
+        "first_seen_at": { "$ifNull": ["$first_seen_at", first] },
+        "last_seen_at": { "$max": [{ "$ifNull": ["$last_seen_at", last] }, last] },
+        "expires_at": { "$cond": [{ "$eq": ["$deleted", true] }, expiry,
+            { "$max": [{ "$ifNull": ["$expires_at", expiry] }, expiry] }] },
+        "hit_count": { "$max": [{ "$ifNull": ["$hit_count", 0] }, q.hit_count] },
+        "distinct_numbers_seen": { "$setUnion": [{ "$ifNull": ["$distinct_numbers_seen", []] }, { "$literal": &q.distinct_numbers_seen }] },
+        "deleted": false, "mutation_at": recorded_at
+    } }];
+    match db
+        .prefix_quarantine()
+        .update_one(quarantine_revision_filter(&q.prefix_7, recorded_at), update)
+        .upsert(true)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) if duplicate_key(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 pub async fn upsert_quarantine(
     State(state): State<AppState>,
+    Query(query): Query<MutationQuery>,
     Json(q): Json<PrefixQuarantineDoc>,
 ) -> Result<Json<PrefixQuarantineDoc>, (StatusCode, String)> {
-    let db = &state.db;
-    let (filter, update) = quarantine_upsert_parts(&q);
-    db.prefix_quarantine()
-        .update_one(filter, update)
-        .with_options(UpdateOptions::builder().upsert(true).build())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
+    store_quarantine(
+        &state.db,
+        &q,
+        query
+            .recorded_at
+            .unwrap_or(q.last_seen_at.timestamp_millis()),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(q))
 }
 
-fn quarantine_upsert_parts(q: &PrefixQuarantineDoc) -> (Document, Document) {
-    let carrier_bson = match &q.carrier_guess {
-        Some(c) => Bson::String(c.clone()),
-        None => Bson::Null,
-    };
-    (
-        doc! { "prefix_7": &q.prefix_7 },
-        doc! {
-            "$set": {
-                "ddd": &q.ddd,
-                "carrier_guess": carrier_bson,
-                "hit_count": q.hit_count,
-                "penalty_weight": q.penalty_weight,
-                "reason": &q.reason,
-                "last_seen_at": BsonDateTime::from_chrono(q.last_seen_at),
-                "expires_at": BsonDateTime::from_chrono(q.expires_at),
-            },
-            "$setOnInsert": {
-                "distinct_numbers_seen": &q.distinct_numbers_seen,
-                "first_seen_at": BsonDateTime::from_chrono(q.first_seen_at),
-            }
-        },
-    )
-}
-
-/// POST /api/v1/quarantine/batch
-/// One bulk write for the whole list.
 pub async fn upsert_quarantine_batch(
     State(state): State<AppState>,
     Json(items): Json<Vec<PrefixQuarantineDoc>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let updates = items
-        .iter()
-        .map(|q| {
-            let (filter, update) = quarantine_upsert_parts(q);
-            (filter, update, true)
-        })
-        .collect();
-    let upserted = state
-        .db
-        .bulk_update_ones("prefix_quarantine", updates)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(json!({ "upserted": upserted, "received": items.len() })))
+    for q in &items {
+        store_quarantine(&state.db, q, q.last_seen_at.timestamp_millis())
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    Ok(Json(
+        json!({ "upserted": items.len(), "received": items.len() }),
+    ))
 }
 
-/// DELETE /api/v1/quarantine/:prefix7
+pub async fn remove_quarantine(
+    db: &AppDatabase,
+    prefix: &str,
+    recorded_at: i64,
+) -> Result<(), mongodb::error::Error> {
+    if prefix.is_empty() {
+        return Ok(());
+    }
+    let at = BsonDateTime::from_chrono(
+        Utc.timestamp_millis_opt(recorded_at)
+            .single()
+            .unwrap_or_else(Utc::now),
+    );
+    // Keep deletion knowledge through normal Mongo TTL cleanup. It is omitted from active snapshots.
+    let retained = BsonDateTime::from_chrono(Utc.with_ymd_and_hms(2100, 1, 1, 0, 0, 0).unwrap());
+    let filter = doc! { "prefix_7": prefix, "$or": [{ "mutation_at": { "$lte": recorded_at } }, { "mutation_at": { "$exists": false } }] };
+    let update = doc! { "$set": { "deleted": true, "mutation_at": recorded_at, "expires_at": retained,
+        "carrier_guess": Bson::Null,
+        "distinct_numbers_seen": [], "hit_count": 0_i32, "penalty_weight": 0_i32,
+        "reason": "DELETED", "first_seen_at": at, "last_seen_at": at },
+    "$setOnInsert": { "ddd": prefix.chars().take(2).collect::<String>() } };
+    match db
+        .prefix_quarantine()
+        .update_one(filter, update)
+        .upsert(true)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) if duplicate_key(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 pub async fn delete_quarantine(
     State(state): State<AppState>,
     Path(prefix7): Path<String>,
+    Query(query): Query<MutationQuery>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let db = &state.db;
-    let res = db
-        .prefix_quarantine()
-        .delete_one(doc! { "prefix_7": &prefix7 })
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(Json(json!({
-        "prefix_7": prefix7,
-        "deleted": res.deleted_count > 0
-    })))
+    remove_quarantine(
+        &state.db,
+        &prefix7,
+        query
+            .recorded_at
+            .unwrap_or_else(|| Utc::now().timestamp_millis()),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(json!({ "prefix_7": prefix7, "deleted": true })))
 }

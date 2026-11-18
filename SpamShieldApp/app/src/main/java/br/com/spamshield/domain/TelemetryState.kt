@@ -51,12 +51,14 @@ object UserFeedbackAudit {
     const val OVERRIDE_META = "Feedback manual do utilizador"
 
     fun applyConfirmedSpam(record: CallTelemetryEntity): CallTelemetryEntity {
-        val rules = decode(record.triggeredRulesJson).toMutableList()
+        val rules = decode(record.triggeredRulesJson)
+            .filterNot { it.rule_id == "USER_FALSE_POSITIVE_OVERRIDE" }.toMutableList()
         if (rules.none { it.rule_id == OVERRIDE_RULE }) {
             rules.add(TriggeredRuleDto(OVERRIDE_RULE, 100, OVERRIDE_META))
         }
         val score = max(0, rules.sumOf { it.weight })
-        val outcome = if (record.outcome == "ALLOWED_LOW_SCORE") {
+        val outcome = if (record.outcome == "ALLOWED_LOW_SCORE" ||
+            (record.outcome == "ALLOWED_CONTACT" && record.userFeedback == "FALSE_POSITIVE")) {
             "USER_BLOCKED_RETROACTIVE"
         } else {
             record.outcome
@@ -69,7 +71,6 @@ object UserFeedbackAudit {
             userFeedback = "CONFIRMED_SPAM",
             syncStatus = "PENDING"
         )
-        TelemetrySyncScheduler.enqueueImmediateSync()
         return updated
     }
 

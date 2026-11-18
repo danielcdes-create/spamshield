@@ -11,10 +11,53 @@ import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.CallDecisionEventEntity
 import br.com.spamshield.data.local.entity.OutboundGraceEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
+import br.com.spamshield.data.local.entity.SyncMutationEntity
+import br.com.spamshield.data.local.entity.RemoteQuarantinePrefixEntity
 import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.util.UUID
 
 @Dao
 interface SpamShieldDao {
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun enqueueSyncMutation(mutation: SyncMutationEntity)
+
+    @Query("SELECT * FROM sync_mutations ORDER BY rowid")
+    suspend fun getSyncMutations(): List<SyncMutationEntity>
+
+    @Query("DELETE FROM sync_mutations WHERE mutationId = :mutationId")
+    suspend fun acknowledgeSyncMutation(mutationId: String)
+
+    @Transaction
+    suspend fun persistFeedbackUpdate(row: CallTelemetryEntity, mutation: SyncMutationEntity) {
+        insertTelemetry(row)
+        enqueueSyncMutation(mutation)
+    }
+
+    @Transaction
+    suspend fun persistRuleUpdate(rule: ActiveRuleEntity, mutation: SyncMutationEntity) {
+        upsertRule(rule)
+        enqueueSyncMutation(mutation)
+    }
+
+    @Transaction
+    suspend fun applyRemoteRules(items: List<ActiveRuleEntity>) {
+        insertRules(items)
+        getSyncMutations().filter { it.kind == "RULE_UPSERT" }.forEach {
+            upsertRule(Json.decodeFromString<ActiveRuleEntity>(it.payloadJson))
+        }
+    }
+
+    @Query("SELECT prefix7 FROM remote_quarantine_prefixes")
+    suspend fun getRemoteQuarantinePrefixes(): List<String>
+
+    @Query("DELETE FROM remote_quarantine_prefixes")
+    suspend fun clearRemoteQuarantinePrefixes()
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertRemoteQuarantinePrefixes(items: List<RemoteQuarantinePrefixEntity>)
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertDecisionEvent(event: CallDecisionEventEntity)
@@ -64,21 +107,21 @@ interface SpamShieldDao {
 
     @Query(
         """
-        UPDATE call_telemetry 
+        UPDATE call_telemetry
         SET userFeedback = :feedback,
-            outcome = CASE 
+            outcome = CASE
                 WHEN :feedback = 'FALSE_POSITIVE' THEN 'ALLOWED_CONTACT'
                 ELSE outcome
             END,
-            category = CASE 
+            category = CASE
                 WHEN :feedback = 'FALSE_POSITIVE' THEN 'LEGITIMATE'
                 ELSE category
             END,
-            finalScore = CASE 
+            finalScore = CASE
                 WHEN :feedback = 'FALSE_POSITIVE' THEN 0
                 ELSE finalScore
             END,
-            syncStatus = 'PENDING' 
+            syncStatus = 'PENDING'
         WHERE id = :id
         """
     )
@@ -117,10 +160,10 @@ interface SpamShieldDao {
 
     @Query(
         """
-        UPDATE call_telemetry 
-        SET callDurationSec = :durationSec, 
-            category = :category, 
-            syncStatus = 'PENDING' 
+        UPDATE call_telemetry
+        SET callDurationSec = :durationSec,
+            category = :category,
+            syncStatus = 'PENDING'
         WHERE id = :id
         """
     )
@@ -128,9 +171,9 @@ interface SpamShieldDao {
 
     @Query(
         """
-        SELECT * FROM call_telemetry 
-        WHERE normalizedNumber = :normalizedNumber 
-        ORDER BY timestamp DESC 
+        SELECT * FROM call_telemetry
+        WHERE normalizedNumber = :normalizedNumber
+        ORDER BY timestamp DESC
         LIMIT 1
         """
     )
@@ -138,8 +181,8 @@ interface SpamShieldDao {
 
     @Query(
         """
-        SELECT COUNT(*) FROM call_telemetry 
-        WHERE normalizedNumber = :normalizedNumber 
+        SELECT COUNT(*) FROM call_telemetry
+        WHERE normalizedNumber = :normalizedNumber
           AND timestamp >= :sinceTimestamp
         """
     )
@@ -147,8 +190,8 @@ interface SpamShieldDao {
 
     @Query(
         """
-        SELECT COUNT(DISTINCT normalizedNumber) FROM call_telemetry 
-        WHERE prefix7 = :prefix7 
+        SELECT COUNT(DISTINCT normalizedNumber) FROM call_telemetry
+        WHERE prefix7 = :prefix7
           AND timestamp >= :sinceTimestamp
         """
     )
@@ -156,8 +199,8 @@ interface SpamShieldDao {
 
     @Query(
         """
-        SELECT COUNT(DISTINCT normalizedNumber) FROM call_telemetry 
-        WHERE prefix7 LIKE :prefix6 || '%' 
+        SELECT COUNT(DISTINCT normalizedNumber) FROM call_telemetry
+        WHERE prefix7 LIKE :prefix6 || '%'
           AND timestamp >= :sinceTimestamp
         """
     )
@@ -191,10 +234,10 @@ interface SpamShieldDao {
 
     @Query(
         """
-        SELECT * FROM prefix_quarantine 
-        WHERE (prefix7 = :prefix8 OR prefix7 = :prefix7) 
-          AND expiresAt > :now 
-        ORDER BY LENGTH(prefix7) DESC 
+        SELECT * FROM prefix_quarantine
+        WHERE (prefix7 = :prefix8 OR prefix7 = :prefix7)
+          AND expiresAt > :now
+        ORDER BY LENGTH(prefix7) DESC
         LIMIT 1
         """
     )
@@ -228,10 +271,44 @@ interface SpamShieldDao {
     suspend fun insertQuarantines(items: List<PrefixQuarantineEntity>)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertQuarantine(item: PrefixQuarantineEntity)
+    suspend fun persistQuarantine(item: PrefixQuarantineEntity)
+
+    @Transaction
+    suspend fun upsertQuarantine(item: PrefixQuarantineEntity) {
+        persistQuarantine(item)
+        enqueueSyncMutation(SyncMutationEntity(UUID.randomUUID().toString(), "QUARANTINE_UPSERT",
+            item.prefix7, Json.encodeToString(item), System.currentTimeMillis()))
+    }
 
     @Query("DELETE FROM prefix_quarantine WHERE prefix7 = :prefix7")
-    suspend fun deleteQuarantineByPrefix(prefix7: String)
+    suspend fun persistQuarantineDeletion(prefix7: String)
+
+    @Transaction
+    suspend fun deleteQuarantineByPrefix(prefix7: String) {
+        persistQuarantineDeletion(prefix7)
+        enqueueSyncMutation(SyncMutationEntity(UUID.randomUUID().toString(), "QUARANTINE_DELETE",
+            prefix7, "", System.currentTimeMillis()))
+    }
+
+    @Transaction
+    suspend fun applyRemoteQuarantines(items: List<PrefixQuarantineEntity>, deletedPrefixes: List<String> = emptyList()) {
+        // A change arriving during the HTTP request must survive the remote snapshot.
+        val pending = getSyncMutations()
+        val received = items.map { it.prefix7 }.toSet()
+        // Legacy prefixes have no origin information. Retain them until expiry or explicit deletion.
+        for (prefix in getRemoteQuarantinePrefixes().filter { it !in received } + deletedPrefixes) {
+            persistQuarantineDeletion(prefix)
+        }
+        items.forEach { persistQuarantine(it) }
+        clearRemoteQuarantinePrefixes()
+        insertRemoteQuarantinePrefixes(received.map { RemoteQuarantinePrefixEntity(it) })
+        for (mutation in pending) {
+            when (mutation.kind) {
+                "QUARANTINE_UPSERT" -> persistQuarantine(Json.decodeFromString<PrefixQuarantineEntity>(mutation.payloadJson))
+                "QUARANTINE_DELETE" -> persistQuarantineDeletion(mutation.targetId)
+            }
+        }
+    }
 
     @Query("DELETE FROM prefix_quarantine WHERE expiresAt <= :now")
     suspend fun purgeExpiredQuarantines(now: Long)
@@ -245,8 +322,8 @@ interface SpamShieldDao {
 
     @Query(
         """
-        SELECT COUNT(*) FROM outbound_grace 
-        WHERE (normalizedNumber = :normalizedNumber OR prefix6 = :prefix6) 
+        SELECT COUNT(*) FROM outbound_grace
+        WHERE (normalizedNumber = :normalizedNumber OR (:prefix6 != '' AND prefix6 = :prefix6))
           AND expiresAt > :now
         """
     )

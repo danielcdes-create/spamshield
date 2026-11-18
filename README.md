@@ -1,6 +1,15 @@
-# SpamShield BR (`v1.3.2` — Build `16`)
+# SpamShield BR (`v1.3.3` — Build `17`)
 
-Ecossistema privado de defesa em borda (`< 2 ms`), telemetria vetorial auditável e inteligência contra chamadas de spam, robocall, chipeiras GSM e spoofing no Brasil (padrões Anatel RNPM / Ato nº 10.413 / STIR-SHAKEN).
+Ecossistema privado de defesa local, telemetria auditável e inteligência contra chamadas de spam, robocall, chipeiras GSM e spoofing no Brasil.
+
+### Novidades da versão `v1.3.3` (Build `17`):
+- Quarentena com validade no cache; correções de grace para códigos especiais, aprendizado abaixo do limiar, rediscagens e chamadas efetuadas.
+- Regras habilitadas/desabilitadas, pesos e expressões configuradas respeitados na triagem e no reprocessamento.
+- Room `v5`, fila persistente de alterações offline, exclusões sincronizadas e confirmação de eventos após persistência atômica no backend.
+- JSON/CSV e auditoria distinguem a versão da decisão original, da classificação atual e da exportação; resumo separado por versão. Legado sem decisão original permanece explicitamente desconhecido.
+- Envio remoto desativado até consentimento explícito; permissões explicadas antes da solicitação e importação antiga separada. Veja [release](docs/RELEASE-1.3.3.md) e [privacidade/Play Protect](docs/PRIVACIDADE-E-PLAY-PROTECT.md).
+
+Os artefatos desta revisão são candidatos locais; consulte a validação da release antes de distribuí-los. Um build novo não comprova retirada da classificação do Play Protect.
 
 ### Novidades da versão `v1.3.2` (Build `16`):
 - **Fidelidade Causal no Reprocessamento (`reprocessStoredTelemetry`):** Chamadas interceptadas em tempo real (`SCREENING_DECISION`) preservam seu estado original de quarentena (`quarantineMatch`), rajada de 24h (`distinctNumbers24h`) e alertas de vizinhança (`PREFIX6_NEIGHBOR_WARNING`, `PREFIX5_CHIPEIRA_FARM`), impedindo que quarentenas ou rajadas futuras contaminem retroativamente chamadas passadas.
@@ -31,7 +40,7 @@ Ecossistema privado de defesa em borda (`< 2 ms`), telemetria vetorial auditáve
 ## 1. Arquitetura do Sistema
 
 ### 1.1. Android Edge App (`SpamShieldApp`)
-100% Kotlin + Jetpack Compose + Material 3 + Room SQLite (WAL, schema `v4`) + Hilt + WorkManager:
+100% Kotlin + Jetpack Compose + Material 3 + Room SQLite (WAL, schema `v5`) + Hilt + WorkManager:
 
 - **Interceptação Nativa (`< 2 ms`):** `SmartCallScreeningService` (`ROLE_CALL_SCREENING`) com bloqueio silencioso antes do toque (`setDisallowCall`, `setRejectCall`, `setSkipNotification`).
 - **Quarentena Granular de 8 Dígitos (`/8` — bloco de 1.000 números):**

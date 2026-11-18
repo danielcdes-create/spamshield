@@ -1,0 +1,25 @@
+cargo fmt --all -- --check
+cargo test --locked
+   Compiling spamshield-server v0.1.0 (<WORKSPACE>\spamshield-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 07s
+     Running unittests src\main.rs (target\debug\deps\spamshield_server-648b8c8d5ab2fb32.exe)
+
+running 16 tests
+test routes::telemetry::journal_regression_tests::local_mongo_atomic_journal_and_quarantine_regressions ... ignored, Requires isolated MongoDB at 127.0.0.1:27028; never uses .env
+test routes::telemetry::journal_regression_tests::deletion_tombstones_are_never_parsed_as_active_quarantines ... ok
+test models::contract_enums::accepts_note_line_outcome_and_category_values ... ok
+test routes::telemetry::journal_regression_tests::feedback_journal_distinguishes_received_time_observed_action_and_legacy_bound ... ok
+test routes::telemetry::journal_regression_tests::acknowledges_only_the_exact_immutable_event_returned_by_atomic_write ... ok
+test routes::telemetry::journal_regression_tests::legacy_feedback_request_remains_accepted_without_operation_metadata ... ok
+test routes::telemetry::journal_regression_tests::repeated_same_id_requires_one_persisted_copy_and_preserves_new_details ... ok
+test routes::telemetry::journal_regression_tests::outgoing_direction_survives_legacy_wire_and_new_enum_bson_conversion ... ok
+test tests::test_mongodb_init_and_end_to_end_api ... ignored, Requires explicit isolated MongoDB database ending in _test
+test tests::test_apk_path_resolver_does_not_embed_user_home ... ok
+test tests::test_historical_migration_already_marked_is_not_executed_again ... ok
+test tests::test_one_false_positive_leaves_weight_unchanged_until_rate_and_approval ... ok
+test tests::test_telemetry_doc_bson_conversion_and_json_roundtrip ... ok
+test tests::test_anatel_csv_parallel_parser ... ok
+test tests::test_apk_info_from_temp_file_includes_sha256 ... ok
+test tests::test_bearer_rejects_missing_and_wrong_and_accepts_configured_key ... ok
+
+test result: ok. 14 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.49s

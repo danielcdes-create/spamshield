@@ -143,6 +143,7 @@ pub enum CallOutcome {
     ALLOWED_EMERGENCY_REPEAT,
     ALLOWED_OUTBOUND_GRACE,
     ALLOWED_LOW_SCORE,
+    OUTGOING_CALL,
     FLAGGED_POST_CALL_QUARANTINED,
     USER_BLOCKED_RETROACTIVE,
 }
@@ -156,6 +157,7 @@ impl CallOutcome {
             CallOutcome::ALLOWED_EMERGENCY_REPEAT => "ALLOWED_EMERGENCY_REPEAT",
             CallOutcome::ALLOWED_OUTBOUND_GRACE => "ALLOWED_OUTBOUND_GRACE",
             CallOutcome::ALLOWED_LOW_SCORE => "ALLOWED_LOW_SCORE",
+            CallOutcome::OUTGOING_CALL => "OUTGOING_CALL",
             CallOutcome::FLAGGED_POST_CALL_QUARANTINED => "FLAGGED_POST_CALL_QUARANTINED",
             CallOutcome::USER_BLOCKED_RETROACTIVE => "USER_BLOCKED_RETROACTIVE",
         }
@@ -221,6 +223,8 @@ pub struct CallDetails {
     pub carrier_guess: Option<String>,
     pub line_type: LineType,
     pub stir_shaken_status: StirShakenStatus,
+    #[serde(default)]
+    pub call_direction: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,6 +331,7 @@ impl CallTelemetryDoc {
                 "carrier_guess": carrier_bson,
                 "line_type": self.call_details.line_type.as_str(),
                 "stir_shaken_status": self.call_details.stir_shaken_status.as_str(),
+                "call_direction": bson::to_bson(&self.call_details.call_direction).unwrap_or(Bson::Null),
             },
             "decision_vector": {
                 "final_score": Bson::Int32(self.decision_vector.final_score),
@@ -406,6 +411,10 @@ pub struct SyncPayloadQuery {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncPayloadResponse {
+    #[serde(default)]
+    pub quarantine_snapshot_complete: bool,
+    #[serde(default)]
+    pub quarantine_deleted_prefixes: Vec<String>,
     pub active_rules: Vec<ActiveRuleDoc>,
     pub prefix_quarantine: Vec<PrefixQuarantineDoc>,
     pub anatel_numbering_plan: Vec<AnatelNumberingPlanDoc>,
@@ -415,6 +424,12 @@ pub struct SyncPayloadResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedbackPatchRequest {
     pub user_feedback: UserFeedback,
+    #[serde(default)]
+    pub mutation_id: Option<String>,
+    #[serde(default)]
+    pub recorded_at: Option<i64>,
+    #[serde(default)]
+    pub recorded_at_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -469,8 +484,10 @@ mod contract_enums {
     #[test]
     fn accepts_note_line_outcome_and_category_values() {
         let line: LineType = serde_json::from_str("\"MALFORMED_OR_SPOOFED\"").unwrap();
-        let flagged: CallOutcome = serde_json::from_str("\"FLAGGED_POST_CALL_QUARANTINED\"").unwrap();
-        let user_blocked: CallOutcome = serde_json::from_str("\"USER_BLOCKED_RETROACTIVE\"").unwrap();
+        let flagged: CallOutcome =
+            serde_json::from_str("\"FLAGGED_POST_CALL_QUARANTINED\"").unwrap();
+        let user_blocked: CallOutcome =
+            serde_json::from_str("\"USER_BLOCKED_RETROACTIVE\"").unwrap();
         let verified: CallCategory = serde_json::from_str("\"VERIFIED_UNKNOWN\"").unwrap();
         let reported: CallCategory = serde_json::from_str("\"USER_REPORTED_SPAM\"").unwrap();
         assert_eq!(line.as_str(), "MALFORMED_OR_SPOOFED");
