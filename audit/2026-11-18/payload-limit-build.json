@@ -1,0 +1,10 @@
+{
+  "source_commit": "9fde25479880903b02b27a183012be045a7c7105",
+  "target": "x86_64-unknown-linux-musl",
+  "profile": "release",
+  "locked": true,
+  "binary_size_bytes": 13863376,
+  "binary_sha256": "a6ed99bdb47f365511fe10e38f4f46ec82fc93b5ad6024a66ffaf2aeeda1c2b9",
+  "rust_tests_passed": 23,
+  "rust_integration_tests_ignored": 2
+}
