@@ -52,6 +52,8 @@ O fluxo oficial de recurso e a possibilidade de corrigir uma classificação ind
 - APK anterior local: 1.3.2/build 16, SHA-256 `c9bb354a46ee7a3fbb1077315304a967bc7c9678b0c46fc7466514a1b9ad1b9c`.
 - Certificado anterior local SHA-256: `b455a4a76390115a922871714cf0be721b9c08434b10f86cb2c4e9efa60c0aeb`, identificado como `Android Debug`. O aparelho não foi conectado para confirmar que sua instalação usa este mesmo certificado.
 - A chave privada não acompanha os artefatos. O build aceita as variáveis `SPAMSHIELD_KEYSTORE_PATH`, `SPAMSHIELD_KEYSTORE_PASSWORD`, `SPAMSHIELD_KEY_ALIAS`, `SPAMSHIELD_KEY_PASSWORD`; valores não são versionados.
-- Hash, certificado, permissões e resultado de validação do candidato 1.3.3 serão registrados em `audit/2026-11-17/release-validation.json` após a compilação.
+- Hash, certificado, permissões e resultado de validação local da 1.3.3 estão em `audit/2026-11-17/release-validation.json`. A publicação na VPS e a revogação da credencial antiga exposta estão em `audit/2026-11-17/deployment-1.3.3.json`, sem valores de credenciais.
+
+A versão 1.3.3 foi publicada em 18/11/2026. A troca do token no servidor exige atualizar o campo Bearer no app; o endereço e a nova chave estão em arquivo privado entregue ao operador, fora do repositório. Use o endereço MagicDNS informado nesse arquivo, mantenha o Tailscale conectado e autorize a sincronização somente depois de salvar os dados corretos.
 
 Referência de assinatura e compatibilidade: [assinar seu app](https://developer.android.com/studio/publish/app-signing).

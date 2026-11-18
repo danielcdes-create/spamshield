@@ -41,4 +41,16 @@ As garantias de exclusão e confirmação atômica exigem atualizar também o ba
 
 Resultados executados, hash e permissões do APK são registrados em `audit/2026-11-17/release-validation.json` e no log de build. O teste de MongoDB requer instância local isolada; não é executado contra produção. A instalação no telefone e a reavaliação pelo Play Protect são etapas distintas do build local.
 
-O APK e o backend desta tarefa são candidatos locais. Nenhum deploy ou publicação é realizado apenas pela compilação. A instalação compatível depende de o certificado no aparelho corresponder ao do APK anterior local verificado; o telefone não estava conectado para essa confirmação.
+## Publicação em 18/11/2026
+
+Implementação no commit `d8cea4e625683b839a92f8e46c341c3dde81681b`, seguida do registro operacional desta publicação. GitHub release `v1.3.3`, APK release build 17 e backend Linux publicados na VPS. O servidor apresentou saúde `ok`, MongoDB conectado e metadados 1.3.3/build 17. O download real de `/apk` foi conferido com SHA-256 `a87c4ced66bfe0e4036b8694741431e4e8535779dc881d03f434ff9491374c32`.
+
+Um lote autenticado vazio confirmou `accepted_ids=[]` e `accepted_event_ids=[]`, sem gravar chamadas sintéticas. O payload confirmou o novo contrato de snapshot/exclusões. Isso verifica a implantação e o protocolo; não substitui o teste MongoDB isolado de concorrência que permaneceu ignorado.
+
+A chave de API encontrada na documentação pública estava ativa e foi substituída. A chave antiga e a chave vazia retornam 401; a nova passou na validação autenticada. O valor novo não está no GitHub nem no APK: foi entregue ao operador em arquivo local privado. A cópia local de configuração que continha a chave exposta também foi atualizada. No app, salve o endereço MagicDNS e a chave fornecidos privadamente; depois autorize o envio em Ajustes.
+
+O container escuta apenas em `127.0.0.1:8080`, e o proxy Tailscale encaminha a porta privada 8080 para esse endereço. A porta pública deixou de responder. O endereço MagicDNS é recomendado porque já é permitido pela configuração de segurança de rede Android existente.
+
+Imagem, binário, APK e configurações anteriores foram preservados na VPS antes da troca. Evidências sem credenciais em `audit/2026-11-17/deployment-1.3.3.json`. Um rollback deve conservar a nova credencial e a restrição de porta; não reative a chave comprometida nem exponha a porta novamente.
+
+A instalação compatível depende de o certificado no aparelho corresponder ao do APK anterior local verificado. O telefone não estava conectado para essa confirmação; instalação física e reavaliação do Play Protect continuam não verificadas.

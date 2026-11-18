@@ -9,7 +9,7 @@ Ecossistema privado de defesa local, telemetria auditável e inteligência contr
 - JSON/CSV e auditoria distinguem a versão da decisão original, da classificação atual e da exportação; resumo separado por versão. Legado sem decisão original permanece explicitamente desconhecido.
 - Envio remoto desativado até consentimento explícito; permissões explicadas antes da solicitação e importação antiga separada. Veja [release](docs/RELEASE-1.3.3.md) e [privacidade/Play Protect](docs/PRIVACIDADE-E-PLAY-PROTECT.md).
 
-Os artefatos desta revisão são candidatos locais; consulte a validação da release antes de distribuí-los. Um build novo não comprova retirada da classificação do Play Protect.
+A versão 1.3.3 foi publicada no GitHub e no canal OTA da VPS em 18/11/2026, com hash do APK servido conferido. A credencial antiga exposta na documentação foi revogada; configure o app com a chave privada atual fornecida ao operador. Um build novo não comprova retirada da classificação do Play Protect.
 
 ### Novidades da versão `v1.3.2` (Build `16`):
 - **Fidelidade Causal no Reprocessamento (`reprocessStoredTelemetry`):** Chamadas interceptadas em tempo real (`SCREENING_DECISION`) preservam seu estado original de quarentena (`quarantineMatch`), rajada de 24h (`distinctNumbers24h`) e alertas de vizinhança (`PREFIX6_NEIGHBOR_WARNING`, `PREFIX5_CHIPEIRA_FARM`), impedindo que quarentenas ou rajadas futuras contaminem retroativamente chamadas passadas.
