@@ -7,7 +7,7 @@ use crate::db::AppDatabase;
 use crate::services::anatel_sync::{self, ProviderSyncSummary};
 use axum::{
     body::Body,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{header, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -18,6 +18,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
+
+/// Batches include the immutable journal, not just the latest row. Keep this route bounded
+/// without applying Axum's 2 MiB default to the app's existing 100-call batches.
+pub const TELEMETRY_BATCH_BODY_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -122,7 +126,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/providers/sync", post(sync_providers_handler))
         .route(
             "/api/v1/telemetry/batch",
-            post(telemetry::post_telemetry_batch),
+            post(telemetry::post_telemetry_batch)
+                .route_layer(middleware::from_fn(telemetry_request_result))
+                .layer(DefaultBodyLimit::max(TELEMETRY_BATCH_BODY_LIMIT)),
         )
         .route(
             "/api/v1/telemetry/:id/feedback",
@@ -161,6 +167,32 @@ pub fn create_router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
+}
+
+async fn telemetry_request_result(req: Request<Body>, next: Next) -> Response {
+    let declared_bytes = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let response = next.run(req).await;
+    let status = response.status();
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        tracing::warn!(declared_request_bytes = ?declared_bytes, http_status = status.as_u16(), max_bytes = TELEMETRY_BATCH_BODY_LIMIT,
+            "Telemetry batch rejected by request size limit");
+        return (
+            status,
+            Json(json!({
+                "error": "TELEMETRY_BATCH_TOO_LARGE",
+                "max_request_bytes": TELEMETRY_BATCH_BODY_LIMIT
+            })),
+        )
+            .into_response();
+    }
+    // Sizes and status only: never log phone numbers, journal payloads or bearer credentials.
+    tracing::info!(declared_request_bytes = ?declared_bytes, http_status = status.as_u16(),
+        "Telemetry batch request completed");
+    response
 }
 
 async fn sync_providers_handler(
@@ -208,4 +240,113 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
         "mongodb_connected": mongo_ok,
         "tailscale_ip": state.tailscale_ip
     }))
+}
+
+#[cfg(test)]
+mod telemetry_body_limit_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    use mongodb::options::ClientOptions;
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    async fn router() -> Router {
+        // Explicit local unreachable DB; an empty telemetry batch never accesses it.
+        // No .env, initialization, seed or production configuration is loaded.
+        let mut options = ClientOptions::parse("mongodb://127.0.0.1:1").await.unwrap();
+        options.server_selection_timeout = Some(Duration::from_millis(200));
+        options.connect_timeout = Some(Duration::from_millis(200));
+        let client = mongodb::Client::with_options(options).unwrap();
+        create_router(AppState {
+            db: AppDatabase {
+                client: client.clone(),
+                db: client.database("telemetry_body_limit_test"),
+            },
+            api_key: "body-limit-unit-key".into(),
+            apk_path: PathBuf::from("missing-unit.apk"),
+            apk_metadata_path: PathBuf::from("missing-unit.json"),
+            tailscale_ip: "127.0.0.1".into(),
+        })
+    }
+
+    fn request(path: &str, size: usize, authorized: bool) -> Request<Body> {
+        let mut body = vec![b' '; size];
+        body[0] = b'[';
+        body[size - 1] = b']';
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, size.to_string());
+        if authorized {
+            request = request.header(header::AUTHORIZATION, "Bearer body-limit-unit-key");
+        }
+        request.body(Body::from(body)).unwrap()
+    }
+
+    async fn assert_empty_batch_accepted(size: usize) {
+        let response = router()
+            .await
+            .oneshot(request("/api/v1/telemetry/batch", size, true))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let data = response.into_body().collect().await.unwrap().to_bytes();
+        let ack: Value = serde_json::from_slice(&data).unwrap();
+        assert_eq!(ack["accepted_ids"], json!([]));
+        assert_eq!(ack["accepted_event_ids"], json!([]));
+        assert_eq!(ack["quarantine_updates"], 0);
+    }
+
+    #[tokio::test]
+    async fn journal_batch_above_previous_two_mib_limit_is_accepted() {
+        assert_empty_batch_accepted(3 * 1024 * 1024).await;
+    }
+
+    #[tokio::test]
+    async fn journal_batch_at_configured_limit_is_accepted() {
+        assert_empty_batch_accepted(TELEMETRY_BATCH_BODY_LIMIT).await;
+    }
+
+    #[tokio::test]
+    async fn journal_batch_above_configured_limit_is_rejected_with_explicit_bound() {
+        let response = router()
+            .await
+            .oneshot(request(
+                "/api/v1/telemetry/batch",
+                TELEMETRY_BATCH_BODY_LIMIT + 1,
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let rejection: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rejection["error"], "TELEMETRY_BATCH_TOO_LARGE");
+        assert_eq!(rejection["max_request_bytes"], TELEMETRY_BATCH_BODY_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn oversized_journal_still_requires_bearer_before_body_extraction() {
+        let response = router()
+            .await
+            .oneshot(request(
+                "/api/v1/telemetry/batch",
+                TELEMETRY_BATCH_BODY_LIMIT + 1,
+                false,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn unrelated_write_routes_keep_their_default_body_limit() {
+        let response = router()
+            .await
+            .oneshot(request("/api/v1/rules", 3 * 1024 * 1024, true))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
 }

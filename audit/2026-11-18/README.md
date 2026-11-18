@@ -7,3 +7,9 @@ A regressão de abertura foi localizada no uso de preferências iniciais falsas 
 Resultados: 90 testes Android e 18 testes Rust aprovados. Duas integrações MongoDB seguem ignoradas; não foram executadas contra produção. A implantação confirma saúde e protocolo, sem gravar chamadas sintéticas na base operacional.
 
 Nenhuma telemetria pessoal, credencial ou chave privada é publicada nestes arquivos.
+
+## HTTP 413 após a atualização
+
+`payload-limit-before.json` registra a fronteira medida na VPS antes do hotfix: 2 MiB aceitos e 2 MiB + 1 byte recusados. Foram enviados somente arrays vazios com espaços, sem chamadas nem eventos. O lote que falhou no telefone não foi coletado; o teste comprova o limite do servidor.
+
+O hotfix limita somente a rota de lote de telemetria a 16 MiB, mantendo autenticação anterior à extração do corpo e os limites das outras rotas. `rust-tests-payload-limit.log` registra 23 testes aprovados e duas integrações ignoradas, incluindo cinco regressões de tamanho, autenticação e isolamento da configuração. O APK permanece na versão 1.3.4/build 18.

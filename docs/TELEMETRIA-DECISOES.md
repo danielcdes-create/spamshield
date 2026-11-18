@@ -86,6 +86,8 @@ O lote da API acrescenta `decision_events`. O servidor preserva os eventos anter
 
 Servidor antigo que não confirmar os eventos deixa o diário pendente no aparelho e mostra a necessidade de confirmação. O cliente interrompe esse envio sem entrar num ciclo infinito nem descartar os dados. Atualizar apenas o APK não basta para persistir o diário no servidor: as duas partes precisam ser atualizadas.
 
+Desde o hotfix de 18/11/2026, `POST /api/v1/telemetry/batch` aceita corpos JSON de até 16 MiB (16.777.216 bytes). O limite inclui o diário dos eventos e não é determinado somente pela quantidade de chamadas. Acima dele, o servidor retorna HTTP 413 com `error=TELEMETRY_BATCH_TOO_LARGE` e `max_request_bytes`. Esse aumento atende também à 1.3.4 instalada; não muda os limites das demais rotas. Os logs de transporte registram somente o tamanho declarado no `Content-Length`, quando fornecido, e o status HTTP; na recusa, também registram o limite.
+
 ## Limites e validação
 
 Os registros anteriores à atualização não ganham uma decisão de chegada inventada. Reconciliar o CallLog pode acrescentar observações antigas ainda disponíveis, mas não recupera respostas originalmente não registradas. O comportamento depende das informações e permissões fornecidas pelo Android/OEM. Falhas no próprio armazenamento são relatadas no log do serviço; não é possível garantir persistência quando o banco/disco está indisponível.

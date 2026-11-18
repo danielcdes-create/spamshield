@@ -1,0 +1,17 @@
+{
+  "empty_batches_only": true,
+  "results": [
+    {
+      "request_bytes": 1048577,
+      "status": 200
+    },
+    {
+      "request_bytes": 2097152,
+      "status": 200
+    },
+    {
+      "request_bytes": 2097153,
+      "status": 413
+    }
+  ]
+}
