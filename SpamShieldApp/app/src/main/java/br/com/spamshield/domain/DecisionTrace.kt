@@ -59,7 +59,8 @@ data class CallEvidence(
     val arrivalScore: Int?,
     val blockRequested: Boolean,
     val blockObserved: Boolean,
-    val dialerRejected: Boolean
+    val dialerRejected: Boolean,
+    val screeningRecorded: Boolean
 )
 
 object DecisionTrace {
@@ -86,117 +87,87 @@ object DecisionTrace {
         return snapshot(row).copy(evaluatedRules = configuration, ruleSetFingerprint = hash)
     }
 
-    suspend fun record(
-        dao: SpamShieldDao, callId: String, type: String, source: String,
-        details: DecisionDetails, at: Long = System.currentTimeMillis(), key: String? = null
-    ) {
-        val recordedDetails = details.copy(
+    private val evaluationTypes = setOf("POST_CALL_EVALUATION", "REPROCESS_EVALUATION", "HISTORY_ASSESSMENT")
+
+    private fun versioned(details: DecisionDetails) = details.copy(
             schemaVersion = 2,
             engineRevision = CURRENT_ENGINE_REVISION,
             appVersionName = BuildConfig.VERSION_NAME,
             appVersionCode = BuildConfig.VERSION_CODE
-        )
+    )
+
+    internal fun feedbackEvent(callId: String, details: DecisionDetails, at: Long, mutationId: String) =
+        buildEvent(callId, "USER_FEEDBACK", "USER", details, at, mutationId)
+
+    internal fun buildEvent(
+        callId: String, type: String, source: String, details: DecisionDetails, at: Long, key: String? = null
+    ): CallDecisionEventEntity =
+        event(callId, type, source, json.encodeToString(versioned(details)), at, key)
+
+    suspend fun record(
+        dao: SpamShieldDao, callId: String, type: String, source: String,
+        details: DecisionDetails, at: Long = System.currentTimeMillis(), key: String? = null
+    ) {
+        val recordedDetails = versioned(details)
         val encoded = json.encodeToString(recordedDetails)
-        // Repeated observations/reprocessing with unchanged evidence do not grow the journal.
         if (key == null && type != "SCREENING_DECISION" && type != "SCREENING_RESPONSE_SUBMITTED") {
             val existing = dao.getDecisionEvents(callId)
-            if (type == "QUARANTINE_UPDATED") {
-                val baseReason = details.reason?.substringBefore("; expiresAt=")
-                val alreadyRecorded = existing.any { ev ->
-                    ev.eventType == "QUARANTINE_UPDATED" &&
-                        details(ev).let { d ->
-                            d.prefix == details.prefix &&
-                                d.reason?.substringBefore("; expiresAt=") == baseReason
-                        }
+            if (type in evaluationTypes) {
+                val previous = existing.lastOrNull { it.eventType == type && it.source == source }
+                if (previous != null && sameEvaluationOutcome(details(previous), recordedDetails)) {
+                    // Keep a return to a previous result when a different source changed the projection.
+                    val latestProjection = existing.asReversed().asSequence().filter {
+                        it.eventType in evaluationTypes ||
+                            it.eventType == "SCREENING_DECISION" || it.eventType == "USER_FEEDBACK"
+                    }.map(::details).firstOrNull { it.score != null && it.outcome != null }
+                    if (latestProjection != null && sameProjection(latestProjection, recordedDetails)) return
                 }
-                if (alreadyRecorded) return
-            } else {
-                val latest = existing.lastOrNull { it.eventType == type && it.source == source }
-                if (latest != null) {
-                    if (latest.detailsJson == encoded) return
-                    if (type == "POST_CALL_EVALUATION" || type == "REPROCESS_EVALUATION" || type == "HISTORY_ASSESSMENT") {
-                        if (sameEvaluationOutcome(details(latest), recordedDetails)) return
-                    }
-                }
+            } else if (existing.lastOrNull { it.eventType == type }?.let {
+                    it.source == source && it.detailsJson == encoded
+                } == true) {
+                return
             }
         }
-        val id = key?.let { UUID.nameUUIDFromBytes("$callId|$type|$source|$it".toByteArray()).toString() }
-            ?: UUID.randomUUID().toString()
-        dao.insertDecisionEvent(CallDecisionEventEntity(
-            id, callId, at, type, source, "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", encoded
-        ))
+        dao.insertDecisionEvent(event(callId, type, source, encoded, at, key))
     }
 
-    internal fun sameEvaluationOutcome(a: DecisionDetails, b: DecisionDetails): Boolean =
+    private fun event(
+        callId: String, type: String, source: String, encoded: String, at: Long, key: String?
+    ): CallDecisionEventEntity {
+        val id = key?.let { UUID.nameUUIDFromBytes("$callId|$type|$source|$it".toByteArray()).toString() }
+            ?: UUID.randomUUID().toString()
+        return CallDecisionEventEntity(
+            id, callId, at, type, source, "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", encoded
+        )
+    }
+
+    private val ruleOrder = compareBy<TriggeredRuleDto>({ it.rule_id }, { it.weight }, { it.meta })
+
+    private fun sameProjection(a: DecisionDetails, b: DecisionDetails): Boolean =
         a.outcome == b.outcome &&
             a.score == b.score &&
             a.threshold == b.threshold &&
             a.category == b.category &&
             a.prefix == b.prefix &&
-            a.rules == b.rules &&
+            a.durationSec == b.durationSec &&
+            a.rules.sortedWith(ruleOrder) == b.rules.sortedWith(ruleOrder)
+
+    internal fun sameEvaluationOutcome(a: DecisionDetails, b: DecisionDetails): Boolean =
+        sameProjection(a, b) &&
+            a.reason == b.reason &&
+            a.distinctNumbers24h == b.distinctNumbers24h &&
+            a.quarantineMatch == b.quarantineMatch &&
             a.ruleSetFingerprint == b.ruleSetFingerprint &&
             a.engineRevision == b.engineRevision &&
             a.appVersionName == b.appVersionName &&
             a.appVersionCode == b.appVersionCode
-
-    suspend fun pruneRedundantEvents(dao: SpamShieldDao, rows: List<CallTelemetryEntity>) {
-        val rowById = rows.associateBy { it.id }
-        val allEvents = dao.getAllDecisionEvents()
-        val toDelete = mutableListOf<String>()
-
-        for ((callId, events) in allEvents.groupBy { it.callId }) {
-            val row = rowById[callId]
-            val obsEvents = events.filter { it.eventType == "CALL_LOG_OBSERVATION" }
-            val closestObsTimestamp = if (row != null && obsEvents.size > 1) {
-                obsEvents.mapNotNull { details(it).observedCallTimestamp }
-                    .minByOrNull { kotlin.math.abs(it - row.timestamp) }
-            } else {
-                null
-            }
-
-            val seenQuarantine = mutableSetOf<Pair<String?, String?>>()
-            val lastEvalByTypeSource = mutableMapOf<Triple<String, String, String>, DecisionDetails>()
-
-            for (ev in events) {
-                val d = details(ev)
-                when (ev.eventType) {
-                    "CALL_LOG_OBSERVATION" -> {
-                        val obsTs = d.observedCallTimestamp
-                        if (closestObsTimestamp != null && obsTs != null && obsTs != closestObsTimestamp) {
-                            toDelete.add(ev.eventId)
-                        }
-                    }
-                    "QUARANTINE_UPDATED" -> {
-                        val qKey = d.prefix to d.reason?.substringBefore("; expiresAt=")
-                        if (!seenQuarantine.add(qKey)) {
-                            toDelete.add(ev.eventId)
-                        }
-                    }
-                    "POST_CALL_EVALUATION", "REPROCESS_EVALUATION", "HISTORY_ASSESSMENT" -> {
-                        val tsKey = Triple(ev.eventType, ev.source, ev.appVersion)
-                        val prev = lastEvalByTypeSource[tsKey]
-                        if (prev != null && sameEvaluationOutcome(prev, d)) {
-                            toDelete.add(ev.eventId)
-                        } else {
-                            lastEvalByTypeSource[tsKey] = d
-                        }
-                    }
-                }
-            }
-        }
-
-        if (toDelete.isNotEmpty()) {
-            toDelete.chunked(500).forEach { chunk ->
-                dao.deleteDecisionEvents(chunk)
-            }
-        }
-    }
 
     fun eventLabel(type: String): String = when (type) {
         "SCREENING_DECISION" -> "Decisão de chegada"
         "SCREENING_RESPONSE_SUBMITTED" -> "Resposta enviada ao Android"
         "SCREENING_RESPONSE_FAILED" -> "Falha no envio ao Android"
         "SCREENING_ERROR" -> "Falha na avaliação"
+        "SCREENING_TIMEOUT" -> "Prazo da triagem excedido"
         "CALL_LOG_OBSERVATION" -> "Resultado observado no Android"
         "POST_CALL_EVALUATION" -> "Aprendizado após a chamada"
         "REPROCESS_EVALUATION" -> "Reavaliação do histórico"
@@ -214,21 +185,25 @@ object DecisionTrace {
         val rejected = observation?.systemCallType == 5
         val requested = response?.disallowCall == true
         // Android constants: BLOCKED_TYPE=6, BLOCK_REASON_CALL_SCREENING_SERVICE=1.
-        val observed = requested && observation?.systemCallType == 6 && observation.systemBlockReason == 1 &&
-            observation.systemScreeningAppIsSpamShield != false
+        val observed = observation?.systemCallType == 6 && observation.systemBlockReason == 1 &&
+            observation.systemScreeningAppIsSpamShield == true
         val label = when {
             observation?.systemCallType == 2 || row.outcome == "OUTGOING_CALL" -> "Chamada efetuada"
             rejected -> "Rejeitada no discador"
             observation?.systemCallType == 1 && (observation.durationSec ?: 0) > 0 -> "Atendida"
             observation?.systemCallType == 3 -> "Não atendida"
-            observed -> "Bloqueio registrado pelo Android"
-            observation?.systemCallType == 6 -> "Bloqueada pelo sistema; autoria não comprovada"
-            requested -> "Bloqueio solicitado; resultado não confirmado"
+            observed -> "Bloqueio do SpamShield registrado pelo Android"
+            observation?.systemCallType == 6 && observation.systemBlockReason == 1 &&
+                observation.systemScreeningAppIsSpamShield == false -> "Bloqueada por outro serviço de triagem"
+            observation?.systemCallType == 6 && observation.systemBlockReason == 3 -> "Bloqueada pela lista do Android"
+            observation?.systemCallType == 6 -> "Bloqueada pelo sistema (autoria desconhecida)"
+            requested -> "Bloqueio solicitado (resultado desconhecido)"
+            response?.reason == "FALLBACK_AFTER_TIMEOUT" -> "Permissão enviada no prazo de contingência"
             response?.reason == "FALLBACK_AFTER_ERROR" -> "Permissão enviada após falha do bloqueador"
             response != null -> "Passagem autorizada pelo app"
             arrival != null -> "Decisão calculada; envio não comprovado"
             else -> "Legado: decisão original não registrada"
         }
-        return CallEvidence(label, arrival?.score, requested, observed, rejected)
+        return CallEvidence(label, arrival?.score, requested, observed, rejected, arrival != null || response != null)
     }
 }

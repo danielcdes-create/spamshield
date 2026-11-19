@@ -76,7 +76,8 @@ data class CallTelemetryRemoteDto(
 data class BatchTelemetryResponseDto(
     val accepted_ids: List<String> = emptyList(),
     val accepted_event_ids: List<String> = emptyList(),
-    val quarantine_updates: Int = 0
+    val quarantine_updates: Int = 0,
+    val conflicting_call_ids: List<String> = emptyList()
 )
 
 @Serializable
@@ -172,6 +173,9 @@ data class QuarantineBatchResponseDto(
     val received: Int = 0
 )
 
+@Serializable
+data class QuarantineUpsertResponseDto(val applied: Boolean? = null)
+
 interface SpamShieldApi {
 
     @GET("/api/v1/health")
@@ -208,8 +212,9 @@ interface SpamShieldApi {
     @POST("/api/v1/quarantine")
     suspend fun upsertQuarantine(
         @Body quarantine: PrefixQuarantineRemoteDto,
-        @Query("recorded_at") recordedAt: Long? = null
-    ): PrefixQuarantineRemoteDto
+        @Query("recorded_at") recordedAt: Long? = null,
+        @Query("automatic") automatic: Boolean? = null
+    ): QuarantineUpsertResponseDto
 
     @POST("/api/v1/quarantine/batch")
     suspend fun upsertQuarantineBatch(

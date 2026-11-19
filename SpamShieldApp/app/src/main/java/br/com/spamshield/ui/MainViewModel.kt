@@ -11,10 +11,6 @@ import br.com.spamshield.data.local.entity.ActiveRuleEntity
 import br.com.spamshield.data.local.entity.CallDecisionEventEntity
 import br.com.spamshield.data.remote.toRemoteEvent
 import br.com.spamshield.domain.DecisionTrace
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.encodeToJsonElement
-import kotlinx.serialization.json.jsonObject
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
@@ -25,6 +21,7 @@ import br.com.spamshield.sync.TailscaleNetworkHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -172,7 +169,7 @@ class MainViewModel @Inject constructor(
             _tailscaleStatus.value = _tailscaleStatus.value.copy(
                 isVpnActive = vpn,
                 detectedIp = ip,
-                isServerOnline = outcome.success,
+                isServerOnline = outcome.serverOnline,
                 isSyncing = false,
                 lastSyncMessage = outcome.message
             )
@@ -202,7 +199,7 @@ class MainViewModel @Inject constructor(
             val outcome = syncRepository.triggerProvidersSync()
             _tailscaleStatus.value = _tailscaleStatus.value.copy(
                 isSyncing = false,
-                isServerOnline = outcome.success,
+                isServerOnline = outcome.serverOnline,
                 lastSyncMessage = outcome.message
             )
         }
@@ -218,15 +215,21 @@ class MainViewModel @Inject constructor(
             if (info == null) {
                 _apkUpdateState.value = _apkUpdateState.value.copy(
                     isChecking = false,
-                    statusMessage = "Não foi possível consultar o servidor Tailscale."
+                    remoteVersionCode = null,
+                    remoteVersionName = null,
+                    remoteSizeBytes = 0L,
+                    statusMessage = "Não foi possível consultar um APK válido no servidor Tailscale."
                 )
             } else {
                 val installedCode = BuildConfig.VERSION_CODE
                 val sizeMb = String.format("%.1f MB", info.size_bytes / (1024.0 * 1024.0))
-                val msg = if (info.version_code > installedCode) {
-                    "Nova versão disponível no servidor: v${info.version_name} (build ${info.version_code}, $sizeMb)!"
-                } else {
-                    "Você já está na versão mais recente (v${info.version_name}, build ${info.version_code}, $sizeMb). Pode reinstalar se desejar."
+                val msg = when {
+                    info.version_code > installedCode ->
+                        "Nova versão disponível no servidor: v${info.version_name} (build ${info.version_code}, $sizeMb)."
+                    info.version_code == installedCode ->
+                        "A versão instalada coincide com a do servidor (build $installedCode)."
+                    else ->
+                        "O servidor oferece o build ${info.version_code}. O aparelho está no build $installedCode."
                 }
                 _apkUpdateState.value = _apkUpdateState.value.copy(
                     isChecking = false,
@@ -311,10 +314,6 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun setHideBlockedFromCallLog(hide: Boolean) {
-        viewModelScope.launch { settingsDataStore.setHideBlockedFromSystemCallLog(hide) }
-    }
-
     fun markCallFeedback(telemetry: CallTelemetryEntity, feedback: String) {
         viewModelScope.launch {
             val targetPrefix = spamScoringEngine.extractQuarantinePrefix(
@@ -390,12 +389,23 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun simulateTestCall(rawNumber: String, stirShaken: String) {
-        viewModelScope.launch {
-            spamScoringEngine.evaluateIncomingCall(
+    suspend fun simulateTestCall(rawNumber: String, stirShaken: String): String {
+        return try {
+            val result = spamScoringEngine.evaluateIncomingCall(
                 rawNumber = rawNumber,
                 stirShakenStatus = stirShaken
             )
+            val row = result.telemetry
+            val action = when {
+                result.shouldDisallowAndReject -> "Bloqueio"
+                row.outcome == "SHADOW_BLOCKED" -> "Liberação em modo sombra"
+                else -> "Liberação"
+            }
+            "$action na simulação. Pontuação ${row.finalScore}, limiar ${row.thresholdApplied}."
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            "Não foi possível simular a triagem."
         }
     }
 
@@ -406,25 +416,21 @@ class MainViewModel @Inject constructor(
     }
 
     suspend fun exportTelemetryFiles(): Pair<File, File> = withContext(Dispatchers.IO) {
-        runCatching {
-            callHistoryAnalyzer.reconcileRecentCallsWithCallLog(100)
-            callHistoryAnalyzer.reprocessAllStoredTelemetry()
-        }
-        val all = dao.getAllTelemetry()
-        val exportDir = File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, "exports")
-        exportDir.mkdirs()
+        val (all, journal) = dao.getTelemetryExportSnapshot()
+        val exportMetadata = br.com.spamshield.domain.TelemetryExportMetadata()
+        val exportDir = File(appContext.cacheDir, "exports/${exportMetadata.exportId}")
+        check(exportDir.mkdirs()) { "Não foi possível preparar os arquivos de exportação." }
 
         val jsonFile = File(exportDir, "spamshield_telemetry.json")
-        val events = dao.getAllDecisionEvents().groupBy { it.callId }
-        val exportMetadata = br.com.spamshield.domain.TelemetryExportMetadata()
-        jsonFile.writeText(br.com.spamshield.domain.TelemetryExport.encode(all, events.values.flatten(), exportMetadata))
+        val events = journal.groupBy { it.callId }
+        jsonFile.writeText(br.com.spamshield.domain.TelemetryExport.encode(all, journal, exportMetadata))
         File(exportDir, "spamshield_telemetry_summary.json").writeText(
-            br.com.spamshield.domain.TelemetryExport.encodeSummary(all, events.values.flatten(), exportMetadata)
+            br.com.spamshield.domain.TelemetryExport.encodeSummary(all, journal, exportMetadata)
         )
 
         val csvFile = File(exportDir, "spamshield_telemetry.csv")
         val sb = StringBuilder()
-        sb.appendLine("id,timestamp,rawNumber,normalizedNumber,ddd,prefix7,carrierGuess,lineType,stirShakenStatus,finalScore,thresholdApplied,outcome,category,processingLatencyMs,userFeedback,syncStatus,arrivalScore,observedResult,decisionEventsJson,originalAppVersion,originalVersionStatus,currentClassificationAppVersion,currentClassificationRecordedAt,currentClassificationVersionStatus,eventAppVersions,exportSchemaVersion,exportedAt,exporterVersionName,exporterVersionCode,provenanceJson")
+        sb.appendLine("id,timestamp,rawNumber,normalizedNumber,ddd,prefix7,carrierGuess,lineType,stirShakenStatus,finalScore,thresholdApplied,outcome,category,processingLatencyMs,userFeedback,syncStatus,arrivalScore,observedResult,decisionEventsJson,originalAppVersion,originalVersionStatus,currentClassificationAppVersion,currentClassificationRecordedAt,currentClassificationVersionStatus,eventAppVersions,exportSchemaVersion,exportedAt,exporterVersionName,exporterVersionCode,provenanceJson,decisionEventSyncJson")
         fun csv(value: String) = "\"" + value.replace("\"", "\"\"") + "\""
         for (row in all) {
             val callEvents = events[row.id].orEmpty()
@@ -432,14 +438,15 @@ class MainViewModel @Inject constructor(
             val provenance = br.com.spamshield.domain.TelemetryProvenance.forCall(row, callEvents)
             val serializedEvents = json.encodeToString(callEvents.map { it.toRemoteEvent() })
             sb.appendLine(
-                "${row.id},${row.timestamp},${row.rawNumber},${row.normalizedNumber},${row.ddd},${row.prefix7}," +
-                    "\"${row.carrierGuess ?: ""}\",${row.lineType},${row.stirShakenStatus},${row.finalScore}," +
+                "${row.id},${row.timestamp},${csv(row.rawNumber)},${csv(row.normalizedNumber)},${row.ddd},${row.prefix7}," +
+                    "${csv(row.carrierGuess.orEmpty())},${row.lineType},${row.stirShakenStatus},${row.finalScore}," +
                     "${row.thresholdApplied},${row.outcome},${row.category},${row.processingLatencyMs},${row.userFeedback},${row.syncStatus}," +
                     "${evidence.arrivalScore ?: ""},${csv(evidence.label)},${csv(serializedEvents)}," +
                     "${csv(provenance.originalDecision?.appVersion?.label.orEmpty())},${provenance.originalVersionStatus}," +
                     "${csv(provenance.currentClassification?.appVersion?.label.orEmpty())},${provenance.currentClassification?.recordedAt ?: ""},${provenance.currentClassificationStatus}," +
                     "${csv(provenance.eventAppVersions.joinToString("; ") { it.label })},${exportMetadata.schemaVersion},${exportMetadata.exportedAt}," +
-                    "${csv(exportMetadata.exporterVersionName)},${exportMetadata.exporterVersionCode},${csv(json.encodeToString(provenance))}"
+                    "${csv(exportMetadata.exporterVersionName)},${exportMetadata.exporterVersionCode},${csv(json.encodeToString(provenance))}," +
+                    csv(json.encodeToString(callEvents.associate { it.eventId to it.syncStatus }))
             )
         }
         csvFile.writeText(sb.toString())

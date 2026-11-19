@@ -383,8 +383,8 @@ class NtSpamshield2026001Test {
                 hitCount = 2,
                 penaltyWeight = 70,
                 reason = "ROBOCALL_PREFIX_CLUSTER",
-                firstSeenAt = now,
-                lastSeenAt = now,
+                firstSeenAt = now - 20_000,
+                lastSeenAt = now - 20_000,
                 expiresAt = now + 86_400_000L
             )
         )

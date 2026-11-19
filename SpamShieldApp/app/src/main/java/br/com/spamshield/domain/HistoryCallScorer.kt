@@ -30,17 +30,8 @@ object HistoryCallScorer {
         ) {
             rules.add(prefix5ChipeiraRule)
         }
-        val arrivalScore = HeuristicScorer.equation(HeuristicScorer.configuredRules(rules, input))
-        if (
-            rejectedInDialer &&
-            arrivalScore < input.thresholdApplied &&
-            rules.none { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }
-        ) {
-            rules.add(TriggeredRuleDto("SYSTEM_CALLLOG_BLOCKED", 45, "Rejeitado no Discador"))
-        }
         if (
             distinctNumbers >= 2 &&
-            !rejectedInDialer &&
             rules.none { it.rule_id == "PREFIX_NEIGHBORHOOD_BURST" }
         ) {
             rules.add(
@@ -50,6 +41,14 @@ object HistoryCallScorer {
                     "distinct_24h=$distinctNumbers"
                 )
             )
+        }
+        val arrivalScore = HeuristicScorer.equation(HeuristicScorer.configuredRules(rules, input))
+        if (
+            rejectedInDialer &&
+            arrivalScore < input.thresholdApplied &&
+            rules.none { it.rule_id == "SYSTEM_CALLLOG_BLOCKED" }
+        ) {
+            rules.add(TriggeredRuleDto("SYSTEM_CALLLOG_BLOCKED", 45, "Rejeitado no Discador"))
         }
         if (
             input.ddd.isNotEmpty() &&

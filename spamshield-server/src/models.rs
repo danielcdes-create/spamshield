@@ -162,10 +162,6 @@ impl CallOutcome {
             CallOutcome::USER_BLOCKED_RETROACTIVE => "USER_BLOCKED_RETROACTIVE",
         }
     }
-
-    pub fn is_blocked_or_shadow(&self) -> bool {
-        matches!(self, CallOutcome::BLOCKED | CallOutcome::SHADOW_BLOCKED)
-    }
 }
 
 #[allow(non_camel_case_types)]
@@ -400,6 +396,8 @@ pub struct AnatelNumberingPlanDoc {
 pub struct BatchTelemetryResponse {
     pub accepted_ids: Vec<String>,
     pub accepted_event_ids: Vec<String>,
+    #[serde(default)]
+    pub conflicting_call_ids: Vec<String>,
     pub quarantine_updates: usize,
 }
 
@@ -467,6 +465,8 @@ pub struct HourlyHeatmapItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalyticsSummaryResponse {
     pub total_intercepted: i64,
+    #[serde(default)]
+    pub total_incoming_records: i64,
     pub total_blocked: i64,
     pub total_block_requests: i64,
     pub total_dialer_rejected: i64,

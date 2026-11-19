@@ -28,9 +28,11 @@ import br.com.spamshield.data.remote.DecisionVectorRemoteDto
 import br.com.spamshield.data.remote.FeedbackPatchRequestDto
 import br.com.spamshield.data.remote.PrefixQuarantineRemoteDto
 import br.com.spamshield.data.remote.SpamShieldApi
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -50,8 +52,12 @@ data class SyncOutcome(
     val pushedTelemetryCount: Int = 0,
     val pulledRulesCount: Int = 0,
     val pulledQuarantineCount: Int = 0,
-    val message: String = ""
+    val message: String = "",
+    val serverOnline: Boolean = success,
+    val retryable: Boolean = !success
 )
+
+private class SyncSettingsChanged : Exception()
 
 @Singleton
 class SyncRepository @Inject constructor(
@@ -107,6 +113,7 @@ class SyncRepository @Inject constructor(
         try {
             val settings = settingsDataStore.getSnapshot()
             buildApi(settings.tailscaleServerUrl, settings.apiBearerToken).getApkInfo()
+                .takeIf { it.size_bytes > 0 && it.sha256_checksum.matches(Regex("[a-fA-F0-9]{64}")) }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to check remote APK info: ${e.message}")
             null
@@ -123,7 +130,7 @@ class SyncRepository @Inject constructor(
             settingsDataStore.setLastSyncTimestamp(0L)
             val full = performFullSync()
             full.copy(
-                message = "Provedores Anatel/Blacklist sincronizados: ${summary.anatel_prefixes_synced} faixas Anatel, ${summary.blacklist_clusters_synced} clusters, ${summary.rules_synced} regras!"
+                message = "Provedores atualizados (${summary.anatel_prefixes_synced} faixas Anatel, ${summary.blacklist_clusters_synced} clusters, ${summary.rules_synced} regras). ${full.message}"
             )
         } catch (e: Exception) {
             SyncOutcome(
@@ -181,33 +188,49 @@ class SyncRepository @Inject constructor(
         val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
 
         try {
-            // 1. Push pending telemetry batches in chunks of 100
             var pushedCount = 0
+            val deferredCalls = mutableSetOf<String>()
+            var afterTimestamp = Long.MIN_VALUE
+            var afterId = ""
             while (true) {
                 if (!syncStillAllowed(settings)) return@withContext disabledSync()
-                val pending = dao.getPendingTelemetry().take(100)
+                val (pending, snapshotEvents) = dao.getPendingTelemetrySnapshot(afterTimestamp, afterId)
                 if (pending.isEmpty()) break
-                val events = pending.associate { it.id to dao.getDecisionEvents(it.id) }
-                val batchDtos = pending.map { it.toRemoteDto(events[it.id].orEmpty()) }
-                val batchResp = api.postTelemetryBatch(batchDtos)
-                if (batchResp.accepted_ids.isNotEmpty()) {
-                    dao.markTelemetrySynced(batchResp.accepted_ids)
-                    // Acknowledge only the snapshot actually sent; concurrent events stay pending.
-                    val sentEvents = batchResp.accepted_ids.flatMap { events[it].orEmpty() }
-                    val acknowledged = sentEvents.map { it.eventId }.intersect(batchResp.accepted_event_ids.toSet())
-                    dao.markDecisionEventsSynced(acknowledged.toList())
-                    if (sentEvents.any { it.syncStatus == "PENDING" && it.eventId !in acknowledged }) {
-                        return@withContext SyncOutcome(success = false, pushedTelemetryCount = pushedCount,
-                            message = "Eventos preservados no aparelho: o servidor ainda não confirmou o diário de decisões.")
+                val rowsById = pending.associateBy { it.id }
+                val events = snapshotEvents.groupBy { it.callId }
+                val batchDtos = pending.mapNotNull { row ->
+                    try {
+                        row.toRemoteDto(events[row.id].orEmpty())
+                    } catch (_: SerializationException) {
+                        deferredCalls.add(row.id)
+                        null
                     }
-                    pushedCount += batchResp.accepted_ids.size
-                } else {
-                    break
                 }
+                uploadTelemetryBatch(
+                    batchDtos,
+                    send = { batch ->
+                        if (!syncStillAllowed(settings)) throw SyncSettingsChanged()
+                        api.postTelemetryBatch(batch)
+                    },
+                    acknowledge = { call, acknowledged ->
+                        dao.acknowledgeTelemetryUpload(rowsById.getValue(call.id), acknowledged.toList())
+                        if (events[call.id].orEmpty().any { it.syncStatus == "PENDING" && it.eventId !in acknowledged }) {
+                            deferredCalls.add(call.id)
+                        } else {
+                            pushedCount++
+                        }
+                    },
+                    defer = { deferredCalls.add(it.id) }
+                )
+                afterTimestamp = pending.last().timestamp
+                afterId = pending.last().id
             }
 
             // Only durable local mutations are sent; downloaded snapshots are never echoed.
-            if (!flushMutationOutbox(api, settings)) return@withContext disabledSync()
+            val rejectedAutomatic = mutableListOf<SyncMutationEntity>()
+            if (!flushMutationOutbox(api, settings, deferredCalls, rejectedAutomatic)) {
+                return@withContext disabledSync()
+            }
             val now = System.currentTimeMillis()
 
             // 2. Pull updated rules, quarantines, and Anatel prefixes
@@ -244,10 +267,10 @@ class SyncRepository @Inject constructor(
                     parseIsoToMillis(q.last_seen_at, now), parseIsoToMillis(q.expires_at, now))
             }
             if (payload.quarantine_snapshot_complete) {
-                dao.applyRemoteQuarantines(remoteQuarantines, payload.quarantine_deleted_prefixes)
-            } else if (remoteQuarantines.isNotEmpty()) {
+                dao.applyRemoteQuarantines(remoteQuarantines, payload.quarantine_deleted_prefixes, rejectedAutomatic)
+            } else if (remoteQuarantines.isNotEmpty() || rejectedAutomatic.isNotEmpty()) {
                 // Old servers have no deletion contract: merge without losing local operations.
-                dao.applyRemoteQuarantines(remoteQuarantines)
+                dao.applyRemoteQuarantines(remoteQuarantines, rejectedAutomatic = rejectedAutomatic)
             }
             QuarantinePrefixIndex.refreshActive { dao.getAllQuarantines() }
 
@@ -275,12 +298,22 @@ class SyncRepository @Inject constructor(
             )
 
             SyncOutcome(
-                success = true,
+                success = deferredCalls.isEmpty(),
                 pushedTelemetryCount = pushedCount,
                 pulledRulesCount = payload.active_rules.size,
                 pulledQuarantineCount = payload.prefix_quarantine.size,
-                message = "Sincronizado ($pushedCount envios, ${payload.prefix_quarantine.size} quarentenas)"
+                message = if (deferredCalls.isEmpty()) {
+                    "Sincronizado ($pushedCount envios, ${payload.prefix_quarantine.size} quarentenas)"
+                } else {
+                    "$pushedCount registros confirmados. ${deferredCalls.size} aguardam confirmação e continuam no aparelho. Regras e quarentenas atualizadas."
+                },
+                serverOnline = true,
+                retryable = false
             )
+        } catch (_: SyncSettingsChanged) {
+            disabledSync()
+        } catch (error: CancellationException) {
+            throw error
         } catch (e: Exception) {
             Log.w(TAG, "Tailscale sync failed: ${e.message}")
             SyncOutcome(
@@ -308,7 +341,10 @@ class SyncRepository @Inject constructor(
                 }
                 else -> current.copy(userFeedback = feedback, syncStatus = "PENDING")
             }
-            dao.persistFeedbackUpdate(updatedRow, mutation)
+            val event = DecisionTrace.feedbackEvent(
+                telemetryId, DecisionTrace.snapshot(updatedRow).copy(reason = feedback), recordedAt, mutationId
+            )
+            dao.persistFeedbackUpdate(updatedRow, mutation, event)
             if (feedback == "FALSE_POSITIVE" && prefix7.isNotEmpty()) {
                 deleteManualQuarantine(prefix7)
                 if (prefix7.length == 8) {
@@ -333,8 +369,6 @@ class SyncRepository @Inject constructor(
             }
 
             dao.getTelemetryById(telemetryId)?.let { updated ->
-                DecisionTrace.record(dao, telemetryId, "USER_FEEDBACK", "USER",
-                    DecisionTrace.snapshot(updated).copy(reason = feedback))
                 if (prefix7.isNotEmpty() && feedback in setOf("CONFIRMED_SPAM", "FALSE_POSITIVE")) {
                     val protection = dao.getActiveQuarantineForPrefix(prefix7, System.currentTimeMillis())
                     DecisionTrace.record(dao, telemetryId, "QUARANTINE_UPDATED", "USER",
@@ -383,14 +417,28 @@ class SyncRepository @Inject constructor(
             current.apiBearerToken == expected.apiBearerToken
     }
 
-    private suspend fun flushMutationOutbox(api: SpamShieldApi, expected: SpamShieldSettings): Boolean {
-        while (true) {
-            val mutation = dao.getSyncMutations().firstOrNull() ?: return true
+    private suspend fun flushMutationOutbox(
+        api: SpamShieldApi,
+        expected: SpamShieldSettings,
+        deferredCalls: Set<String>,
+        rejectedAutomatic: MutableList<SyncMutationEntity>
+    ): Boolean {
+        for (mutation in dao.getSyncMutations()) {
+            if (mutation.kind == "FEEDBACK" && mutation.targetId in deferredCalls) continue
             if (!syncStillAllowed(expected)) return false
             when (mutation.kind) {
-                "QUARANTINE_UPSERT" -> {
+                "QUARANTINE_UPSERT", "QUARANTINE_AUTO_UPSERT" -> {
                     val evidence = json.decodeFromString<PrefixQuarantineEntity>(mutation.payloadJson)
-                    api.upsertQuarantine(evidence.toRemoteQuarantine(), evidence.lastSeenAt)
+                    val automatic = mutation.kind == "QUARANTINE_AUTO_UPSERT"
+                    val response = api.upsertQuarantine(
+                        evidence.toRemoteQuarantine(),
+                        evidence.lastSeenAt,
+                        automatic = true.takeIf { automatic }
+                    )
+                    if (automatic && response.applied == false) {
+                        rejectedAutomatic.add(mutation)
+                        continue
+                    }
                 }
                 "QUARANTINE_DELETE" -> api.deleteQuarantine(mutation.targetId, mutation.createdAt)
                 "FEEDBACK" -> api.patchTelemetryFeedback(mutation.targetId,
@@ -405,6 +453,7 @@ class SyncRepository @Inject constructor(
             // Remove only this immutable operation. A concurrent newer change stays queued.
             dao.acknowledgeSyncMutation(mutation.mutationId)
         }
+        return true
     }
 
     internal fun CallTelemetryEntity.toRemoteDto(events: List<CallDecisionEventEntity>): CallTelemetryRemoteDto {

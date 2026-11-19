@@ -15,8 +15,8 @@ android {
         applicationId = "br.com.spamshield"
         minSdk = 29
         targetSdk = 35
-        versionCode = 18
-        versionName = "1.3.4"
+        versionCode = 19
+        versionName = "1.3.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

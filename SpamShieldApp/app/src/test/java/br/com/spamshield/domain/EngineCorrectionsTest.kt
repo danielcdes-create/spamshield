@@ -49,7 +49,7 @@ class EngineCorrectionsTest {
     @Test fun eightSecondPassedCallDoesNotQuarantineWhenScoreRemainsBelowThreshold() = runTest {
         val dao = dao()
         val scoring = engine(dao)
-        val first = scoring.evaluateIncomingCall("+5531991234567", "PASSED", nowMillis = now)
+        val first = scoring.screenIncomingCallForTest("+5531991234567", "PASSED", nowMillis = now)
         assertEquals(25, first.telemetry.finalScore)
         assertTrue(scoring.evaluatePostCallPingDetector(first.telemetry.normalizedNumber, 8,
             nowMillis = now + 10_000, callId = first.telemetry.id))
@@ -117,7 +117,7 @@ class EngineCorrectionsTest {
     @Test fun allowedShortCircuitsAlwaysObeyTheNonNegativeScoreEquation() = runTest {
         val repeatDao = dao()
         val repeatEngine = engine(repeatDao)
-        repeatEngine.evaluateIncomingCall("+5531991234567", "PASSED", nowMillis = now)
+        repeatEngine.screenIncomingCallForTest("+5531991234567", "PASSED", nowMillis = now)
         val repeat = repeatEngine.evaluateIncomingCall("+5531991234567", "PASSED", nowMillis = now + 1_000)
         assertEquals("ALLOWED_EMERGENCY_REPEAT", repeat.telemetry.outcome)
         assertEquals(0, repeat.telemetry.finalScore)
@@ -142,7 +142,7 @@ class EngineCorrectionsTest {
 
     @Test fun legacyOutgoingCorrectionPreservesTheObservedEvent() = runTest {
         val dao = dao()
-        val row = engine(dao).evaluateIncomingCall("+5531991234567", "PASSED", nowMillis = now).telemetry
+        val row = engine(dao).screenIncomingCallForTest("+5531991234567", "PASSED", nowMillis = now).telemetry
         dao.deleteDecisionEvents(dao.getDecisionEvents(row.id).map { it.eventId })
         DecisionTrace.record(dao, row.id, "CALL_LOG_OBSERVATION", "ANDROID_CALL_LOG",
             DecisionDetails(systemCallType = 2, observedCallTimestamp = now), at = now + 10_000)
@@ -183,7 +183,7 @@ class EngineCorrectionsTest {
         val dao = dao()
         val unknown = dao.rules.single { it.ruleId == "NOT_IN_CONTACTS" }
         dao.upsertRule(unknown.copy(weight = 7))
-        val result = engine(dao).evaluateIncomingCall("+5531991234567", "PASSED", nowMillis = now)
+        val result = engine(dao).screenIncomingCallForTest("+5531991234567", "PASSED", nowMillis = now)
         assertEquals(7, result.telemetry.finalScore)
         val original = dao.getDecisionEvents(result.telemetry.id).single { it.eventType == "SCREENING_DECISION" }
         dao.upsertRule(unknown.copy(weight = 12))
@@ -214,7 +214,7 @@ class EngineCorrectionsTest {
         val dao = dao()
         dao.upsertRule(dao.rules.single { it.ruleId == "PING_CALL_PENALTY" }.copy(enabled = false))
         val scoring = engine(dao)
-        val first = scoring.evaluateIncomingCall("+5531991234567", "PASSED", nowMillis = now)
+        val first = scoring.screenIncomingCallForTest("+5531991234567", "PASSED", nowMillis = now)
         scoring.evaluatePostCallPingDetector(first.telemetry.normalizedNumber, 3,
             nowMillis = now + 10_000, callId = first.telemetry.id)
         val after = dao.getTelemetryById(first.telemetry.id)!!
@@ -236,7 +236,7 @@ class EngineCorrectionsTest {
 
     @Test fun confirmingSpamAfterFalsePositiveRemovesTheObsoleteAllowOverride() = runTest {
         val dao = dao()
-        val original = engine(dao).evaluateIncomingCall("+5531991234567", "PASSED", nowMillis = now).telemetry
+        val original = engine(dao).screenIncomingCallForTest("+5531991234567", "PASSED", nowMillis = now).telemetry
         val falsePositive = original.copy(outcome = "ALLOWED_CONTACT", category = "LEGITIMATE",
             finalScore = 0, userFeedback = "FALSE_POSITIVE", triggeredRulesJson = UserFeedbackAudit.encode(
                 UserFeedbackAudit.decode(original.triggeredRulesJson) +
@@ -255,7 +255,7 @@ class EngineCorrectionsTest {
             QuarantinePrefixIndex.clear()
             val dao = dao()
             val scoring = engine(dao)
-            val arrival = scoring.evaluateIncomingCall("+5531991234567", "PASSED", nowMillis = now).telemetry
+            val arrival = scoring.screenIncomingCallForTest("+5531991234567", "PASSED", nowMillis = now).telemetry
             val original = dao.getDecisionEvents(arrival.id).single { it.eventType == "SCREENING_DECISION" }
             val observedAt = now + SpamScoringEngine.QUARANTINE_DEFAULT_TTL_MS + 86_400_000
             scoring.evaluatePostCallLogVerdict(arrival.normalizedNumber, callType, duration,
@@ -274,7 +274,7 @@ class EngineCorrectionsTest {
     @Test fun repeatedReconciliationDoesNotExtendQuarantineBeyondTheCallEvidenceDate() = runTest {
         val dao = dao()
         val scoring = engine(dao)
-        val arrival = scoring.evaluateIncomingCall("+5531991234567", "PASSED", nowMillis = now).telemetry
+        val arrival = scoring.screenIncomingCallForTest("+5531991234567", "PASSED", nowMillis = now).telemetry
         scoring.evaluatePostCallLogVerdict(arrival.normalizedNumber, 5, 0,
             callTimestampMs = now, nowMillis = now + 1_000)
         val originalExpiry = now + SpamScoringEngine.QUARANTINE_DEFAULT_TTL_MS
@@ -290,7 +290,7 @@ class EngineCorrectionsTest {
     @Test fun postCallLearningPreservesThirtyDayQuarantineInTheDatabaseAndCache() = runTest {
         val dao = dao()
         val scoring = engine(dao)
-        val arrival = scoring.evaluateIncomingCall("+5531991234567", "PASSED", nowMillis = now).telemetry
+        val arrival = scoring.screenIncomingCallForTest("+5531991234567", "PASSED", nowMillis = now).telemetry
         val thirtyDays = now + 30L * 86_400_000
         dao.upsertQuarantine(quarantine(thirtyDays))
         QuarantinePrefixIndex.add("31991234", thirtyDays)

@@ -53,7 +53,8 @@ data class TelemetryExportSummary(
     val originalVersionUnknownRows: Int,
     val originalVersionAmbiguousRows: Int,
     val currentClassificationVersionUnknownRows: Int,
-    val versions: List<VersionPeriodSummary>
+    val versions: List<VersionPeriodSummary>,
+    val pendingEventCount: Int = 0
 )
 
 object TelemetryExport {
@@ -69,6 +70,7 @@ object TelemetryExport {
             val own = byCall[row.id].orEmpty()
             JsonObject(json.encodeToJsonElement(row).jsonObject +
                 ("decisionEvents" to json.encodeToJsonElement(own.map { it.toRemoteEvent() })) +
+                ("decisionEventSync" to json.encodeToJsonElement(own.associate { it.eventId to it.syncStatus })) +
                 ("provenance" to json.encodeToJsonElement(TelemetryProvenance.forCall(row, own))) +
                 ("exportMetadata" to json.encodeToJsonElement(metadata)))
         }).toString()
@@ -105,7 +107,8 @@ object TelemetryExport {
             metadata, rows.size, includedEvents.size,
             provenance.values.count { it.originalVersionStatus == "ORIGINAL_VERSION_UNKNOWN" },
             provenance.values.count { it.originalVersionStatus == "AMBIGUOUS_SCREENING_VERSIONS" },
-            provenance.values.count { it.currentClassification == null }, versions
+            provenance.values.count { it.currentClassification == null }, versions,
+            pendingEventCount = includedEvents.count { it.syncStatus == "PENDING" }
         )
     }
 

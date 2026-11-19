@@ -103,7 +103,6 @@ class TelemetryProvenanceTest {
         dao.insertDecisionEvent(event(row, "old", "REPROCESS_EVALUATION", "1.3.1 (15)", callAt))
         DecisionTrace.record(dao, row.id, "REPROCESS_EVALUATION", "HISTORY_REPROCESSOR", DecisionTrace.snapshot(row), processedAt)
         DecisionTrace.record(dao, row.id, "REPROCESS_EVALUATION", "HISTORY_REPROCESSOR", DecisionTrace.snapshot(row), processedAt + 1)
-        DecisionTrace.pruneRedundantEvents(dao, listOf(row))
         val events = dao.getDecisionEvents(row.id)
         assertEquals(2, events.size)
         val current = DecisionTrace.details(events.last())
@@ -122,8 +121,22 @@ class TelemetryProvenanceTest {
         val second = first.copy(ruleSetFingerprint = "configuration-b")
         DecisionTrace.record(dao, row.id, "REPROCESS_EVALUATION", "HISTORY_REPROCESSOR", first, callAt)
         DecisionTrace.record(dao, row.id, "REPROCESS_EVALUATION", "HISTORY_REPROCESSOR", second, processedAt)
-        DecisionTrace.pruneRedundantEvents(dao, listOf(row))
         assertEquals(2, dao.getDecisionEvents(row.id).size)
+    }
+
+    @Test fun returningToAnEarlierEvaluationAfterADifferentSourcePreservesTheTransition() = runTest {
+        val dao = FakeSpamShieldDao()
+        val row = row()
+        val assessment = DecisionTrace.snapshot(row)
+        DecisionTrace.record(dao, row.id, "REPROCESS_EVALUATION", "HISTORY_REPROCESSOR", assessment, callAt)
+        DecisionTrace.record(dao, row.id, "POST_CALL_EVALUATION", "POST_CALL_ANALYZER",
+            assessment.copy(score = row.finalScore + 45), callAt + 1)
+        DecisionTrace.record(dao, row.id, "REPROCESS_EVALUATION", "HISTORY_REPROCESSOR", assessment, callAt + 2)
+        DecisionTrace.record(dao, row.id, "REPROCESS_EVALUATION", "HISTORY_REPROCESSOR", assessment, callAt + 3)
+
+        val events = dao.getDecisionEvents(row.id)
+        assertEquals(listOf(callAt, callAt + 1, callAt + 2), events.map { it.recordedAt })
+        assertEquals(events.last().eventId, TelemetryProvenance.forCall(row, events).currentClassification?.eventId)
     }
 
     @Test fun conflictingScreeningVersionsAreExplicitlyAmbiguous() {

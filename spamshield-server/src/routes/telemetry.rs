@@ -1,7 +1,7 @@
 use super::AppState;
 use crate::models::{
     BatchTelemetryResponse, CallTelemetryDoc, FeedbackPatchRequest, FeedbackPatchResponse,
-    PrefixQuarantineDoc, UserFeedback,
+    UserFeedback,
 };
 use crate::services::recalibrator;
 use axum::{
@@ -10,24 +10,18 @@ use axum::{
     Json,
 };
 use bson::{doc, Bson, DateTime as BsonDateTime, Document};
-use chrono::{Duration, Utc};
-use mongodb::options::ReturnDocument;
-use std::collections::HashMap;
+use chrono::Utc;
+use mongodb::Collection;
+use std::collections::{HashMap, HashSet};
 
-/// Atomic pipeline: retain every stored event; append only previously unseen IDs.
-pub(crate) fn telemetry_merge_stage(call: &CallTelemetryDoc, now: BsonDateTime) -> Document {
-    let full = call.to_bson_document();
-    let events = full
-        .get_array("decision_events")
-        .cloned()
-        .unwrap_or_default();
-    let feedback_at = call
-        .decision_events
-        .iter()
-        .filter(|e| e.event_type == "USER_FEEDBACK")
-        .map(|e| e.recorded_at)
-        .max()
-        .unwrap_or(0);
+/// The journal filter used by persist_telemetry guarantees the append set is still valid.
+fn telemetry_merge_stage(
+    call: &CallTelemetryDoc,
+    full: &Document,
+    append: Vec<Bson>,
+    now: BsonDateTime,
+) -> Document {
+    let feedback_at = latest_feedback_time(call);
     let preserve_feedback =
         doc! { "$gt": [{ "$ifNull": ["$audit.feedback_recorded_at", 0_i64] }, feedback_at] };
     doc! { "$set": {
@@ -38,15 +32,17 @@ pub(crate) fn telemetry_merge_stage(call: &CallTelemetryDoc, now: BsonDateTime) 
         "audit.user_feedback": { "$cond": [preserve_feedback, "$audit.user_feedback", { "$literal": call.audit.user_feedback.as_str() }] },
         "audit.feedback_recorded_at": { "$max": [{ "$ifNull": ["$audit.feedback_recorded_at", 0_i64] }, feedback_at] },
         "audit.synced_at": { "$literal": now },
-        "decision_events": { "$reduce": {
-            "input": { "$literal": events },
-            "initialValue": { "$ifNull": ["$decision_events", []] },
-            "in": { "$cond": [
-                { "$in": ["$$this.event_id", { "$map": { "input": "$$value", "as": "stored", "in": "$$stored.event_id" } }] },
-                "$$value", { "$concatArrays": ["$$value", ["$$this"]] }
-            ] }
-        } }
+        "decision_events": { "$concatArrays": [{ "$ifNull": ["$decision_events", []] }, { "$literal": append }] }
     } }
+}
+
+fn latest_feedback_time(call: &CallTelemetryDoc) -> i64 {
+    call.decision_events
+        .iter()
+        .filter(|e| e.event_type == "USER_FEEDBACK")
+        .map(|e| e.recorded_at)
+        .max()
+        .unwrap_or(0)
 }
 
 /// v1 clients replayed through v1.3.3 materialize exactly these additive defaults.
@@ -86,10 +82,7 @@ fn equivalent_immutable_event(incoming: &Bson, stored: &Bson) -> bool {
     without_materialized_v1_defaults(incoming) == without_materialized_v1_defaults(stored)
 }
 
-pub(crate) fn events_match_persisted(call: &CallTelemetryDoc, stored: &Document) -> bool {
-    let Ok(events) = stored.get_array("decision_events") else {
-        return call.decision_events.is_empty();
-    };
+fn index_events(events: &[Bson]) -> HashMap<&str, Vec<&Bson>> {
     let mut by_id: HashMap<&str, Vec<&Bson>> = HashMap::new();
     for event in events {
         if let Some(id) = event
@@ -99,28 +92,129 @@ pub(crate) fn events_match_persisted(call: &CallTelemetryDoc, stored: &Document)
             by_id.entry(id).or_default().push(event);
         }
     }
-    call.decision_events.iter().all(|event| {
-        let Ok(incoming) = bson::to_bson(event) else {
-            return false;
-        };
-        by_id.get(event.event_id.as_str()).is_some_and(|variants| {
-            variants
-                .iter()
-                .any(|stored| equivalent_immutable_event(&incoming, stored))
-        })
-    })
+    by_id
 }
 
-/// All IDs are acknowledged only after their atomic upsert (including events) succeeds.
+/// Validate all incoming events and return only the unseen ones in their original order.
+/// Old journals may contain multiple persisted representations for the same ID.
+fn appendable_events<'a>(incoming: &'a [Bson], stored: &[Bson]) -> Option<Vec<&'a Bson>> {
+    let persisted = index_events(stored);
+    let mut unseen: HashMap<&str, &Bson> = HashMap::new();
+    let mut append = Vec::new();
+    for event in incoming {
+        let id = event.as_document()?.get_str("event_id").ok()?;
+        if let Some(variants) = persisted.get(id) {
+            if !variants
+                .iter()
+                .any(|variant| equivalent_immutable_event(event, variant))
+            {
+                return None;
+            }
+        } else {
+            match unseen.entry(id) {
+                std::collections::hash_map::Entry::Occupied(previous) => {
+                    if !equivalent_immutable_event(event, previous.get()) {
+                        return None;
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(event);
+                    append.push(event);
+                }
+            }
+        }
+    }
+    Some(append)
+}
+
+#[cfg(test)]
+fn events_match_persisted(call: &CallTelemetryDoc, stored: &Document) -> bool {
+    let Ok(Bson::Array(incoming)) = bson::to_bson(&call.decision_events) else {
+        return false;
+    };
+    let existing = stored
+        .get_array("decision_events")
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    appendable_events(&incoming, existing).is_some_and(|append| append.is_empty())
+}
+
+async fn persist_telemetry(
+    collection: &Collection<Document>,
+    call: &CallTelemetryDoc,
+) -> Result<bool, mongodb::error::Error> {
+    let key = doc! { "_id": &call.id };
+    let now = BsonDateTime::now();
+    let document = call.to_bson_document();
+    let incoming = document.get_array("decision_events").unwrap();
+    loop {
+        let stored = collection
+            .find_one(key.clone())
+            .projection(doc! { "decision_events": 1 })
+            .await?;
+        if let Some(stored) = stored {
+            let existing = stored
+                .get_array("decision_events")
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let Some(append) = appendable_events(incoming, existing) else {
+                return Ok(false);
+            };
+            // All journal writers only append entries. A concurrent write that can introduce
+            // a new conflict also changes the array length and invalidates this snapshot.
+            let mut filter = key.clone();
+            match stored.get("decision_events") {
+                Some(Bson::Array(events)) => {
+                    filter.insert("decision_events", doc! { "$size": events.len() as i64 })
+                }
+                Some(original) => filter.insert(
+                    "$expr",
+                    doc! { "$eq": ["$decision_events", { "$literal": original }] },
+                ),
+                None => filter.insert("decision_events", doc! { "$exists": false }),
+            };
+            let stage =
+                telemetry_merge_stage(call, &document, append.into_iter().cloned().collect(), now);
+            if collection
+                .update_one(filter, vec![stage])
+                .await?
+                .matched_count
+                == 1
+            {
+                return Ok(true);
+            }
+            continue;
+        }
+
+        let Some(append) = appendable_events(incoming, &[]) else {
+            return Ok(false);
+        };
+        let mut document = document.clone();
+        document.insert(
+            "decision_events",
+            append.into_iter().cloned().collect::<Vec<_>>(),
+        );
+        let audit = document.get_document_mut("audit").unwrap();
+        audit.insert("synced_at", now);
+        audit.insert("feedback_recorded_at", latest_feedback_time(call));
+        match collection.insert_one(document).await {
+            Ok(_) => return Ok(true),
+            Err(error) if super::rules::duplicate_key(&error) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Acknowledge only the calls and journal IDs persisted successfully. A conflicting call is
+/// untouched. Other calls in the batch can succeed and be acknowledged independently.
 pub async fn post_telemetry_batch(
     State(state): State<AppState>,
-    Json(mut batch): Json<Vec<CallTelemetryDoc>>,
+    Json(batch): Json<Vec<CallTelemetryDoc>>,
 ) -> Result<Json<BatchTelemetryResponse>, (StatusCode, String)> {
-    let mut accepted_ids = Vec::new();
-    let mut accepted_event_ids = Vec::new();
-    let mut quarantine_updates = 0;
-    for call in &mut batch {
+    let mut call_ids = HashSet::new();
+    for call in &batch {
         if call.id.is_empty()
+            || !call_ids.insert(&call.id)
             || call
                 .decision_events
                 .iter()
@@ -129,86 +223,37 @@ pub async fn post_telemetry_batch(
         {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "Invalid call/event ID or event document".into(),
+                "Invalid or repeated call ID, invalid event ID or invalid event document".into(),
             ));
         }
-        call.audit.synced_at = Utc::now();
-        let filter = doc! { "_id": &call.id };
-        let pipeline = vec![telemetry_merge_stage(call, BsonDateTime::now())];
-        let collection = state.db.call_telemetry();
-        let result = collection
-            .find_one_and_update(filter.clone(), pipeline.clone())
-            .upsert(true)
-            .return_document(ReturnDocument::After)
-            .projection(doc! { "decision_events": 1 })
-            .await;
-        let stored = match result {
-            Ok(Some(stored)) => stored,
-            Ok(None) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Telemetry write returned no document".into(),
-                ))
-            }
-            Err(error) if super::rules::duplicate_key(&error) => collection
-                .find_one_and_update(filter, pipeline)
-                .return_document(ReturnDocument::After)
-                .projection(doc! { "decision_events": 1 })
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-                .ok_or_else(|| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Racing telemetry document disappeared".to_string(),
-                    )
-                })?,
-            Err(error) => return Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string())),
-        };
-        if !events_match_persisted(call, &stored) {
-            return Err((
-                StatusCode::CONFLICT,
-                "An event ID already belongs to a different immutable event; no acknowledgement"
-                    .into(),
-            ));
-        }
-        // Legacy compatibility: a historic retry is never a new quarantine observation.
-        // The event time bounds the expiry; explicit deletion tombstones reject older evidence.
-        if call.decision_vector.outcome.is_blocked_or_shadow()
-            && call.audit.user_feedback != UserFeedback::FALSE_POSITIVE
-            && !call.call_details.prefix_7.is_empty()
-        {
-            let observed = call.timestamp;
-            let expiry = observed + Duration::days(7);
-            if expiry > Utc::now() {
-                let q = PrefixQuarantineDoc {
-                    prefix_7: call.call_details.prefix_7.clone(),
-                    ddd: call.call_details.ddd.clone(),
-                    carrier_guess: call.call_details.carrier_guess.clone(),
-                    distinct_numbers_seen: vec![call.call_details.normalized_number.clone()],
-                    hit_count: 1,
-                    penalty_weight: 70,
-                    reason: call.decision_vector.category.as_str().to_string(),
-                    first_seen_at: observed,
-                    last_seen_at: observed,
-                    expires_at: expiry,
-                };
-                super::rules::store_quarantine(&state.db, &q, observed.timestamp_millis())
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                quarantine_updates += 1;
-            }
-        }
-        accepted_ids.push(call.id.clone());
-        accepted_event_ids.extend(
-            call.decision_events
-                .iter()
-                .map(|event| event.event_id.clone()),
-        );
     }
+    let mut accepted_ids = Vec::new();
+    let mut accepted_event_ids = Vec::new();
+    let mut conflicting_call_ids = Vec::new();
+    let collection = state.db.call_telemetry();
+    for call in batch {
+        if !persist_telemetry(&collection, &call)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
+            conflicting_call_ids.push(call.id);
+            continue;
+        }
+        accepted_ids.push(call.id);
+        accepted_event_ids.extend(call.decision_events.into_iter().map(|event| event.event_id));
+    }
+    if accepted_ids.is_empty() && !conflicting_call_ids.is_empty() {
+        return Err((
+            StatusCode::CONFLICT,
+            "An event ID conflicts with an immutable event; no acknowledgement".into(),
+        ));
+    }
+    // Telemetry describes calls. Only the dedicated quarantine and feedback routes modify policy.
     Ok(Json(BatchTelemetryResponse {
         accepted_ids,
         accepted_event_ids,
-        quarantine_updates,
+        conflicting_call_ids,
+        quarantine_updates: 0,
     }))
 }
 
@@ -555,6 +600,25 @@ mod journal_regression_tests {
     }
 
     #[test]
+    fn new_journal_checks_every_record_before_selecting_unique_append_events() {
+        let call = call_with_event();
+        let original = bson::to_bson(&call.decision_events[0]).unwrap();
+        let mut conflict = call.decision_events[0].clone();
+        conflict.details["score"] = serde_json::json!(99);
+        let conflict = bson::to_bson(&conflict).unwrap();
+        let same_event_twice = [original.clone(), original.clone()];
+        assert_eq!(
+            appendable_events(&same_event_twice, &[]).unwrap(),
+            vec![&original]
+        );
+        assert!(appendable_events(&[original.clone(), conflict.clone()], &[]).is_none());
+        let mut fresh = call.decision_events[0].clone();
+        fresh.event_id = "new-event".into();
+        let fresh = bson::to_bson(&fresh).unwrap();
+        assert!(appendable_events(&[fresh, conflict], &[original]).is_none());
+    }
+
+    #[test]
     fn deletion_tombstones_are_never_parsed_as_active_quarantines() {
         let tombstone = doc! {"prefix_7": "31999999", "deleted": true,
         "expires_at": BsonDateTime::from_millis(4_102_444_800_000)};
@@ -586,7 +650,7 @@ mod journal_regression_tests {
         );
         wire["decision_vector"]["outcome"] = serde_json::json!("OUTGOING_CALL");
         let modern: CallTelemetryDoc = serde_json::from_value(wire).unwrap();
-        assert!(!modern.decision_vector.outcome.is_blocked_or_shadow());
+        assert_eq!(modern.decision_vector.outcome.as_str(), "OUTGOING_CALL");
         assert_eq!(
             modern
                 .to_bson_document()
@@ -637,6 +701,8 @@ mod journal_regression_tests {
     #[ignore = "Requires isolated MongoDB at 127.0.0.1:27028; never uses .env"]
     async fn local_mongo_atomic_journal_and_quarantine_regressions() {
         use crate::db::AppDatabase;
+        use crate::models::{CallOutcome, PrefixQuarantineDoc};
+        use chrono::Duration;
         use mongodb::options::IndexOptions;
         use mongodb::{Client, IndexModel};
         let client = Client::with_uri_str(
@@ -733,16 +799,70 @@ mod journal_regression_tests {
                 .await
                 .is_ok()
         );
+        let before_conflict = app_db
+            .call_telemetry()
+            .find_one(doc! { "_id": &replay.id })
+            .await
+            .unwrap()
+            .unwrap();
+        replay.decision_vector.final_score = 99;
         replay.decision_events[0].details["score"] = serde_json::json!(999);
+        let mut additional_event = replay.decision_events[0].clone();
+        additional_event.event_id = "fresh-but-not-accepted".into();
+        replay.decision_events.push(additional_event);
         assert_eq!(
-            post_telemetry_batch(State(state.clone()), Json(vec![replay]))
+            post_telemetry_batch(State(state.clone()), Json(vec![replay.clone()]))
                 .await
                 .unwrap_err()
                 .0,
             StatusCode::CONFLICT
         );
+        let mut sibling = call_with_event();
+        sibling.id = "independent-sibling".into();
+        sibling.timestamp = Utc::now();
+        sibling.call_details.prefix_7 = "31999998".into();
+        sibling.decision_vector.outcome = CallOutcome::BLOCKED;
+        let mut shadow = sibling.clone();
+        shadow.id = "shadow-sibling".into();
+        shadow.call_details.prefix_7 = "31999997".into();
+        shadow.decision_vector.outcome = CallOutcome::SHADOW_BLOCKED;
+        let partial = post_telemetry_batch(
+            State(state.clone()),
+            Json(vec![replay, sibling.clone(), shadow]),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(
+            partial.accepted_ids,
+            ["independent-sibling", "shadow-sibling"]
+        );
+        assert_eq!(partial.conflicting_call_ids, ["call-test"]);
+        assert_eq!(partial.quarantine_updates, 0);
+        assert!(!partial
+            .accepted_event_ids
+            .iter()
+            .any(|id| id == "fresh-but-not-accepted"));
+        assert_eq!(
+            app_db
+                .call_telemetry()
+                .find_one(doc! { "_id": "call-test" })
+                .await
+                .unwrap()
+                .unwrap(),
+            before_conflict
+        );
+        assert_eq!(
+            app_db
+                .prefix_quarantine()
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
 
         let mut observation = call_with_event();
+        observation.id = "observed-without-request".into();
         let mut response = observation.decision_events[0].clone();
         response.event_id = "response".into();
         response.event_type = "SCREENING_RESPONSE_SUBMITTED".into();
@@ -758,9 +878,20 @@ mod journal_regression_tests {
         older.event_id = "older-rejected-arrived-last".into();
         older.recorded_at = 3000;
         older.details = serde_json::json!({"systemCallType": 5, "systemBlockReason": 0});
-        observation.decision_events = vec![response, blocked, older];
+        let mut tied = older.clone();
+        tied.event_id = "a-tied-rejected-appended-last".into();
+        tied.recorded_at = blocked.recorded_at;
+        observation.decision_events = vec![blocked.clone(), older, tied];
+        let mut uncertain = observation.clone();
+        uncertain.id = "requested-without-identified-component".into();
+        blocked
+            .details
+            .as_object_mut()
+            .unwrap()
+            .remove("systemScreeningAppIsSpamShield");
+        uncertain.decision_events = vec![response, blocked];
         assert!(
-            post_telemetry_batch(State(state.clone()), Json(vec![observation]))
+            post_telemetry_batch(State(state.clone()), Json(vec![observation, uncertain]))
                 .await
                 .is_ok()
         );
@@ -769,6 +900,74 @@ mod journal_regression_tests {
             .unwrap()
             .0;
         assert_eq!(summary.total_blocked, 1);
+        assert_eq!(summary.total_block_requests, 1);
+        assert_eq!(summary.total_intercepted, 5);
+        assert_eq!(summary.total_incoming_records, 6);
+
+        let action_at = Utc::now().timestamp_millis();
+        let mut local_feedback = sibling.decision_events[0].clone();
+        local_feedback.event_id = "local-feedback".into();
+        local_feedback.event_type = "USER_FEEDBACK".into();
+        local_feedback.source = "USER".into();
+        local_feedback.recorded_at = action_at;
+        local_feedback.details = serde_json::json!({"reason": "CONFIRMED_SPAM"});
+        sibling.decision_events.push(local_feedback);
+        sibling.audit.user_feedback = UserFeedback::CONFIRMED_SPAM;
+        let feedback_upload =
+            post_telemetry_batch(State(state.clone()), Json(vec![sibling.clone()]))
+                .await
+                .unwrap()
+                .0;
+        assert_eq!(feedback_upload.accepted_ids, [sibling.id.clone()]);
+        let feedback_id = "same-time-feedback";
+        let feedback = FeedbackPatchRequest {
+            mutation_id: Some(feedback_id.into()),
+            recorded_at: Some(action_at),
+            recorded_at_source: Some("USER_ACTION".into()),
+            user_feedback: UserFeedback::CONFIRMED_SPAM,
+        };
+        for _ in 0..2 {
+            let acknowledgement = patch_telemetry_feedback(
+                State(state.clone()),
+                Path(sibling.id.clone()),
+                Json(feedback.clone()),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(acknowledgement.user_feedback, UserFeedback::CONFIRMED_SPAM);
+        }
+        let feedback_doc = app_db
+            .call_telemetry()
+            .find_one(doc! { "_id": &sibling.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            feedback_doc
+                .get_array("decision_events")
+                .unwrap()
+                .iter()
+                .filter(|event| {
+                    event
+                        .as_document()
+                        .and_then(|event| event.get_str("event_id").ok())
+                        == Some(feedback_id)
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            app_db
+                .prefix_quarantine()
+                .find_one(doc! { "prefix_7": &sibling.call_details.prefix_7 })
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("reason")
+                .unwrap(),
+            "USER_CONFIRMED_SPAM"
+        );
 
         let observed = Utc::now() - Duration::days(1);
         let mut q = PrefixQuarantineDoc {
@@ -835,6 +1034,32 @@ mod journal_regression_tests {
                 .timestamp_millis(),
             q.expires_at.timestamp_millis()
         );
+        let replacement = PrefixQuarantineDoc {
+            reason: "SHOULD_KEEP_EXISTING".into(),
+            expires_at: q.expires_at + Duration::days(7),
+            ..q.clone()
+        };
+        let response = super::super::rules::upsert_quarantine(
+            State(state.clone()),
+            axum::extract::Query(super::super::rules::MutationQuery {
+                recorded_at: Some(deleted_at + 3),
+                automatic: true,
+            }),
+            Json(replacement),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0.quarantine.reason, "SHOULD_KEEP_EXISTING");
+        assert!(!response.0.applied);
+        assert_eq!(
+            app_db
+                .prefix_quarantine()
+                .find_one(doc! { "prefix_7": &q.prefix_7 })
+                .await
+                .unwrap()
+                .unwrap(),
+            revived
+        );
         let payload = super::super::rules::get_sync_payload(
             State(state.clone()),
             axum::extract::Query(crate::models::SyncPayloadQuery {
@@ -846,7 +1071,67 @@ mod journal_regression_tests {
         .unwrap()
         .0;
         assert!(payload.quarantine_snapshot_complete);
-        assert_eq!(payload.prefix_quarantine.len(), 1);
+        assert_eq!(payload.prefix_quarantine.len(), 2);
+
+        let existing_rule = doc! { "rule_id": "BLACKLIST_MG_VOIP_PABX",
+        "enabled": false, "weight": 22_i32, "updated_at": BsonDateTime::now() };
+        app_db
+            .active_rules()
+            .insert_one(existing_rule.clone())
+            .await
+            .unwrap();
+        let manual_cluster = PrefixQuarantineDoc {
+            prefix_7: "3141011".into(),
+            reason: "MANUAL".into(),
+            penalty_weight: 49,
+            ..q.clone()
+        };
+        super::super::rules::store_quarantine(&app_db, &manual_cluster, deleted_at)
+            .await
+            .unwrap();
+        super::super::rules::remove_quarantine(&app_db, "3141013", deleted_at)
+            .await
+            .unwrap();
+        let prefixes = doc! { "prefix_7": { "$in": ["3141011", "3141013"] } };
+        let before = futures::TryStreamExt::try_collect::<Vec<_>>(
+            app_db
+                .prefix_quarantine()
+                .find(prefixes.clone())
+                .sort(doc! { "prefix_7": 1 })
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let first_sync = crate::services::anatel_sync::sync_all_providers(&app_db)
+            .await
+            .unwrap();
+        assert_eq!(first_sync.rules_synced, 2);
+        assert_eq!(first_sync.blacklist_clusters_synced, 9);
+        let second_sync = crate::services::anatel_sync::sync_all_providers(&app_db)
+            .await
+            .unwrap();
+        assert_eq!(second_sync.rules_synced, 0);
+        assert_eq!(second_sync.blacklist_clusters_synced, 0);
+        let after = futures::TryStreamExt::try_collect::<Vec<_>>(
+            app_db
+                .prefix_quarantine()
+                .find(prefixes)
+                .sort(doc! { "prefix_7": 1 })
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(before, after);
+        let mut persisted_rule = app_db
+            .active_rules()
+            .find_one(doc! { "rule_id": "BLACKLIST_MG_VOIP_PABX" })
+            .await
+            .unwrap()
+            .unwrap();
+        persisted_rule.remove("_id");
+        assert_eq!(persisted_rule, existing_rule);
         assert!(name.starts_with("spamshield_review_") && name.ends_with("_test"));
         db.drop().await.unwrap();
     }

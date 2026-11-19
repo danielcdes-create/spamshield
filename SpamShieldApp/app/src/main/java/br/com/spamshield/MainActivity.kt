@@ -331,7 +331,6 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
                     onSaveTailscaleUrl = viewModel::setTailscaleUrl,
                     onSaveApiBearerToken = viewModel::setApiBearerToken,
                     onChangeThreshold = viewModel::setThresholdScore,
-                    onToggleSkipCallLog = viewModel::setHideBlockedFromCallLog,
                     onCheckApkUpdate = viewModel::checkApkUpdate,
                     onDownloadAndInstallApk = viewModel::downloadAndInstallApk,
                     onExportFiles = viewModel::exportTelemetryFiles

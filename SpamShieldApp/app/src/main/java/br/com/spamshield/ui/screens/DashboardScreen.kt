@@ -64,9 +64,9 @@ fun DashboardScreen(
 
     // Global stats
     val incomingTelemetry = telemetryList.filter { it.outcome != "OUTGOING_CALL" }
-    val totalIntercepted = incomingTelemetry.size
     val byCall = decisionEvents.groupBy { it.callId }
     val evidence = incomingTelemetry.associate { it.id to DecisionTrace.evidence(it, byCall[it.id].orEmpty()) }
+    val totalScreened = evidence.values.count { it.screeningRecorded }
     val blockedCalls = incomingTelemetry.filter { evidence[it.id]?.blockObserved == true }
     val requestedCount = evidence.values.count { it.blockRequested }
     val rejectedCount = evidence.values.count { it.dialerRejected }
@@ -74,7 +74,7 @@ fun DashboardScreen(
     val responseLatencies = decisionEvents.filter {
         it.eventType == "SCREENING_RESPONSE_SUBMITTED" && it.source == "CALL_SCREENING_SERVICE"
     }.mapNotNull { DecisionTrace.details(it).elapsedMs }
-    val avgLatencyMs = if (responseLatencies.isEmpty()) 0.0 else responseLatencies.average()
+    val avgLatencyMs = responseLatencies.takeIf { it.isNotEmpty() }?.average()
 
     // Today's stats (from 00:00 today)
     val startOfTodayMillis = Calendar.getInstance().apply {
@@ -85,7 +85,7 @@ fun DashboardScreen(
     }.timeInMillis
 
     val todayCalls = incomingTelemetry.filter { it.timestamp >= startOfTodayMillis }
-    val todayIntercepted = todayCalls.size
+    val todayScreened = todayCalls.count { evidence[it.id]?.screeningRecorded == true }
     val todayBlocked = todayCalls.count { evidence[it.id]?.blockObserved == true }
     val todayRejected = todayCalls.count { evidence[it.id]?.dialerRejected == true }
     val todayTopCarrier = todayCalls
@@ -160,7 +160,7 @@ fun DashboardScreen(
                                 text = if (settings.shadowModeEnabled) {
                                     "Modo Sombra Ativo • Anatel & STIR/SHAKEN"
                                 } else {
-                                    "Escudo Ativo (< 10 ms) • Anatel & STIR/SHAKEN"
+                                    "Escudo Ativo • Anatel & STIR/SHAKEN"
                                 },
                                 fontSize = 11.sp,
                                 color = Color(0xFF94A3B8)
@@ -231,8 +231,8 @@ fun DashboardScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     HeroDailyStatItem(
-                        label = "Registros Hoje",
-                        value = "$todayIntercepted",
+                        label = "Triagens Hoje",
+                        value = "$todayScreened",
                         accent = Color.White,
                         modifier = Modifier.weight(1f)
                     )
@@ -264,15 +264,15 @@ fun DashboardScreen(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             KpiCard(
-                title = "Registros",
-                value = "$totalIntercepted",
-                subtitle = "Histórico + Tempo Real",
+                title = "Triagens Registradas",
+                value = "$totalScreened",
+                subtitle = "${incomingTelemetry.size} registros de entrada",
                 modifier = Modifier.weight(1f)
             )
             KpiCard(
                 title = "Bloqueios Registrados",
                 value = "$totalBlocked",
-                subtitle = "Resposta + evidência do Android",
+                subtitle = "CallLog atribui ao SpamShield",
                 modifier = Modifier.weight(1f)
             )
         }
@@ -289,7 +289,7 @@ fun DashboardScreen(
             )
             KpiCard(
                 title = "Resposta Média",
-                value = String.format(Locale.US, "%.2f ms", avgLatencyMs),
+                value = avgLatencyMs?.let { String.format(Locale.US, "%.2f ms", it) } ?: "—",
                 subtitle = "Até o envio ao Android",
                 modifier = Modifier.weight(1f)
             )

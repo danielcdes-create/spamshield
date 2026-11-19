@@ -14,7 +14,7 @@ use bson::{doc, Bson, DateTime as BsonDateTime, Document};
 use chrono::{TimeZone, Utc};
 use futures::TryStreamExt;
 use mongodb::options::{FindOptions, UpdateOptions};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// GET /api/v1/sync/payload?ddd=31&since_timestamp=1700000000
@@ -149,6 +149,15 @@ pub async fn upsert_active_rule(
 #[derive(Debug, Default, Deserialize)]
 pub struct MutationQuery {
     pub recorded_at: Option<i64>,
+    #[serde(default)]
+    pub automatic: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QuarantineUpsertResponse {
+    #[serde(flatten)]
+    pub quarantine: PrefixQuarantineDoc,
+    pub applied: bool,
 }
 
 pub(crate) fn duplicate_key(error: &mongodb::error::Error) -> bool {
@@ -175,8 +184,48 @@ pub async fn store_quarantine(
     q: &PrefixQuarantineDoc,
     recorded_at: i64,
 ) -> Result<(), mongodb::error::Error> {
-    if q.expires_at <= Utc::now() || q.prefix_7.is_empty() {
-        return Ok(());
+    store_quarantine_mutation(db, q, recorded_at, false)
+        .await
+        .map(|_| ())
+}
+
+async fn store_quarantine_mutation(
+    db: &AppDatabase,
+    q: &PrefixQuarantineDoc,
+    recorded_at: i64,
+    automatic: bool,
+) -> Result<bool, mongodb::error::Error> {
+    let now = Utc::now();
+    if q.expires_at <= now || q.prefix_7.is_empty() {
+        return Ok(false);
+    }
+    let collection = db.prefix_quarantine();
+    let now_bson = BsonDateTime::from_chrono(now);
+    let mut filter = quarantine_revision_filter(&q.prefix_7, recorded_at);
+    if automatic {
+        if q.prefix_7.len() == 8
+            && q.prefix_7.bytes().all(|b| b.is_ascii_digit())
+            && collection
+                .find_one(doc! {
+                    "prefix_7": &q.prefix_7[..7],
+                    "deleted": { "$ne": true },
+                    "expires_at": { "$gt": now_bson }
+                })
+                .await?
+                .is_some()
+        {
+            return Ok(false);
+        }
+        // Compare the expiry during the upsert so an exact-prefix mutation made by another
+        // client after the original call is not overwritten by a queued automatic observation.
+        filter.insert(
+            "$and",
+            vec![doc! { "$or": [
+                { "deleted": true },
+                { "expires_at": { "$lte": now_bson } },
+                { "expires_at": { "$exists": false } }
+            ] }],
+        );
     }
     let expiry = BsonDateTime::from_chrono(q.expires_at);
     let first = BsonDateTime::from_chrono(q.first_seen_at);
@@ -193,14 +242,9 @@ pub async fn store_quarantine(
         "distinct_numbers_seen": { "$setUnion": [{ "$ifNull": ["$distinct_numbers_seen", []] }, { "$literal": &q.distinct_numbers_seen }] },
         "deleted": false, "mutation_at": recorded_at
     } }];
-    match db
-        .prefix_quarantine()
-        .update_one(quarantine_revision_filter(&q.prefix_7, recorded_at), update)
-        .upsert(true)
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(error) if duplicate_key(&error) => Ok(()),
+    match collection.update_one(filter, update).upsert(true).await {
+        Ok(result) => Ok(result.modified_count > 0 || result.upserted_id.is_some()),
+        Err(error) if duplicate_key(&error) => Ok(false),
         Err(error) => Err(error),
     }
 }
@@ -209,17 +253,21 @@ pub async fn upsert_quarantine(
     State(state): State<AppState>,
     Query(query): Query<MutationQuery>,
     Json(q): Json<PrefixQuarantineDoc>,
-) -> Result<Json<PrefixQuarantineDoc>, (StatusCode, String)> {
-    store_quarantine(
+) -> Result<Json<QuarantineUpsertResponse>, (StatusCode, String)> {
+    let applied = store_quarantine_mutation(
         &state.db,
         &q,
         query
             .recorded_at
             .unwrap_or(q.last_seen_at.timestamp_millis()),
+        query.automatic,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(q))
+    Ok(Json(QuarantineUpsertResponse {
+        quarantine: q,
+        applied,
+    }))
 }
 
 pub async fn upsert_quarantine_batch(

@@ -23,7 +23,7 @@ class DecisionTraceTest {
     @Test fun manualRejectionNeverBecomesEvidenceOfPreventiveBlocking() = runTest {
         val dao = dao()
         val engine = engine(dao)
-        val arrival = engine.evaluateIncomingCall(raw, "NOT_VERIFIED", at, "CALL_SCREENING_SERVICE").telemetry
+        val arrival = engine.screenIncomingCallForTest(raw, "NOT_VERIFIED", at).telemetry
         DecisionTrace.record(dao, arrival.id, "SCREENING_RESPONSE_SUBMITTED", "CALL_SCREENING_SERVICE",
             DecisionDetails(disallowCall = false, rejectCall = false), at + 1)
         val original = dao.getDecisionEvents(arrival.id).single { it.eventType == "SCREENING_DECISION" }
@@ -44,10 +44,10 @@ class DecisionTraceTest {
     private suspend fun reprocessStored(dao: FakeSpamShieldDao) =
         br.com.spamshield.service.reprocessStoredTelemetry(dao, SettingsDataStore())
 
-    @Test fun blockRequestNeedsAndroidObservationAndMatchingReason() = runTest {
+    @Test fun unknownOrDifferentAndroidAttributionDoesNotCountEvenWithABlockRequest() = runTest {
         val dao = dao()
         QuarantinePrefixIndex.add("31995201")
-        val row = engine(dao).evaluateIncomingCall(raw, "NOT_VERIFIED", at, "CALL_SCREENING_SERVICE").telemetry
+        val row = engine(dao).screenIncomingCallForTest(raw, "NOT_VERIFIED", at).telemetry
         DecisionTrace.record(dao, row.id, "SCREENING_RESPONSE_SUBMITTED", "CALL_SCREENING_SERVICE",
             DecisionDetails(disallowCall = true, rejectCall = true), at + 1)
         var evidence = DecisionTrace.evidence(row, dao.getDecisionEvents(row.id))
@@ -58,7 +58,7 @@ class DecisionTraceTest {
         assertFalse(DecisionTrace.evidence(row, dao.getDecisionEvents(row.id)).blockObserved)
         DecisionTrace.record(dao, row.id, "CALL_LOG_OBSERVATION", "ANDROID_CALL_LOG",
             DecisionDetails(systemCallType = 6, systemBlockReason = 1), at + 3)
-        assertTrue(DecisionTrace.evidence(row, dao.getDecisionEvents(row.id)).blockObserved)
+        assertFalse(DecisionTrace.evidence(row, dao.getDecisionEvents(row.id)).blockObserved)
         DecisionTrace.record(dao, row.id, "CALL_LOG_OBSERVATION", "ANDROID_CALL_LOG",
             DecisionDetails(systemCallType = 6, systemBlockReason = 1,
                 systemScreeningComponent = "other.app/Screening", systemScreeningAppIsSpamShield = false), at + 3_001)
@@ -68,6 +68,17 @@ class DecisionTraceTest {
         evidence = DecisionTrace.evidence(row, dao.getDecisionEvents(row.id))
         assertFalse(evidence.blockObserved)
         assertTrue(evidence.dialerRejected)
+    }
+
+    @Test fun explicitAndroidAttributionCountsWithoutTheOriginalRequest() = runTest {
+        val dao = dao()
+        val row = arrivalRow("historical", at, raw, raw, "", "s23-ultra-history")
+        DecisionTrace.record(dao, row.id, "CALL_LOG_OBSERVATION", "ANDROID_CALL_LOG",
+            DecisionDetails(systemCallType = 6, systemBlockReason = 1, systemScreeningAppIsSpamShield = true), at + 1)
+        val evidence = DecisionTrace.evidence(row, dao.getDecisionEvents(row.id))
+        assertTrue(evidence.blockObserved)
+        assertFalse(evidence.blockRequested)
+        assertFalse(evidence.screeningRecorded)
     }
 
     @Test fun simulationAndLegacyScoresDoNotCountAsNativeBlocks() = runTest {
@@ -84,7 +95,7 @@ class DecisionTraceTest {
     @Test fun repeatedObservationIsIdempotentAndPreservesAllChangedResults() = runTest {
         val dao = dao()
         val engine = engine(dao)
-        val row = engine.evaluateIncomingCall(raw, "NOT_VERIFIED", at, "CALL_SCREENING_SERVICE").telemetry
+        val row = engine.screenIncomingCallForTest(raw, "NOT_VERIFIED", at).telemetry
         repeat(2) { engine.evaluatePostCallLogVerdict(row.normalizedNumber, 3, 0, callTimestampMs = at, nowMillis = at + 1000) }
         assertEquals(1, dao.getDecisionEvents(row.id).count { it.eventType == "CALL_LOG_OBSERVATION" })
         engine.evaluatePostCallLogVerdict(row.normalizedNumber, 5, 0, callTimestampMs = at, nowMillis = at + 2000)
@@ -93,7 +104,7 @@ class DecisionTraceTest {
 
     @Test fun lateObservationDoesNotAttachToUnrelatedLatestCall() = runTest {
         val dao = dao()
-        val row = engine(dao).evaluateIncomingCall(raw, "NOT_VERIFIED", at, "CALL_SCREENING_SERVICE").telemetry
+        val row = engine(dao).screenIncomingCallForTest(raw, "NOT_VERIFIED", at).telemetry
         engine(dao).evaluatePostCallLogVerdict(row.normalizedNumber, 5, 0,
             callTimestampMs = at - 86_400_000, nowMillis = at + 2000)
         assertTrue(dao.getDecisionEvents(row.id).none { it.eventType == "CALL_LOG_OBSERVATION" })
@@ -103,23 +114,39 @@ class DecisionTraceTest {
 
     @Test fun eventsArrivingDuringUploadRemainPendingAfterSnapshotAcknowledgement() = runTest {
         val dao = dao()
-        val row = engine(dao).evaluateIncomingCall(raw, "NOT_VERIFIED", at, "CALL_SCREENING_SERVICE").telemetry
+        val row = engine(dao).screenIncomingCallForTest(raw, "NOT_VERIFIED", at).telemetry
         val sentIds = dao.getDecisionEvents(row.id).map { it.eventId }
         DecisionTrace.record(dao, row.id, "USER_FEEDBACK", "USER", DecisionDetails(reason = "CONFIRMED_SPAM"))
-        dao.markTelemetrySynced(listOf(row.id))
-        dao.markDecisionEventsSynced(sentIds)
+        dao.acknowledgeTelemetryUpload(row, sentIds)
         assertEquals(listOf(row.id), dao.getPendingTelemetry().map { it.id })
         assertEquals(1, dao.getDecisionEvents(row.id).count { it.syncStatus == "PENDING" })
     }
 
+    @Test fun uploadAckDoesNotMarkAConcurrentRowOrReassignedEventSynced() = runTest {
+        val dao = dao()
+        val row = arrivalRow("original", at, raw, raw, "", "s23-ultra-history")
+        dao.insertTelemetry(row)
+        DecisionTrace.record(dao, row.id, "HISTORY_ASSESSMENT", "HISTORY_IMPORT", DecisionTrace.snapshot(row))
+        val sentIds = dao.getDecisionEvents(row.id).map { it.eventId }
+        dao.reassignDecisionEvents(row.id, "other")
+        val updated = row.copy(finalScore = 90, outcome = "BLOCKED")
+        dao.insertTelemetry(updated)
+
+        dao.acknowledgeTelemetryUpload(row, sentIds)
+
+        assertEquals(updated, dao.getTelemetryById(row.id))
+        assertEquals("PENDING", dao.getDecisionEvents("other").single().syncStatus)
+    }
+
     @Test fun exportKeepsLegacyFieldsAndStructuredImmutableEvents() = runTest {
         val dao = dao()
-        val row = engine(dao).evaluateIncomingCall(raw, "NOT_VERIFIED", at, "CALL_SCREENING_SERVICE").telemetry
+        val row = engine(dao).screenIncomingCallForTest(raw, "NOT_VERIFIED", at).telemetry
         val event = dao.getDecisionEvents(row.id).first { it.eventType == "SCREENING_DECISION" }
         val exported = Json.parseToJsonElement(TelemetryExport.encode(listOf(row), dao.getAllDecisionEvents())).jsonArray.single().jsonObject
         assertEquals(row.id, exported["id"]!!.jsonPrimitive.content)
         assertEquals(row.finalScore, exported["finalScore"]!!.jsonPrimitive.int)
         val details = exported["decisionEvents"]!!.jsonArray.single().jsonObject["details"]!!.jsonObject
+        assertEquals(event.syncStatus, exported["decisionEventSync"]!!.jsonObject[event.eventId]!!.jsonPrimitive.content)
         assertEquals(45, details["score"]!!.jsonPrimitive.int)
         assertTrue(details["rules"]!!.jsonArray.isNotEmpty())
         assertNotNull(DecisionTrace.details(event).ruleSetFingerprint)
@@ -131,8 +158,8 @@ class DecisionTraceTest {
     @Test fun separateScreeningCallsWithin15SecondsKeepTheirOwnDecisions() = runTest {
         val dao = dao()
         val engine = engine(dao)
-        val a = engine.evaluateIncomingCall(raw, "NOT_VERIFIED", at, "CALL_SCREENING_SERVICE")
-        val b = engine.evaluateIncomingCall(raw, "NOT_VERIFIED", at + 10_000, "CALL_SCREENING_SERVICE")
+        val a = engine.screenIncomingCallForTest(raw, "NOT_VERIFIED", at)
+        val b = engine.screenIncomingCallForTest(raw, "NOT_VERIFIED", at + 10_000)
         assertNotEquals(a.telemetry.id, b.telemetry.id)
         assertEquals(2, dao.telemetries.size)
         assertEquals(1, dao.getDecisionEvents(a.telemetry.id).count { it.eventType == "SCREENING_DECISION" })
@@ -148,7 +175,7 @@ class DecisionTraceTest {
         val engine = engine(dao)
         // Neighboring /8 in same /6 (313663x) is already in quarantine
         QuarantinePrefixIndex.add("31366372")
-        val arrival = engine.evaluateIncomingCall("03136632192", "PASSED", at, "CALL_SCREENING_SERVICE").telemetry
+        val arrival = engine.screenIncomingCallForTest("03136632192", "PASSED", at).telemetry
         assertEquals(40, arrival.finalScore)
         assertTrue(arrival.triggeredRulesJson.contains("PREFIX6_NEIGHBOR_WARNING"))
 
@@ -180,7 +207,7 @@ class DecisionTraceTest {
     @Test fun coalescedRedialKeepsItsOwnObservationWithoutOverwritingTheFirstCall() = runTest {
         val dao = dao()
         val engine = engine(dao)
-        val arrival = engine.evaluateIncomingCall("03136630946", "PASSED", at, "CALL_SCREENING_SERVICE").telemetry
+        val arrival = engine.screenIncomingCallForTest("03136630946", "PASSED", at).telemetry
         // Exact observation at `at` (rejected in dialer, type=5)
         engine.evaluatePostCallLogVerdict(arrival.normalizedNumber, 5, 0, callTimestampMs = at, nowMillis = at + 1_000, systemBlockReason = 0)
         // Redial 11s later in CallLog (blocked at edge, type=6) falls within 15s window of `arrival`
@@ -201,7 +228,7 @@ class DecisionTraceTest {
         assertEquals(1, dao.getDecisionEvents(arrival.id).count { it.eventType == "CALL_LOG_OBSERVATION" })
     }
 
-    @Test fun reprocessDeduplicatesUtilityRowsAndMigrates055Prefixes() = runTest {
+    @Test fun reprocessNormalizesLegacyRowsWithoutModifyingQuarantines() = runTest {
         val dao = dao()
         // Insert duplicate utility 03110315 rows at same timestamp (one legacy with pfx7="3110315", one canonical)
         val ts = 1_791_555_733_869L
@@ -224,6 +251,8 @@ class DecisionTraceTest {
             )
         )
 
+        val protectionsBefore = dao.getAllQuarantines()
+        val mutationsBefore = dao.getSyncMutations()
         reprocessStored(dao)
 
         val utilityRows = dao.getAllTelemetry().filter { it.rawNumber == "03110315" }
@@ -235,8 +264,8 @@ class DecisionTraceTest {
         assertEquals("31973350", row055.prefix7)
         assertEquals("MOBILE", row055.lineType)
         assertEquals("Claro", row055.carrierGuess)
-        assertTrue(dao.getAllQuarantines().none { it.prefix7.startsWith("055") })
-        assertTrue(dao.getAllQuarantines().any { it.prefix7 == "31973350" })
+        assertEquals(protectionsBefore, dao.getAllQuarantines())
+        assertEquals(mutationsBefore, dao.getSyncMutations())
     }
 
     private fun arrivalRow(id: String, ts: Long, raw: String, norm: String, pfx: String, dev: String) =

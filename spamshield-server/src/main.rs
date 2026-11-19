@@ -266,7 +266,7 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
         let batch_bytes = resp_batch.into_body().collect().await.unwrap().to_bytes();
         let batch_res: BatchTelemetryResponse = serde_json::from_slice(&batch_bytes).unwrap();
         assert_eq!(batch_res.accepted_ids, vec![test_id.clone()]);
-        assert_eq!(batch_res.quarantine_updates, 1);
+        assert_eq!(batch_res.quarantine_updates, 0);
 
         // 3. Test PATCH /api/v1/telemetry/:id/feedback
         let feedback_req = FeedbackPatchRequest {
@@ -341,16 +341,45 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
     }
 
     #[tokio::test]
-    async fn test_apk_info_from_temp_file_includes_sha256() {
-        use crate::routes::{apk_info_for_files, sha256_hex};
+    async fn test_apk_info_requires_artifact_and_valid_release_metadata() {
+        use crate::routes::{apk_info_for_files, apk_info_value, sha256_hex};
         let dir = std::env::temp_dir().join(format!("spamshield-apk-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let apk = dir.join("app.apk");
+        let metadata = dir.join("metadata.json");
         let bytes = b"spamshield-apk-bytes";
+        let manifest = apk_info_value(18, "1.3.4", bytes);
+        assert_eq!(
+            apk_info_for_files(&apk, &metadata).await.unwrap_err().0,
+            StatusCode::NOT_FOUND
+        );
         std::fs::write(&apk, bytes).unwrap();
-        let info = apk_info_for_files(&apk, &dir.join("missing-meta.json")).await;
+        assert_eq!(
+            apk_info_for_files(&apk, &metadata).await.unwrap_err().0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        std::fs::write(&metadata, b"{invalid").unwrap();
+        assert_eq!(
+            apk_info_for_files(&apk, &metadata).await.unwrap_err().0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        std::fs::write(&metadata, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(apk_info_for_files(&apk, &metadata).await.unwrap(), manifest);
+        std::fs::write(&apk, b"spamshield-apk-byteX").unwrap();
+        assert_eq!(
+            apk_info_for_files(&apk, &metadata).await.unwrap_err().0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        std::fs::write(&apk, bytes).unwrap();
+        std::fs::write(
+            &metadata,
+            br#"{"elements":[{"versionCode":18,"versionName":"1.3.4"}]}"#,
+        )
+        .unwrap();
+        let info = apk_info_for_files(&apk, &metadata).await.unwrap();
         assert_eq!(info["sha256_checksum"], sha256_hex(bytes));
         assert_eq!(info["size_bytes"], bytes.len() as u64);
+        assert_eq!(info["version_code"], 18);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -369,6 +398,8 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
         };
         let mut cfg = AppConfig::from_env();
         cfg.api_key = "unit-test-key".to_string();
+        cfg.apk_storage_path =
+            std::env::temp_dir().join(format!("missing-spamshield-{}.apk", uuid::Uuid::new_v4()));
         let router = routes::create_router(routes::AppState::new(&cfg, db));
 
         let missing = Request::builder()
@@ -424,6 +455,6 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
             .body(Body::empty())
             .unwrap();
         let pub_apk_resp = router.oneshot(public_apk_info).await.unwrap();
-        assert_eq!(pub_apk_resp.status(), StatusCode::OK);
+        assert_eq!(pub_apk_resp.status(), StatusCode::NOT_FOUND);
     }
 }

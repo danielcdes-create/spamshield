@@ -36,8 +36,12 @@ open class FakeSpamShieldDao : SpamShieldDao {
     override suspend fun getAllDecisionEvents() = decisionEvents.toList()
     override fun observeDecisionEvents(): Flow<List<CallDecisionEventEntity>> = MutableStateFlow(decisionEvents)
     override suspend fun getDecisionEvents(callId: String) = decisionEvents.filter { it.callId == callId }.sortedWith(compareBy({ it.recordedAt }, { it.eventId }))
-    override suspend fun markDecisionEventsSynced(eventIds: List<String>) {
-        decisionEvents.replaceAll { if (it.eventId in eventIds) it.copy(syncStatus = "SYNCED") else it }
+    override suspend fun getDecisionEventsForCalls(callIds: List<String>) =
+        decisionEvents.filter { it.callId in callIds }.sortedWith(compareBy({ it.recordedAt }, { it.eventId }))
+    override suspend fun markDecisionEventsSynced(callId: String, eventIds: List<String>) {
+        decisionEvents.replaceAll {
+            if (it.callId == callId && it.eventId in eventIds) it.copy(syncStatus = "SYNCED") else it
+        }
     }
     override suspend fun deleteDecisionEvents(eventIds: List<String>) {
         val set = eventIds.toSet()
@@ -61,11 +65,22 @@ open class FakeSpamShieldDao : SpamShieldDao {
     override suspend fun deleteTelemetryById(id: String) {
         telemetries.removeAll { it.id == id }
     }
+    override suspend fun deleteUnjournaledPendingTelemetry(id: String): Int {
+        val removed = telemetries.removeAll { row ->
+            row.id == id && row.syncStatus == "PENDING" && row.userFeedback == "UNRATED" &&
+                decisionEvents.none { it.callId == id }
+        }
+        return if (removed) 1 else 0
+    }
 
     override fun observeAllTelemetry(): Flow<List<CallTelemetryEntity>> = MutableStateFlow(telemetries)
     override suspend fun getAllTelemetry(): List<CallTelemetryEntity> = telemetries.toList()
     override suspend fun getTelemetryById(id: String): CallTelemetryEntity? = telemetries.find { it.id == id }
-    override suspend fun getPendingTelemetry(): List<CallTelemetryEntity> = telemetries.filter { it.syncStatus == "PENDING" || decisionEvents.any { e -> e.callId == it.id && e.syncStatus == "PENDING" } }
+    override suspend fun getPendingTelemetry(afterTimestamp: Long, afterId: String): List<CallTelemetryEntity> =
+        telemetries.filter { row ->
+            (row.timestamp > afterTimestamp || row.timestamp == afterTimestamp && row.id > afterId) &&
+                (row.syncStatus == "PENDING" || decisionEvents.any { it.callId == row.id && it.syncStatus == "PENDING" })
+        }.sortedWith(compareBy({ it.timestamp }, { it.id })).take(100)
     override suspend fun markTelemetrySynced(ids: List<String>) {
         telemetries.replaceAll { row ->
             if (row.id in ids) row.copy(syncStatus = "SYNCED") else row

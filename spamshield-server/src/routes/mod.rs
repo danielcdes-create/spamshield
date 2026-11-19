@@ -74,32 +74,66 @@ pub fn apk_info_value(version_code: i64, version_name: &str, apk_bytes: &[u8]) -
     })
 }
 
-pub async fn apk_info_for_files(apk_path: &Path, metadata_path: &Path) -> Value {
-    let apk_bytes = tokio::fs::read(apk_path).await.unwrap_or_default();
-    let (version_code, version_name) = read_apk_version(metadata_path).await;
-    apk_info_value(version_code, &version_name, &apk_bytes)
+async fn read_apk(apk_path: &Path) -> Result<Vec<u8>, (StatusCode, &'static str)> {
+    match tokio::fs::read(apk_path).await {
+        Ok(bytes) if !bytes.is_empty() => Ok(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err((StatusCode::NOT_FOUND, "APK not found"))
+        }
+        _ => Err((StatusCode::SERVICE_UNAVAILABLE, "APK unavailable")),
+    }
 }
 
-async fn read_apk_version(metadata_path: &Path) -> (i64, String) {
-    let mut version_code = 1_i64;
-    let mut version_name = "1.0.0".to_string();
-    if let Ok(meta_str) = tokio::fs::read_to_string(metadata_path).await {
-        if let Ok(meta_json) = serde_json::from_str::<Value>(&meta_str) {
-            if let Some(first_el) = meta_json
-                .get("elements")
-                .and_then(|e| e.as_array())
-                .and_then(|a| a.first())
-            {
-                if let Some(vc) = first_el.get("versionCode").and_then(|v| v.as_i64()) {
-                    version_code = vc;
-                }
-                if let Some(vn) = first_el.get("versionName").and_then(|v| v.as_str()) {
-                    version_name = vn.to_string();
-                }
-            }
+pub async fn apk_info_for_files(
+    apk_path: &Path,
+    metadata_path: &Path,
+) -> Result<Value, (StatusCode, &'static str)> {
+    let unavailable = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "APK metadata unavailable or invalid",
+    );
+    let apk_bytes = read_apk(apk_path).await?;
+    let metadata = tokio::fs::read_to_string(metadata_path)
+        .await
+        .map_err(|_| unavailable)?;
+    let metadata: Value =
+        serde_json::from_str(metadata.trim_start_matches('\u{feff}')).map_err(|_| unavailable)?;
+    let manifest =
+        metadata.get("sha256_checksum").is_some() || metadata.get("version_code").is_some();
+    let (code, name) = if manifest {
+        (
+            metadata["version_code"].as_i64(),
+            metadata["version_name"].as_str(),
+        )
+    } else {
+        // Continue serving deployments configured with Gradle's output-metadata.json.
+        match metadata
+            .get("elements")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+        {
+            Some([element]) => (
+                element["versionCode"].as_i64(),
+                element["versionName"].as_str(),
+            ),
+            _ => return Err(unavailable),
         }
+    };
+    let code = code.filter(|code| *code > 0).ok_or(unavailable)?;
+    let name = name
+        .filter(|name| !name.trim().is_empty())
+        .ok_or(unavailable)?;
+    let info = apk_info_value(code, name, &apk_bytes);
+    if manifest
+        && (metadata.get("size_bytes") != info.get("size_bytes")
+            || metadata.get("sha256_checksum") != info.get("sha256_checksum"))
+    {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "APK does not match its release manifest",
+        ));
     }
-    (version_code, version_name)
+    Ok(info)
 }
 
 async fn require_bearer(
@@ -204,14 +238,18 @@ async fn sync_providers_handler(
     Ok(Json(summary))
 }
 
-async fn get_apk_info(State(state): State<AppState>) -> Json<Value> {
-    Json(apk_info_for_files(&state.apk_path, &state.apk_metadata_path).await)
+async fn get_apk_info(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, &'static str)> {
+    apk_info_for_files(&state.apk_path, &state.apk_metadata_path)
+        .await
+        .map(Json)
 }
 
 async fn download_apk(State(state): State<AppState>) -> Result<Response, (StatusCode, String)> {
-    let bytes = tokio::fs::read(&state.apk_path)
+    let bytes = read_apk(&state.apk_path)
         .await
-        .map_err(|e| (StatusCode::NOT_FOUND, format!("APK not found: {}", e)))?;
+        .map_err(|(status, message)| (status, message.to_string()))?;
 
     Response::builder()
         .status(StatusCode::OK)

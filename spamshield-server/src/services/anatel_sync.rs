@@ -201,7 +201,7 @@ pub async fn sync_all_providers(
     let parsed_anatel = parse_anatel_csv_parallel(BUILTIN_ANATEL_PLAN_CSV);
     let anatel_count = sync_anatel_records_to_db(db, &parsed_anatel).await?;
 
-    // 2. Upsert Brazilian telemarketing & VoIP trunk regex rules (Anatel Ato 10.413 + PABX ranges)
+    // Seed missing catalog rules. Operator and feedback adjustments own existing rules.
     let now_bson = BsonDateTime::now();
     let provider_rules = vec![
         doc! {
@@ -240,17 +240,16 @@ pub async fn sync_all_providers(
     let mut rules_synced = 0usize;
     for r in provider_rules {
         let rid = r.get_str("rule_id").unwrap_or_default().to_string();
-        if rules_coll
-            .update_one(doc! { "rule_id": rid }, doc! { "$set": r })
+        let result = rules_coll
+            .update_one(doc! { "rule_id": rid }, doc! { "$setOnInsert": r })
             .with_options(UpdateOptions::builder().upsert(true).build())
-            .await
-            .is_ok()
-        {
+            .await?;
+        if result.upserted_id.is_some() {
             rules_synced += 1;
         }
     }
 
-    // 3. Upsert known Brazilian spammer prefix clusters into prefix_quarantine
+    // Seed missing clusters. The same key matches active, expired and deleted entries.
     let expires_at = BsonDateTime::from_chrono(Utc::now() + Duration::days(14));
     let known_clusters = vec![
         ("3141011", "31", "VoIP", 75_i32, "ROBOCALL_PREFIX_CLUSTER"),
@@ -271,17 +270,15 @@ pub async fn sync_all_providers(
     for (p7, ddd, carrier, weight, reason) in known_clusters {
         let res = q_coll
             .update_one(
-                doc! { "prefix_7": p7, "deleted": { "$ne": true } },
+                doc! { "prefix_7": p7 },
                 doc! {
-                    "$set": {
+                    "$setOnInsert": {
                         "ddd": ddd,
                         "carrier_guess": carrier,
                         "penalty_weight": weight,
                         "reason": reason.trim(),
                         "last_seen_at": now_bson,
                         "expires_at": expires_at,
-                    },
-                    "$setOnInsert": {
                         "distinct_numbers_seen": [],
                         "hit_count": 1_i32,
                         "first_seen_at": now_bson,
@@ -289,8 +286,8 @@ pub async fn sync_all_providers(
                 },
             )
             .with_options(UpdateOptions::builder().upsert(true).build())
-            .await;
-        if res.is_ok() {
+            .await?;
+        if res.upserted_id.is_some() {
             blacklist_clusters_synced += 1;
         }
     }

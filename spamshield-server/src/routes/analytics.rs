@@ -32,7 +32,12 @@ pub async fn get_analytics_summary(
             "initialValue": null,
             "in": { "$cond": [
                 { "$or": [ { "$eq": ["$$value", null] },
-                    { "$gte": ["$$this.recorded_at", "$$value.recorded_at"] } ] },
+                    { "$gt": ["$$this.recorded_at", "$$value.recorded_at"] },
+                    { "$and": [
+                        { "$eq": ["$$this.recorded_at", "$$value.recorded_at"] },
+                        { "$gt": ["$$this.event_id", "$$value.event_id"] }
+                    ] }
+                ] },
                 "$$this", "$$value"
             ] }
         } }
@@ -40,14 +45,14 @@ pub async fn get_analytics_summary(
     let pipeline = vec![
         doc! { "$match": { "call_details.call_direction": { "$ne": "OUTGOING" }, "decision_vector.outcome": { "$ne": "OUTGOING_CALL" } } },
         doc! { "$set": {
+            "_screening_decision": latest("SCREENING_DECISION", Some("CALL_SCREENING_SERVICE")),
             "_screening_response": latest("SCREENING_RESPONSE_SUBMITTED", Some("CALL_SCREENING_SERVICE")),
             "_call_log_observation": latest("CALL_LOG_OBSERVATION", None),
         }},
         doc! { "$set": { "_confirmed_block": { "$and": [
-            { "$eq": ["$_screening_response.details.disallowCall", true] },
             { "$eq": ["$_call_log_observation.details.systemCallType", 6] },
             { "$eq": ["$_call_log_observation.details.systemBlockReason", 1] },
-            { "$ne": ["$_call_log_observation.details.systemScreeningAppIsSpamShield", false] }
+            { "$eq": ["$_call_log_observation.details.systemScreeningAppIsSpamShield", true] }
         ]}}},
         doc! {
             "$facet": {
@@ -55,7 +60,11 @@ pub async fn get_analytics_summary(
                     {
                         "$group": {
                             "_id": null,
-                            "total_intercepted": { "$sum": 1 },
+                            "total_incoming_records": { "$sum": 1 },
+                            "total_intercepted": { "$sum": { "$cond": [{ "$or": [
+                                { "$ne": ["$_screening_decision", null] },
+                                { "$ne": ["$_screening_response", null] }
+                            ] }, 1, 0] } },
                             "total_blocked": {
                                 "$sum": {
                                     "$cond": [
@@ -129,6 +138,7 @@ pub async fn get_analytics_summary(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut total_intercepted = 0_i64;
+    let mut total_incoming_records = 0_i64;
     let mut total_blocked = 0_i64;
     let mut total_block_requests = 0_i64;
     let mut total_dialer_rejected = 0_i64;
@@ -146,6 +156,7 @@ pub async fn get_analytics_summary(
         if let Ok(totals_arr) = facet_doc.get_array("totals") {
             if let Some(first_total) = totals_arr.first().and_then(|b| b.as_document()) {
                 total_intercepted = doc_get_i64(first_total, "total_intercepted");
+                total_incoming_records = doc_get_i64(first_total, "total_incoming_records");
                 total_blocked = doc_get_i64(first_total, "total_blocked");
                 total_block_requests = doc_get_i64(first_total, "total_block_requests");
                 total_dialer_rejected = doc_get_i64(first_total, "total_dialer_rejected");
@@ -208,6 +219,7 @@ pub async fn get_analytics_summary(
 
     Ok(Json(AnalyticsSummaryResponse {
         total_intercepted,
+        total_incoming_records,
         total_blocked,
         total_block_requests,
         total_dialer_rejected,

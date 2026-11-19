@@ -226,22 +226,22 @@ Conforme definido em `SpamShieldApp/app/src/main/res/xml/network_security_config
 
 ## 7. Procedimento Operacional Padrão (Runbook de Atualização)
 
-Sempre que houver nova versão do backend Rust ou novo APK compilado no PC:
+Prepare o binário Linux para a VPS e o APK de distribuição no checkout da versão.
 
 ```powershell
-# 1. Compilar o servidor Rust no Windows visando Linux estático (musl)
-cd C:\Users\danie\spamshield\spamshield-server
-cargo zigbuild --release --target x86_64-unknown-linux-musl
-
-# 2. Transferir o novo executável Linux para a VPS
-scp target/x86_64-unknown-linux-musl/release/spamshield-server root@198.199.65.103:/opt/spamshield/
-
-# 3. (Opcional) Transferir novo APK e metadados se houver nova build do Android
-scp ../SpamShieldApp/app/build/outputs/apk/debug/app-debug.apk ../SpamShieldApp/app/build/outputs/apk/debug/output-metadata.json root@198.199.65.103:/opt/spamshield/apk/
-
-# 4. Reconstruir a imagem leve e reiniciar o container na VPS (leva ~3 segundos)
-ssh root@198.199.65.103 "cd /opt/spamshield && docker compose up -d --build"
+Push-Location spamshield-server
+cargo test --locked
+cargo zigbuild --locked --release --target x86_64-unknown-linux-musl
+Pop-Location
+.\SpamShieldApp\build-android.ps1 -BuildType release
 ```
+
+O build Android usa o certificado já instalado. Configure as variáveis de assinatura do ambiente privado e compare o certificado do candidato com o da última versão publicada.
+
+1. Envie o binário, o APK release e seu manifesto para uma pasta de staging versionada. Compare os hashes SHA-256 na origem e no destino.
+2. Preserve uma cópia privada da imagem ativa, do binário, da configuração e do APK anterior. Aponte o Compose para a pasta do novo APK. Defina `APK_METADATA_PATH` com o manifesto de SHA-256 e tamanho correspondente.
+3. Recrie somente o serviço `spamshield`. Confira saúde, conexão MongoDB, metadados do OTA e hash do download de `/apk`. Restaure o serviço anterior se a validação falhar.
+4. Publique o mesmo APK assinado na release do GitHub e confira o hash do asset publicado.
 
 > **Histórico de Atualizações OTA na VPS:**
 > - **v1.2.9 (Build 13):** Primeiro deploy na VPS em container `scratch` + `x86_64-unknown-linux-musl`.

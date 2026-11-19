@@ -13,6 +13,7 @@ import br.com.spamshield.data.local.entity.OutboundGraceEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
 import br.com.spamshield.data.local.entity.SyncMutationEntity
 import br.com.spamshield.data.local.entity.RemoteQuarantinePrefixEntity
+import br.com.spamshield.domain.TelemetryCoalescer
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -31,8 +32,13 @@ interface SpamShieldDao {
     suspend fun acknowledgeSyncMutation(mutationId: String)
 
     @Transaction
-    suspend fun persistFeedbackUpdate(row: CallTelemetryEntity, mutation: SyncMutationEntity) {
+    suspend fun persistFeedbackUpdate(
+        row: CallTelemetryEntity,
+        mutation: SyncMutationEntity,
+        event: CallDecisionEventEntity
+    ) {
         insertTelemetry(row)
+        insertDecisionEvent(event)
         enqueueSyncMutation(mutation)
     }
 
@@ -71,8 +77,11 @@ interface SpamShieldDao {
     @Query("SELECT * FROM call_decision_events WHERE callId = :callId ORDER BY recordedAt, eventId")
     suspend fun getDecisionEvents(callId: String): List<CallDecisionEventEntity>
 
-    @Query("UPDATE call_decision_events SET syncStatus = 'SYNCED' WHERE eventId IN (:eventIds)")
-    suspend fun markDecisionEventsSynced(eventIds: List<String>)
+    @Query("SELECT * FROM call_decision_events WHERE callId IN (:callIds) ORDER BY recordedAt, eventId")
+    suspend fun getDecisionEventsForCalls(callIds: List<String>): List<CallDecisionEventEntity>
+
+    @Query("UPDATE call_decision_events SET syncStatus = 'SYNCED' WHERE callId = :callId AND eventId IN (:eventIds)")
+    suspend fun markDecisionEventsSynced(callId: String, eventIds: List<String>)
 
     @Query("DELETE FROM call_decision_events WHERE eventId IN (:eventIds)")
     suspend fun deleteDecisionEvents(eventIds: List<String>)
@@ -87,8 +96,31 @@ interface SpamShieldDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTelemetry(telemetry: CallTelemetryEntity)
 
+    @Transaction
+    suspend fun persistScreeningAudit(
+        row: CallTelemetryEntity,
+        events: List<CallDecisionEventEntity>
+    ): CallTelemetryEntity {
+        val prior = getLatestTelemetryForNumber(row.normalizedNumber)
+        val canonical = if (prior != null && prior.id != row.id && prior.timestamp == row.timestamp) {
+            TelemetryCoalescer.merge(prior, row).copy(id = prior.id, syncStatus = "PENDING")
+        } else {
+            row
+        }
+        insertTelemetry(canonical)
+        for (event in events) insertDecisionEvent(event.copy(callId = canonical.id))
+        return canonical
+    }
+
     @Query("DELETE FROM call_telemetry WHERE id = :id")
     suspend fun deleteTelemetryById(id: String)
+
+    @Query("""
+        DELETE FROM call_telemetry
+        WHERE id = :id AND syncStatus = 'PENDING' AND userFeedback = 'UNRATED'
+          AND NOT EXISTS (SELECT 1 FROM call_decision_events e WHERE e.callId = :id)
+    """)
+    suspend fun deleteUnjournaledPendingTelemetry(id: String): Int
 
     @Query("SELECT * FROM call_telemetry ORDER BY timestamp DESC")
     fun observeAllTelemetry(): Flow<List<CallTelemetryEntity>>
@@ -96,14 +128,47 @@ interface SpamShieldDao {
     @Query("SELECT * FROM call_telemetry ORDER BY timestamp DESC")
     suspend fun getAllTelemetry(): List<CallTelemetryEntity>
 
+    @Transaction
+    suspend fun getTelemetryExportSnapshot(): Pair<List<CallTelemetryEntity>, List<CallDecisionEventEntity>> =
+        getAllTelemetry() to getAllDecisionEvents()
+
     @Query("SELECT * FROM call_telemetry WHERE id = :id LIMIT 1")
     suspend fun getTelemetryById(id: String): CallTelemetryEntity?
 
-    @Query("SELECT * FROM call_telemetry WHERE syncStatus = 'PENDING' OR EXISTS (SELECT 1 FROM call_decision_events e WHERE e.callId = call_telemetry.id AND e.syncStatus = 'PENDING') ORDER BY timestamp ASC LIMIT 200")
-    suspend fun getPendingTelemetry(): List<CallTelemetryEntity>
+    @Query("""
+        SELECT * FROM call_telemetry
+        WHERE (timestamp > :afterTimestamp OR (timestamp = :afterTimestamp AND id > :afterId))
+          AND (syncStatus = 'PENDING' OR EXISTS (
+              SELECT 1 FROM call_decision_events e WHERE e.callId = call_telemetry.id AND e.syncStatus = 'PENDING'
+          ))
+        ORDER BY timestamp, id
+        LIMIT 100
+    """)
+    suspend fun getPendingTelemetry(
+        afterTimestamp: Long = Long.MIN_VALUE,
+        afterId: String = ""
+    ): List<CallTelemetryEntity>
+
+    @Transaction
+    suspend fun getPendingTelemetrySnapshot(
+        afterTimestamp: Long,
+        afterId: String
+    ): Pair<List<CallTelemetryEntity>, List<CallDecisionEventEntity>> {
+        val rows = getPendingTelemetry(afterTimestamp, afterId)
+        val events = if (rows.isEmpty()) emptyList() else getDecisionEventsForCalls(rows.map { it.id })
+        return rows to events
+    }
 
     @Query("UPDATE call_telemetry SET syncStatus = 'SYNCED' WHERE id IN (:ids)")
     suspend fun markTelemetrySynced(ids: List<String>)
+
+    @Transaction
+    suspend fun acknowledgeTelemetryUpload(row: CallTelemetryEntity, acknowledgedEventIds: List<String>) {
+        if (getTelemetryById(row.id) == row) {
+            markTelemetrySynced(listOf(row.id))
+        }
+        acknowledgedEventIds.chunked(500).forEach { ids -> markDecisionEventsSynced(row.id, ids) }
+    }
 
     @Query(
         """
@@ -147,6 +212,8 @@ interface SpamShieldDao {
         """
         DELETE FROM call_telemetry
         WHERE deviceId = 's23-ultra-history'
+          AND syncStatus = 'PENDING'
+          AND userFeedback = 'UNRATED'
           AND NOT EXISTS (SELECT 1 FROM call_decision_events e WHERE e.callId = call_telemetry.id)
           AND EXISTS (
               SELECT 1 FROM call_telemetry rt
@@ -280,6 +347,23 @@ interface SpamShieldDao {
             item.prefix7, Json.encodeToString(item), System.currentTimeMillis()))
     }
 
+    @Transaction
+    suspend fun installAutomaticQuarantine(item: PrefixQuarantineEntity, now: Long): Boolean {
+        val prefix = item.prefix7
+        if (prefix.length !in 7..8 || !prefix.all { it.isDigit() } || item.expiresAt <= now) return false
+        val broadPrefix = prefix.take(7)
+        if (getActiveQuarantineForPrefix(prefix, broadPrefix, now) != null) return false
+        if (getSyncMutations().any {
+                it.kind == "QUARANTINE_DELETE" && (it.targetId == prefix || it.targetId == broadPrefix) &&
+                    it.createdAt >= item.lastSeenAt
+            }
+        ) return false
+        persistQuarantine(item)
+        enqueueSyncMutation(SyncMutationEntity(UUID.randomUUID().toString(), "QUARANTINE_AUTO_UPSERT",
+            prefix, Json.encodeToString(item), item.lastSeenAt))
+        return true
+    }
+
     @Query("DELETE FROM prefix_quarantine WHERE prefix7 = :prefix7")
     suspend fun persistQuarantineDeletion(prefix7: String)
 
@@ -291,7 +375,18 @@ interface SpamShieldDao {
     }
 
     @Transaction
-    suspend fun applyRemoteQuarantines(items: List<PrefixQuarantineEntity>, deletedPrefixes: List<String> = emptyList()) {
+    suspend fun applyRemoteQuarantines(
+        items: List<PrefixQuarantineEntity>,
+        deletedPrefixes: List<String> = emptyList(),
+        rejectedAutomatic: List<SyncMutationEntity> = emptyList()
+    ) {
+        for (rejected in rejectedAutomatic) {
+            val item = Json.decodeFromString<PrefixQuarantineEntity>(rejected.payloadJson)
+            if (getActiveQuarantineForPrefix(item.prefix7, Long.MIN_VALUE) == item) {
+                persistQuarantineDeletion(item.prefix7)
+            }
+            acknowledgeSyncMutation(rejected.mutationId)
+        }
         // A change arriving during the HTTP request must survive the remote snapshot.
         val pending = getSyncMutations()
         val received = items.map { it.prefix7 }.toSet()
@@ -302,9 +397,23 @@ interface SpamShieldDao {
         items.forEach { persistQuarantine(it) }
         clearRemoteQuarantinePrefixes()
         insertRemoteQuarantinePrefixes(received.map { RemoteQuarantinePrefixEntity(it) })
+        val now = System.currentTimeMillis()
         for (mutation in pending) {
             when (mutation.kind) {
                 "QUARANTINE_UPSERT" -> persistQuarantine(Json.decodeFromString<PrefixQuarantineEntity>(mutation.payloadJson))
+                "QUARANTINE_AUTO_UPSERT" -> {
+                    val item = Json.decodeFromString<PrefixQuarantineEntity>(mutation.payloadJson)
+                    val broad = item.prefix7.take(7)
+                    val superseded = item.prefix7 in deletedPrefixes || broad in deletedPrefixes ||
+                        (broad != item.prefix7 && getActiveQuarantineForPrefix(broad, now) != null)
+                    if (superseded) {
+                        if (item.prefix7 !in received && getActiveQuarantineForPrefix(item.prefix7, now) == item) {
+                            persistQuarantineDeletion(item.prefix7)
+                        }
+                    } else if (item.expiresAt > now && getActiveQuarantineForPrefix(item.prefix7, now) == null) {
+                        persistQuarantine(item)
+                    }
+                }
                 "QUARANTINE_DELETE" -> persistQuarantineDeletion(mutation.targetId)
             }
         }

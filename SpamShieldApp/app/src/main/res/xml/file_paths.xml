@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <external-files-path name="exports" path="exports/" />
+    <cache-path name="cache_exports" path="exports/" />
     <external-files-path name="updates" path="updates/" />
     <files-path name="internal_updates" path="updates/" />
     <cache-path name="cache_updates" path="updates/" />

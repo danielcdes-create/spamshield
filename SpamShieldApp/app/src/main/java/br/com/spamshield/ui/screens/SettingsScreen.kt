@@ -68,11 +68,10 @@ fun SettingsScreen(
     onSyncNow: () -> Unit,
     onImportCallHistory: () -> Unit,
     onSyncAnatelProviders: () -> Unit,
-    onSimulateAttack: (String, String) -> Unit,
+    onSimulateAttack: suspend (String, String) -> String,
     onSaveTailscaleUrl: (String) -> Unit,
     onSaveApiBearerToken: (String) -> Unit,
     onChangeThreshold: (Int) -> Unit,
-    onToggleSkipCallLog: (Boolean) -> Unit,
     onCheckApkUpdate: () -> Unit,
     onDownloadAndInstallApk: () -> Unit,
     onExportFiles: suspend () -> Pair<File, File>
@@ -91,7 +90,20 @@ fun SettingsScreen(
         mutableFloatStateOf(settings.blockThresholdScore.toFloat())
     }
     var exportMessage by remember { mutableStateOf("") }
+    var simulationMessage by remember { mutableStateOf("") }
+    var simulating by remember { mutableStateOf(false) }
     var showRemoteConsent by remember { mutableStateOf(false) }
+
+    fun simulate(number: String, verification: String) {
+        simulating = true
+        scope.launch {
+            try {
+                simulationMessage = onSimulateAttack(number, verification)
+            } finally {
+                simulating = false
+            }
+        }
+    }
 
     if (showRemoteConsent) {
         AlertDialog(
@@ -234,7 +246,8 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     OutlinedButton(
-                        onClick = { onSimulateAttack("03141011230", "FAILED") },
+                        onClick = { simulate("03141011230", "FAILED") },
+                        enabled = !simulating,
                         modifier = Modifier.weight(1f)
                     ) {
                         Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -242,13 +255,17 @@ fun SettingsScreen(
                         Text("Simular VoIP 31 4101", fontSize = 11.sp)
                     }
                     OutlinedButton(
-                        onClick = { onSimulateAttack("+553198621040", "NOT_VERIFIED") },
+                        onClick = { simulate("+553198621040", "NOT_VERIFIED") },
+                        enabled = !simulating,
                         modifier = Modifier.weight(1f)
                     ) {
                         Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Simular Robocall TIM", fontSize = 11.sp)
                     }
+                }
+                if (simulationMessage.isNotEmpty()) {
+                    Text(simulationMessage, style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -427,37 +444,7 @@ fun SettingsScreen(
             }
         }
 
-        // 5. Toggle Ocultar do Histórico Nativo (setSkipCallLog)
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(14.dp)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Ocultar Bloqueios do Histórico do Telefone",
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "Aciona setSkipCallLog(true) no CallScreeningService para manter o registro nativo limpo.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = settings.hideBlockedFromSystemCallLog,
-                    onCheckedChange = onToggleSkipCallLog
-                )
-            }
-        }
-
-        // 6. Exportação Local em JSON / CSV
+        // Exportação local em JSON e CSV
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(14.dp)
@@ -471,7 +458,7 @@ fun SettingsScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "Exporta todo o banco SQLite Room local para auditoria offline.",
+                    text = "Exporta as chamadas e os eventos já gravados para auditoria offline.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -516,7 +503,7 @@ fun SettingsScreen(
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Exportar e Compartilhar Banco Local (JSON / CSV)")
+                    Text("Exportar e compartilhar telemetria")
                 }
                 if (exportMessage.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(4.dp))

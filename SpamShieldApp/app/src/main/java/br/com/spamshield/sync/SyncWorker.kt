@@ -28,10 +28,10 @@ class SyncWorker @AssistedInject constructor(
         Log.d(TAG, "Starting SyncWorker (Tailscale VPN transport active: $vpnActive)")
 
         val outcome = syncRepository.performFullSync()
-        return if (outcome.success) {
-            Result.success()
-        } else {
+        return if (outcome.retryable) {
             Result.retry()
+        } else {
+            Result.success()
         }
     }
 
