@@ -23,3 +23,9 @@ Atualize servidor e APK para aplicar a nova política nos dois lados. Consulte o
 - 112 testes JVM Android e lint Android aprovados.
 - 24 testes Rust aprovados. As duas integrações MongoDB ficaram ignoradas.
 - Os testes de triagem e de reconciliação foram executados localmente. A validação em aparelho físico permanece pendente.
+
+## Publicação em 19/11/2026
+
+O commit de código `fce50a33b600af68e92af27cc95c362556f203b9` foi publicado na `main` e marcado com a tag `v1.3.5`. O mesmo APK assinado está na [release do GitHub](https://github.com/danielcdes-create/spamshield/releases/tag/v1.3.5) e no canal OTA. O certificado de assinatura coincide com o da versão 1.3.4.
+
+O APK servido pelos dois canais tem 3.757.088 bytes e SHA-256 `e28202351f11ecc4de38c93a67c901374e906cf5ff760dc9c2ffb74114badaee`. O servidor validou o manifesto pareado com o APK. Depois da implantação do backend, a verificação de saúde confirmou conexão ao MongoDB, e a rota de telemetria respondeu a um lote vazio autenticado com os campos de confirmação e conflito. A imagem, a configuração e o APK anteriores foram preservados em backup privado na VPS.
