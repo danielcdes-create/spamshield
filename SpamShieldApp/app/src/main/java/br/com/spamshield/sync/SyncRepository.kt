@@ -226,6 +226,17 @@ class SyncRepository @Inject constructor(
                 afterId = pending.last().id
             }
 
+            settingsDataStore.flushWindowJournal(dao)
+            var pendingFeatures = 0
+            for (batch in dao.getPendingFeatureEvents().chunked(100)) {
+                pendingFeatures += uploadFeatureBatch(batch.map { it.toRemoteEvent() },
+                    send = {
+                        if (!syncStillAllowed(settings)) throw SyncSettingsChanged()
+                        api.postFeatureBatch(it)
+                    },
+                    acknowledge = { ids -> dao.acknowledgeFeatureEvents(ids.toList()) })
+            }
+
             // Only durable local mutations are sent; downloaded snapshots are never echoed.
             val rejectedAutomatic = mutableListOf<SyncMutationEntity>()
             if (!flushMutationOutbox(api, settings, deferredCalls, rejectedAutomatic)) {
@@ -298,14 +309,14 @@ class SyncRepository @Inject constructor(
             )
 
             SyncOutcome(
-                success = deferredCalls.isEmpty(),
+                success = deferredCalls.isEmpty() && pendingFeatures == 0,
                 pushedTelemetryCount = pushedCount,
                 pulledRulesCount = payload.active_rules.size,
                 pulledQuarantineCount = payload.prefix_quarantine.size,
-                message = if (deferredCalls.isEmpty()) {
+                message = if (deferredCalls.isEmpty() && pendingFeatures == 0) {
                     "Sincronizado ($pushedCount envios, ${payload.prefix_quarantine.size} quarentenas)"
                 } else {
-                    "$pushedCount registros confirmados. ${deferredCalls.size} aguardam confirmação e continuam no aparelho. Regras e quarentenas atualizadas."
+                    "$pushedCount chamadas confirmadas. ${deferredCalls.size} chamadas e $pendingFeatures eventos de recursos aguardam confirmação."
                 },
                 serverOnline = true,
                 retryable = false

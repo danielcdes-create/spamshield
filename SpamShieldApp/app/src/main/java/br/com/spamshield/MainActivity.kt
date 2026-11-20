@@ -34,6 +34,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -114,15 +116,17 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
     ).any { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
     var hasMissingDataPermissions by remember { mutableStateOf(missingDataPermissions()) }
     var selectedTab by remember { mutableIntStateOf(0) }
+    var selectedCampaignId by remember { mutableStateOf<String?>(null) }
     var isScreeningRoleHeld by remember {
         mutableStateOf(RoleManagerHelper.isCallScreeningRoleHeld(context))
     }
 
-    DisposableEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner, settings.localDataDisclosureAccepted) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 isScreeningRoleHeld = RoleManagerHelper.isCallScreeningRoleHeld(context)
                 viewModel.refreshTailscaleStatus()
+                if (settings.localDataDisclosureAccepted) viewModel.refreshFeatures()
                 hasMissingDataPermissions = missingDataPermissions()
             }
         }
@@ -173,6 +177,10 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
 
     val telemetryList by viewModel.telemetryList.collectAsStateWithLifecycle()
     val decisionEvents by viewModel.decisionEvents.collectAsStateWithLifecycle()
+    val featureEvents by viewModel.featureEvents.collectAsStateWithLifecycle()
+    val labBusy by viewModel.labBusy.collectAsStateWithLifecycle()
+    val featureError by viewModel.featureError.collectAsStateWithLifecycle()
+    val campaigns = remember(featureEvents) { br.com.spamshield.domain.Campaigns.projection(featureEvents) }
     val activeRules by viewModel.activeRules.collectAsStateWithLifecycle()
     val activeQuarantines by viewModel.activeQuarantines.collectAsStateWithLifecycle()
     val tailscaleStatus by viewModel.tailscaleStatus.collectAsStateWithLifecycle()
@@ -211,7 +219,12 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
         }
     }
 
+    val featureMessages = remember { SnackbarHostState() }
+    LaunchedEffect(featureError) {
+        featureError?.let { featureMessages.showSnackbar(it); viewModel.clearFeatureError() }
+    }
     Scaffold(
+        snackbarHost = { SnackbarHost(featureMessages) },
         topBar = {
             Column {
             if (hasMissingDataPermissions && settings.localDataDisclosureAccepted) {
@@ -302,13 +315,23 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
                     decisionEvents = decisionEvents,
                     settings = settings,
                     tailscaleStatus = tailscaleStatus,
-                    onSyncNow = viewModel::syncNowWithMongoDb
+                    onSyncNow = viewModel::syncNowWithMongoDb,
+                    campaigns = campaigns,
+                    onCampaign = { selectedCampaignId = it; selectedTab = 1 },
+                    onSelector = viewModel::windowSelector,
+                    onWindowChange = viewModel::changeWindow
                 )
                 1 -> CallAuditScreen(
                     telemetryList = telemetryList,
                     decisionEvents = decisionEvents,
                     parseTriggeredRules = viewModel::parseTriggeredRules,
-                    onMarkFeedback = viewModel::markCallFeedback
+                    onMarkFeedback = viewModel::markCallFeedback,
+                    campaigns = campaigns,
+                    featureEvents = featureEvents,
+                    selectedCampaignId = selectedCampaignId,
+                    onCampaign = { selectedCampaignId = it },
+                    onSilence = viewModel::changeCampaignSilence,
+                    onExpectedFeedback = viewModel::markExpectedCall
                 )
                 2 -> QuarantineRulesScreen(
                     quarantines = activeQuarantines,
@@ -316,7 +339,13 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
                     onAddCustomRule = viewModel::addCustomRegexOrPrefixRule,
                     onAddManualQuarantine = viewModel::addManualQuarantinePrefix,
                     onRemoveQuarantine = viewModel::removeQuarantinePrefix,
-                    onToggleRule = viewModel::toggleRuleEnabled
+                    onToggleRule = viewModel::toggleRuleEnabled,
+                    featureEvents = featureEvents,
+                    decisionEvents = decisionEvents,
+                    onStartLab = viewModel::startLab,
+                    onFinishLab = viewModel::finishLab,
+                    labBusy = labBusy,
+                    labError = featureError
                 )
                 3 -> SettingsScreen(
                     settings = settings,

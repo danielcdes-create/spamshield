@@ -1,6 +1,8 @@
-# SpamShield BR (`v1.3.4` — Build `18`)
+# SpamShield BR 1.4.0 · build 20
 
 Ecossistema privado de defesa local, telemetria auditável e inteligência contra chamadas de spam, robocall, chipeiras GSM e spoofing no Brasil.
+
+O escudo oferece uma janela de ligação esperada. A Auditoria reúne campanhas com números rotativos, e o laboratório permite testar uma regra no histórico e em sombra. O export vincula a decisão da chegada à resposta enviada, às observações do Android e às ações posteriores. [Notas da versão 1.4.0](docs/RELEASE-1.4.0.md)
 
 ### Novidades da versão `v1.3.4` (Build `18`):
 - Corrigido o HTTP 409 provocado por defaults adicionados aos eventos antigos no reenvio da 1.3.3; o backend preserva o diário e aceita somente equivalências legadas conhecidas.
@@ -126,6 +128,7 @@ A versão 1.3.3 foi publicada no GitHub e no canal OTA da VPS em 18/11/2026, com
 | `GET` | `/api/v1/health` | Pública | Status do servidor, conectividade MongoDB Atlas e IP Tailscale |
 | `GET` | `/api/v1/apk/info` | Pública | Metadados (`version_code`, `version_name`, `size_bytes`) e SHA-256 do APK atual |
 | `GET` | `/apk` (ou `/spamshield.apk`) | Pública | Download direto do pacote APK para atualização OTA |
+| `POST` | `/api/v1/telemetry/features/batch` | Bearer | Envio de eventos de recursos e confirmação individual por ID |
 | `POST` | `/api/v1/telemetry/batch` | Bearer Token | Recebe lote de telemetria, `decision_events` e atualiza quarentenas |
 | `PATCH` | `/api/v1/telemetry/:id/feedback` | Bearer Token | Registra `CONFIRMED_SPAM` ou `FALSE_POSITIVE` com recalibração |
 | `GET` | `/api/v1/sync/payload` | Bearer Token | Retorna regras ativas, quarentenas `/8`/`/7` e prefixos Anatel |

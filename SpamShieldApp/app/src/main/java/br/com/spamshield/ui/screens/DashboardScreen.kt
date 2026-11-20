@@ -1,6 +1,17 @@
 package br.com.spamshield.ui.screens
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.semantics
+import br.com.spamshield.domain.Campaign
+import br.com.spamshield.domain.ExpectedWindow
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -58,9 +69,29 @@ fun DashboardScreen(
     decisionEvents: List<CallDecisionEventEntity>,
     settings: SpamShieldSettings,
     tailscaleStatus: TailscaleStatusUi,
-    onSyncNow: () -> Unit
+    onSyncNow: () -> Unit,
+    campaigns: List<Campaign>,
+    onCampaign: (String) -> Unit,
+    onSelector: (String, Boolean, ExpectedWindow?) -> Unit,
+    onWindowChange: (String, Int?, Boolean, Boolean) -> Unit
 ) {
     val scrollState = rememberScrollState()
+    var selectorId by rememberSaveable { mutableStateOf<String?>(null) }
+    val active = settings.expectedWindow?.takeIf { it.activeAt(System.currentTimeMillis()) }
+    val status = when {
+        active != null -> "Aguardando ligação · até ${displayTime(active.expiresAt, "HH'h'mm")}"
+        settings.shadowModeEnabled -> "Modo Sombra Ativo • Anatel & STIR/SHAKEN"
+        else -> "Escudo Ativo • Anatel & STIR/SHAKEN"
+    }
+    selectorId?.let { id ->
+        ExpectedCallSelector(active, dismiss = {
+            selectorId = null
+            onSelector(id, false, active)
+        }, change = { minutes, keepExact, restore ->
+            selectorId = null
+            onWindowChange(id, minutes, keepExact, restore)
+        })
+    }
 
     // Global stats
     val incomingTelemetry = telemetryList.filter { it.outcome != "OUTGOING_CALL" }
@@ -101,6 +132,14 @@ fun DashboardScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        campaigns.firstOrNull()?.let { campaign ->
+            Card(onClick = { onCampaign(campaign.id) }, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(14.dp)) {
+                    Text("Campanhas de chamadas · ${campaigns.size}", fontWeight = FontWeight.Bold)
+                    Text("${campaign.prefix}•• · ${campaign.memberIds.size} tentativas · ${campaign.distinctNumbers} números distintos")
+                }
+            }
+        }
         // 1. Capa Moderna (Hero Card) com Nome do App + Status Tailscale + Stats do Dia
         Box(
             modifier = Modifier
@@ -132,7 +171,13 @@ fun DashboardScreen(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                            .semantics { stateDescription = status }
+                            .clickable(role = Role.Button, onClickLabel = "Configurar janela de ligação esperada") {
+                                val id = java.util.UUID.randomUUID().toString()
+                                onSelector(id, true, active)
+                                selectorId = id
+                            }
                     ) {
                         Box(
                             modifier = Modifier
@@ -157,11 +202,7 @@ fun DashboardScreen(
                                 color = Color.White
                             )
                             Text(
-                                text = if (settings.shadowModeEnabled) {
-                                    "Modo Sombra Ativo • Anatel & STIR/SHAKEN"
-                                } else {
-                                    "Escudo Ativo • Anatel & STIR/SHAKEN"
-                                },
+                                text = status,
                                 fontSize = 11.sp,
                                 color = Color(0xFF94A3B8)
                             )

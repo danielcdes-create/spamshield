@@ -5,6 +5,22 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 import kotlinx.serialization.Serializable
 
+@Serializable
+@Entity(tableName = "feature_events", indices = [Index("syncStatus"), Index("eventType")])
+data class FeatureEventEntity(
+    @PrimaryKey val eventId: String,
+    val callId: String?,
+    val resourceId: String,
+    val eventType: String,
+    val source: String,
+    val recordedAt: Long,
+    val effectiveAt: Long,
+    val appVersion: String,
+    val detailsJson: String,
+    val schemaVersion: Int = 1,
+    val syncStatus: String = "PENDING"
+)
+
 /** Durable local operations. Only this queue, never downloaded snapshots, is uploaded. */
 @Serializable
 @Entity(tableName = "sync_mutations", indices = [Index(value = ["createdAt"])])

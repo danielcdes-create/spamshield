@@ -20,6 +20,14 @@ import br.com.spamshield.domain.DecisionTrace
 import br.com.spamshield.domain.DecisionDetails
 import br.com.spamshield.domain.PhoneNormalizer
 import br.com.spamshield.domain.PreparedScreening
+import br.com.spamshield.domain.FeatureRepository
+import br.com.spamshield.domain.ExpectedWindow
+import java.util.concurrent.atomic.AtomicReference
+import br.com.spamshield.domain.ScreeningPolicyDecision
+import br.com.spamshield.domain.ScreeningLatency
+import br.com.spamshield.domain.ScreeningPolicy
+import br.com.spamshield.domain.ScreeningTiming
+import br.com.spamshield.domain.UserFeedbackAudit
 import br.com.spamshield.data.local.dao.SpamShieldDao
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.sync.SyncWorker
@@ -30,6 +38,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -40,6 +49,7 @@ class SmartCallScreeningService : CallScreeningService() {
 
     @Inject lateinit var dao: SpamShieldDao
     @Inject lateinit var callHistoryAnalyzer: CallHistoryAnalyzer
+    @Inject lateinit var features: FeatureRepository
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val responseHandler = Handler(Looper.getMainLooper())
@@ -47,12 +57,16 @@ class SmartCallScreeningService : CallScreeningService() {
     companion object {
         private const val TAG = "SmartCallScreening"
         private const val SHADOW_CHANNEL_ID = "spamshield_shadow_audit"
+        private const val WAIT_RISK_CHANNEL_ID = "spamshield_wait_risk"
         private const val SCREENING_SOURCE = "CALL_SCREENING_SERVICE"
         private const val TIMEOUT_FALLBACK = "FALLBACK_AFTER_TIMEOUT"
     }
 
     override fun onScreenCall(callDetails: Call.Details) {
         val started = SystemClock.elapsedRealtimeNanos()
+        val callbackAt = System.currentTimeMillis()
+        val timing = ScreeningTiming(started, SystemClock::elapsedRealtimeNanos)
+        val capturedWindow = AtomicReference<ExpectedWindow?>(null)
         // Only screen incoming calls
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
             callDetails.callDirection != Call.Details.DIRECTION_INCOMING
@@ -67,24 +81,34 @@ class SmartCallScreeningService : CallScreeningService() {
         val deadline = ScreeningDeadline(started, SystemClock::elapsedRealtimeNanos)
         lateinit var timeout: Runnable
 
-        fun submit(prepared: PreparedScreening?, fallbackReason: String? = null, errorType: String? = null): Boolean {
+        fun submit(
+            prepared: PreparedScreening?, fallbackReason: String? = null, errorType: String? = null,
+            policy: ScreeningPolicyDecision? = null
+        ): Boolean {
             val claim = deadline.claim() ?: return false
             responseHandler.removeCallbacks(timeout)
             val evaluated = prepared.takeUnless { claim.timedOut }
             val result = evaluated?.result
             val reason = if (claim.timedOut) TIMEOUT_FALLBACK else fallbackReason
-            val disallow = result?.shouldDisallowAndReject == true
-            val skipNotification = result?.shouldSkipNotification == true
-            val skipCallLog = result?.shouldSkipCallLog == true
+            val applied = policy.takeIf { evaluated != null }
+                ?: ScreeningPolicyDecision("UNKNOWN", "ALLOW", reason ?: TIMEOUT_FALLBACK,
+                    windowId = capturedWindow.get()?.takeIf { it.activeAt(callbackAt) }?.id)
+            val disallow = applied.chosenAction == "BLOCK"
+            val silence = applied.chosenAction == "SILENCE"
+            val skipNotification = disallow && result?.shouldSkipNotification == true
+            val skipCallLog = disallow && result?.shouldSkipCallLog == true
             val response = CallResponse.Builder()
                 .setDisallowCall(disallow)
                 .setRejectCall(disallow)
+                .setSilenceCall(silence)
                 .setSkipNotification(skipNotification)
                 .setSkipCallLog(skipCallLog)
                 .build()
             val normalized = result?.telemetry?.normalizedNumber ?: PhoneNormalizer.normalize(rawNumber).normalizedNumber
             val pending = spamScoringEngine.beginScreeningAudit(normalized, callAt)
+            timing.mark("SUBMITTING")
             val submissionFailure = runCatching { respondToCall(callDetails, response) }.exceptionOrNull()
+            timing.mark("SUBMITTED")
             if (submissionFailure != null) Log.e(TAG, "Could not submit screening response", submissionFailure)
             val submittedAt = System.currentTimeMillis()
             val details = DecisionDetails(
@@ -92,24 +116,59 @@ class SmartCallScreeningService : CallScreeningService() {
                 rejectCall = disallow,
                 skipNotification = skipNotification,
                 skipCallLog = skipCallLog,
-                elapsedMs = (SystemClock.elapsedRealtimeNanos() - started) / 1_000_000.0
+                elapsedMs = timing.elapsed(), silenceCall = silence, callAt = callAt,
+                evidenceAt = submittedAt, reason = reason, policy = applied,
+                latency = timing.snapshot(ScreeningDeadline.BUDGET_MS, reason == TIMEOUT_FALLBACK)
             )
+
+            if (result != null && submissionFailure == null && (result.shouldNotifyShadowBlock ||
+                    applied.reason == "EXPECTED_CALL_WINDOW")) {
+                serviceScope.launch {
+                    runCatching { notifyCallRisk(result.telemetry.id, result.telemetry.finalScore, applied.reason == "EXPECTED_CALL_WINDOW") }
+                        .onFailure { Log.w(TAG, "Could not notify call risk", it) }
+                }
+            }
 
             // The Telecom response is sent even if database or provider work is unresponsive.
             serviceScope.launch {
                 try {
-                    if (evaluated != null && result != null) {
-                        spamScoringEngine.recordIncomingCall(evaluated, submittedAt, details, submissionFailure?.javaClass?.simpleName)
-                        if (submissionFailure == null && result.shouldNotifyShadowBlock) {
-                            sendShadowModeNotification(
-                                result.telemetry.rawNumber.ifBlank { "Número Oculto" },
-                                result.telemetry.finalScore
-                            )
-                        }
+                    val experiment = try {
+                        features.shadowAt(callbackAt)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Could not read shadow experiment", error)
+                        null
+                    }
+                    val journalStart = timing.elapsed()
+                    val persisted = if (evaluated != null && result != null) {
+                        val decorated = evaluated.copy(decisionDetails = {
+                            evaluated.decisionDetails().copy(callAt = callAt, evidenceAt = callbackAt,
+                                policy = applied, experimentId = experiment?.id)
+                        })
+                        spamScoringEngine.recordIncomingCall(decorated, submittedAt, details,
+                            submissionFailure?.javaClass?.simpleName).telemetry.id
                     } else {
-                        recordFallback(rawNumber, stirShakenStatus, callAt, submittedAt, details,
+                        recordFallback(rawNumber, stirShakenStatus, callAt, submittedAt, details.copy(experimentId = experiment?.id),
                             reason ?: TIMEOUT_FALLBACK, errorType, submissionFailure?.javaClass?.simpleName)
                     }
+                    val journalMs = timing.elapsed() - journalStart
+                    val candidateStart = timing.elapsed()
+                    val candidateError = if (experiment != null && evaluated != null) {
+                        try {
+                            features.compareShadow(experiment, persisted, System.currentTimeMillis())
+                            null
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            error.javaClass.simpleName
+                        }
+                    } else null
+                    val candidateMs = if (experiment != null && evaluated != null) timing.elapsed() - candidateStart else null
+                    DecisionTrace.record(dao, persisted, "SCREENING_POST_RESPONSE", SCREENING_SOURCE,
+                        DecisionDetails(callAt = callAt, experimentId = experiment?.id, reason = candidateError,
+                            latency = ScreeningLatency(journalMs = journalMs, candidateMs = candidateMs)))
+                    features.reconcile()
                     SyncWorker.enqueueOneTimeSync(applicationContext)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -129,7 +188,26 @@ class SmartCallScreeningService : CallScreeningService() {
 
         val evaluation = serviceScope.launch(start = CoroutineStart.LAZY) {
             try {
-                submit(spamScoringEngine.prepareIncomingCall(rawNumber, stirShakenStatus, callAt))
+                timing.mark("EVALUATION")
+                val silences = try {
+                    withTimeoutOrNull(50) { features.activeSilences(callbackAt) }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    Log.w(TAG, "Could not read campaign silences", error)
+                    null
+                }
+                val prepared = spamScoringEngine.prepareIncomingCall(rawNumber, stirShakenStatus, callAt, timing, capturedWindow::set)
+                val row = prepared.result.telemetry
+                val prefix = row.prefix7
+                val exact = silences?.lastOrNull { it.prefix == prefix && it.startedAt <= callAt }
+                val neighbor = silences?.lastOrNull { prefix.length == 8 && it.prefix != prefix &&
+                    it.prefix.take(7) == prefix.take(7) && it.startedAt <= callAt }
+                val policy = ScreeningPolicy.resolve(row.outcome, UserFeedbackAudit.decode(row.triggeredRulesJson),
+                    prepared.quarantineMatch, prepared.window, callbackAt, exact, neighbor, row.shadowModeActive)
+                    .copy(campaignContextReady = silences != null)
+                timing.mark("POLICY_READY")
+                submit(prepared, policy = policy)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
@@ -141,7 +219,8 @@ class SmartCallScreeningService : CallScreeningService() {
         timeout = Runnable {
             if (submit(null, TIMEOUT_FALLBACK)) evaluation.cancel()
         }
-        responseHandler.postDelayed(timeout, ScreeningDeadline.BUDGET_MS)
+        timing.mark("QUEUED")
+        responseHandler.postDelayed(timeout, (ScreeningDeadline.BUDGET_MS - timing.elapsed()).toLong().coerceAtLeast(0))
         evaluation.start()
     }
 
@@ -154,7 +233,7 @@ class SmartCallScreeningService : CallScreeningService() {
         reason: String,
         errorType: String?,
         submissionFailure: String?
-    ) {
+    ): String {
         val normalized = PhoneNormalizer.normalize(rawNumber)
         val row = CallTelemetryEntity(
             id = java.util.UUID.randomUUID().toString(),
@@ -177,10 +256,11 @@ class SmartCallScreeningService : CallScreeningService() {
         )
         val failureType = if (reason == TIMEOUT_FALLBACK) "SCREENING_TIMEOUT" else "SCREENING_ERROR"
         val eventType = if (submissionFailure == null) "SCREENING_RESPONSE_SUBMITTED" else "SCREENING_RESPONSE_FAILED"
-        dao.persistScreeningAudit(row, listOf(
-            DecisionTrace.buildEvent(row.id, failureType, SCREENING_SOURCE, DecisionDetails(reason = errorType ?: reason), submittedAt),
-            DecisionTrace.buildEvent(row.id, eventType, SCREENING_SOURCE, response.copy(reason = submissionFailure ?: reason), submittedAt)
-        ))
+        val recordedAt = System.currentTimeMillis()
+        return dao.persistScreeningAudit(row, listOf(
+            DecisionTrace.buildEvent(row.id, failureType, SCREENING_SOURCE, DecisionDetails(callAt = callAt, evidenceAt = submittedAt, reason = errorType ?: reason), recordedAt, key = "arrival-fallback"),
+            DecisionTrace.buildEvent(row.id, eventType, SCREENING_SOURCE, response.copy(reason = submissionFailure ?: reason), recordedAt, key = "submission")
+        )).id
     }
 
     private fun mapVerificationStatus(callDetails: Call.Details): String {
@@ -195,7 +275,7 @@ class SmartCallScreeningService : CallScreeningService() {
         }
     }
 
-    private fun sendShadowModeNotification(rawNumber: String, score: Int) {
+    private fun notifyCallRisk(callId: String, score: Int, expectedWindow: Boolean) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
                 this,
@@ -205,28 +285,24 @@ class SmartCallScreeningService : CallScreeningService() {
         }
 
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channelId = if (expectedWindow) WAIT_RISK_CHANNEL_ID else SHADOW_CHANNEL_ID
         val channel = NotificationChannel(
-            SHADOW_CHANNEL_ID,
-            "Auditoria Modo Sombra",
-            NotificationManager.IMPORTANCE_HIGH
+            channelId,
+            if (expectedWindow) "Risco na janela de espera" else "Auditoria Modo Sombra",
+            if (expectedWindow) NotificationManager.IMPORTANCE_DEFAULT else NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = "Alertas de chamadas que teriam sido bloqueadas no Modo Sombra"
+            if (expectedWindow) setSound(null, null)
         }
         nm.createNotificationChannel(channel)
 
-        val notification = NotificationCompat.Builder(this, SHADOW_CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, channelId)
             .setSmallIcon(android.R.drawable.stat_sys_warning)
-            .setContentTitle("Modo Sombra — Spam Detectado")
-            .setContentText("Modo Sombra: Chamada de $rawNumber teria sido bloqueada (Score: $score)")
-            .setStyle(
-                NotificationCompat.BigTextStyle().bigText(
-                    "Modo Sombra: Chamada de $rawNumber teria sido bloqueada (Score: $score)"
-                )
-            )
+            .setContentTitle(if (expectedWindow) "Ligação liberada na janela de espera" else "Modo Sombra — Spam Detectado")
+            .setContentText("Risco calculado na chegada. Pontuação $score.")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .build()
 
-        nm.notify(rawNumber.hashCode(), notification)
+        nm.notify(callId.hashCode(), notification)
     }
 }

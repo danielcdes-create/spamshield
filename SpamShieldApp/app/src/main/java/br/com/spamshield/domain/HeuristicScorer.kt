@@ -255,7 +255,7 @@ object HeuristicScorer {
                 else input.ruleWeights[rule.rule_id]?.let { rule.copy(weight = it) } ?: rule
             }
 
-    private val PROTECTED_ALLOW_RULES = setOf("CONTACT_WHITELIST", "OUTBOUND_GRACE_PERIOD", "EMERGENCY_REPEATED_CALL")
+    internal val PROTECTED_ALLOW_RULES = setOf("CONTACT_WHITELIST", "OUTBOUND_GRACE_PERIOD", "EMERGENCY_REPEATED_CALL")
 
     private fun pickVoipWinner(candidates: List<TriggeredRuleDto>): TriggeredRuleDto? {
         if (candidates.isEmpty()) return null

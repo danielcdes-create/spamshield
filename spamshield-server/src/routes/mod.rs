@@ -1,4 +1,5 @@
 pub mod analytics;
+mod features;
 pub mod rules;
 pub mod telemetry;
 
@@ -161,6 +162,12 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/v1/telemetry/batch",
             post(telemetry::post_telemetry_batch)
+                .route_layer(middleware::from_fn(telemetry_request_result))
+                .layer(DefaultBodyLimit::max(TELEMETRY_BATCH_BODY_LIMIT)),
+        )
+        .route(
+            "/api/v1/telemetry/features/batch",
+            post(features::post_feature_batch)
                 .route_layer(middleware::from_fn(telemetry_request_result))
                 .layer(DefaultBodyLimit::max(TELEMETRY_BATCH_BODY_LIMIT)),
         )

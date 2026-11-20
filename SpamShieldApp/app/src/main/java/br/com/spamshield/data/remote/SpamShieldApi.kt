@@ -2,6 +2,7 @@ package br.com.spamshield.data.remote
 
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
 import br.com.spamshield.data.local.entity.CallDecisionEventEntity
+import br.com.spamshield.data.local.entity.FeatureEventEntity
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -70,6 +71,31 @@ data class CallTelemetryRemoteDto(
     val decision_vector: DecisionVectorRemoteDto,
     val audit: AuditRemoteDto,
     val decision_events: List<DecisionEventRemoteDto> = emptyList()
+)
+
+@Serializable
+data class FeatureEventRemoteDto(
+    val event_id: String,
+    val call_id: String?,
+    val resource_id: String,
+    val event_type: String,
+    val source: String,
+    val recorded_at: Long,
+    val effective_at: Long,
+    val app_version: String,
+    val schema_version: Int,
+    val details: JsonElement
+)
+
+fun FeatureEventEntity.toRemoteEvent() = FeatureEventRemoteDto(
+    eventId, callId, resourceId, eventType, source, recordedAt, effectiveAt,
+    appVersion, schemaVersion, Json.parseToJsonElement(detailsJson)
+)
+
+@Serializable
+data class FeatureBatchAck(
+    val accepted_event_ids: List<String> = emptyList(),
+    val conflicting_event_ids: List<String> = emptyList()
 )
 
 @Serializable
@@ -186,6 +212,9 @@ interface SpamShieldApi {
 
     @POST("/api/v1/providers/sync")
     suspend fun syncProviders(): ProviderSyncSummaryDto
+
+    @POST("/api/v1/telemetry/features/batch")
+    suspend fun postFeatureBatch(@Body batch: List<FeatureEventRemoteDto>): FeatureBatchAck
 
     @POST("/api/v1/telemetry/batch")
     suspend fun postTelemetryBatch(

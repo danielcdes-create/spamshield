@@ -39,6 +39,10 @@ import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
 import br.com.spamshield.data.local.entity.CallDecisionEventEntity
 import br.com.spamshield.domain.DecisionTrace
+import br.com.spamshield.domain.Campaign
+import br.com.spamshield.domain.FeatureJournal
+import br.com.spamshield.data.local.entity.FeatureEventEntity
+import androidx.compose.material3.TextButton
 import br.com.spamshield.domain.TelemetryProvenance
 import br.com.spamshield.domain.PhoneNormalizer
 import java.text.SimpleDateFormat
@@ -50,9 +54,19 @@ fun CallAuditScreen(
     telemetryList: List<CallTelemetryEntity>,
     decisionEvents: List<CallDecisionEventEntity>,
     parseTriggeredRules: (String) -> List<TriggeredRuleDto>,
-    onMarkFeedback: (CallTelemetryEntity, String) -> Unit
+    onMarkFeedback: (CallTelemetryEntity, String) -> Unit,
+    campaigns: List<Campaign>,
+    featureEvents: List<FeatureEventEntity>,
+    selectedCampaignId: String?,
+    onCampaign: (String?) -> Unit,
+    onSilence: (String, Int?) -> Unit,
+    onExpectedFeedback: (String, Boolean) -> Unit
 ) {
     val context = LocalContext.current
+    campaigns.find { it.id == selectedCampaignId }?.let {
+        CampaignDetail(it, telemetryList, decisionEvents, featureEvents, { onCampaign(null) }, onSilence)
+    }
+    val featuresByCall = remember(featureEvents) { featureEvents.filter { it.callId != null }.groupBy { it.callId } }
     val dateFormat = remember { SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()) }
 
     Column(
@@ -90,6 +104,13 @@ fun CallAuditScreen(
             }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (campaigns.isNotEmpty()) item { Text("Campanhas", fontWeight = FontWeight.Bold) }
+                items(campaigns, key = { "campaign-${it.id}" }) { campaign ->
+                    Card(onClick = { onCampaign(campaign.id) }, modifier = Modifier.fillMaxWidth()) {
+                        Text("${campaign.prefix}•• · ${campaign.memberIds.size} tentativas · ${campaign.distinctNumbers} números distintos",
+                            modifier = Modifier.padding(12.dp))
+                    }
+                }
                 items(telemetryList, key = { it.id }) { item ->
                     var expanded by remember { mutableStateOf(false) }
                     val rules = remember(item.triggeredRulesJson) {
@@ -109,7 +130,7 @@ fun CallAuditScreen(
                             val callEvents = decisionEvents.filter { it.callId == item.id }
                             val evidence = DecisionTrace.evidence(item, callEvents)
                             val provenance = TelemetryProvenance.forCall(item, callEvents)
-                            val displayPrefix = item.prefix7.ifBlank { "sem prefixo" }
+                            val displayPrefix = item.prefix7.takeIf { it.length in 7..8 && it.all(Char::isDigit) } ?: "sem prefixo"
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -122,7 +143,7 @@ fun CallAuditScreen(
                                         .padding(end = 8.dp)
                                 ) {
                                     Text(
-                                        text = item.normalizedNumber.ifBlank { item.rawNumber },
+                                        text = maskedNumber(item.normalizedNumber.ifBlank { item.rawNumber }),
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 16.sp
                                     )
@@ -154,6 +175,24 @@ fun CallAuditScreen(
                             if (expanded) {
                                 HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
 
+                                val response = submittedResponse(callEvents)
+                                val policy = response?.policy
+                                if (policy?.reason == "EXPECTED_CALL_WINDOW") {
+                                    Text("Permissão enviada pela janela de ligação esperada. A política normal bloquearia.")
+                                    Text("Sinais considerados: ${policy.windowSignals.joinToString()}")
+                                    val feedback = featuresByCall[item.id].orEmpty().lastOrNull { it.eventType == "WAIT_FEEDBACK" }
+                                        ?.let(FeatureJournal::payload)?.reason
+                                    Text(when (feedback) {
+                                        "EXPECTED_CALL_CONFIRMED" -> "Você confirmou que era a ligação esperada."
+                                        "SPAM_CONFIRMED" -> "Você confirmou que era spam."
+                                        else -> "Sem avaliação da janela."
+                                    })
+                                    TextButton(onClick = { onExpectedFeedback(item.id, true) }) { Text("Era a ligação esperada") }
+                                    TextButton(onClick = { onExpectedFeedback(item.id, false) }) { Text("Era spam") }
+                                }
+                                featuresByCall[item.id].orEmpty().mapNotNull { FeatureJournal.payload(it).comparison }.forEach {
+                                    Text("Laboratório · ${it.baseScore ?: "?"} → ${it.candidateScore ?: "?"} · ${labReason(it.reason)}")
+                                }
                                 Text("Linha do tempo da chamada", fontWeight = FontWeight.Bold)
                                 Text("Data da chamada: ${dateFormat.format(Date(item.timestamp))}. Os horários abaixo são de gravação dos eventos; podem ser posteriores à chamada.",
                                     style = MaterialTheme.typography.bodySmall)
@@ -172,7 +211,10 @@ fun CallAuditScreen(
                                     val description = listOfNotNull(
                                         detail.outcome,
                                         detail.score?.let { "Score $it / limite ${detail.threshold}" },
-                                        detail.disallowCall?.let { if (it) "Pedido: bloquear" else "Pedido: permitir" },
+                                        detail.disallowCall?.let { if (it) "Pedido: bloquear" else if (detail.silenceCall == true)
+                                            "Pedido: silenciar" else "Pedido: permitir" },
+                                        detail.policy?.let { "Política ${it.normalAction} → ${it.chosenAction} · ${it.reason}" },
+                                        detail.latency?.elapsedLabel(),
                                         detail.systemCallType?.let { "Android: tipo $it; motivo ${detail.systemBlockReason ?: "não informado"}" },
                                         detail.durationSec?.let { "Duração: ${it}s" },
                                         detail.observedCallTimestamp?.let { "Chamada observada em ${dateFormat.format(Date(it))}" },
@@ -214,7 +256,7 @@ fun CallAuditScreen(
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
                                         Text(
-                                            text = "• ${rule.rule_id}${if (rule.meta != null) " (${rule.meta})" else ""}",
+                                            text = "• ${rule.rule_id}",
                                             style = MaterialTheme.typography.bodySmall
                                         )
                                         val sign = if (rule.weight >= 0) "+${rule.weight}" else "${rule.weight}"

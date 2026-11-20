@@ -51,7 +51,14 @@ data class DecisionDetails(
     val systemScreeningComponent: String? = null,
     val systemScreeningAppIsSpamShield: Boolean? = null,
     val observedCallTimestamp: Long? = null,
-    val reason: String? = null
+    val reason: String? = null,
+    val callAt: Long? = null,
+    val evidenceAt: Long? = null,
+    val policy: ScreeningPolicyDecision? = null,
+    val silenceCall: Boolean? = null,
+    val arrivalContext: ArrivalContext? = null,
+    val latency: ScreeningLatency? = null,
+    val experimentId: String? = null
 )
 
 data class CallEvidence(
@@ -65,6 +72,7 @@ data class CallEvidence(
 
 object DecisionTrace {
     const val CURRENT_ENGINE_REVISION = "decision-journal-v2"
+    const val SCREENING_ENGINE_REVISION = "decision-journal-v3"
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     fun details(event: CallDecisionEventEntity): DecisionDetails =
@@ -78,20 +86,29 @@ object DecisionTrace {
         durationSec = row.callDurationSec
     )
 
-    fun configuredSnapshot(row: CallTelemetryEntity, rules: Collection<ActiveRuleEntity>): DecisionDetails {
-        val configuration = rules.sortedBy { it.ruleId }.map {
+    fun configuration(rules: Collection<ActiveRuleEntity>): List<EvaluatedRule> =
+        rules.sortedBy { it.ruleId }.map {
             EvaluatedRule(it.ruleId, it.ruleType, it.pattern, it.weight, it.priority, it.enabled)
         }
-        val hash = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(json.encodeToString(configuration).toByteArray()).joinToString("") { "%02x".format(it) }
+
+    fun configurationFingerprint(
+        rules: List<EvaluatedRule>, threshold: Int, shadow: Boolean, ddd: String, hide: Boolean
+    ): String = digest("$threshold|$shadow|$ddd|$hide|" + json.encodeToString(rules.sortedBy { it.ruleId }))
+
+    internal fun digest(value: String): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+
+    fun configuredSnapshot(row: CallTelemetryEntity, rules: Collection<ActiveRuleEntity>): DecisionDetails {
+        val configuration = configuration(rules)
+        val hash = digest(json.encodeToString(configuration))
         return snapshot(row).copy(evaluatedRules = configuration, ruleSetFingerprint = hash)
     }
 
     private val evaluationTypes = setOf("POST_CALL_EVALUATION", "REPROCESS_EVALUATION", "HISTORY_ASSESSMENT")
 
     private fun versioned(details: DecisionDetails) = details.copy(
-            schemaVersion = 2,
-            engineRevision = CURRENT_ENGINE_REVISION,
+            schemaVersion = if (details.callAt != null || details.latency != null) 3 else 2,
+            engineRevision = if (details.callAt != null || details.latency != null) SCREENING_ENGINE_REVISION else CURRENT_ENGINE_REVISION,
             appVersionName = BuildConfig.VERSION_NAME,
             appVersionCode = BuildConfig.VERSION_CODE
     )
@@ -102,14 +119,24 @@ object DecisionTrace {
     internal fun buildEvent(
         callId: String, type: String, source: String, details: DecisionDetails, at: Long, key: String? = null
     ): CallDecisionEventEntity =
-        event(callId, type, source, json.encodeToString(versioned(details)), at, key)
+        event(callId, type, source, encode(versioned(details)), at, key)
+
+    private val additiveV3Fields = setOf("callAt", "evidenceAt", "policy", "silenceCall", "arrivalContext", "latency", "experimentId")
+
+    private fun encode(details: DecisionDetails): String {
+        val objectValue = json.encodeToJsonElement(DecisionDetails.serializer(), details) as kotlinx.serialization.json.JsonObject
+        // Preserve the byte-level shape of schema 2, including deterministic CallLog retries.
+        return kotlinx.serialization.json.JsonObject(objectValue.filterNot { (key, value) ->
+            key in additiveV3Fields && value == kotlinx.serialization.json.JsonNull
+        }).toString()
+    }
 
     suspend fun record(
         dao: SpamShieldDao, callId: String, type: String, source: String,
         details: DecisionDetails, at: Long = System.currentTimeMillis(), key: String? = null
     ) {
         val recordedDetails = versioned(details)
-        val encoded = json.encodeToString(recordedDetails)
+        val encoded = encode(recordedDetails)
         if (key == null && type != "SCREENING_DECISION" && type != "SCREENING_RESPONSE_SUBMITTED") {
             val existing = dao.getDecisionEvents(callId)
             if (type in evaluationTypes) {
@@ -167,6 +194,7 @@ object DecisionTrace {
         "SCREENING_RESPONSE_SUBMITTED" -> "Resposta enviada ao Android"
         "SCREENING_RESPONSE_FAILED" -> "Falha no envio ao Android"
         "SCREENING_ERROR" -> "Falha na avaliação"
+        "SCREENING_POST_RESPONSE" -> "Trabalho pós-resposta"
         "SCREENING_TIMEOUT" -> "Prazo da triagem excedido"
         "CALL_LOG_OBSERVATION" -> "Resultado observado no Android"
         "POST_CALL_EVALUATION" -> "Aprendizado após a chamada"
@@ -200,6 +228,7 @@ object DecisionTrace {
             requested -> "Bloqueio solicitado (resultado desconhecido)"
             response?.reason == "FALLBACK_AFTER_TIMEOUT" -> "Permissão enviada no prazo de contingência"
             response?.reason == "FALLBACK_AFTER_ERROR" -> "Permissão enviada após falha do bloqueador"
+            response?.silenceCall == true -> "Silenciamento solicitado (resultado desconhecido)"
             response != null -> "Passagem autorizada pelo app"
             arrival != null -> "Decisão calculada; envio não comprovado"
             else -> "Legado: decisão original não registrada"

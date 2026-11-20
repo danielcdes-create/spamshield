@@ -3,6 +3,7 @@ package br.com.spamshield.domain
 import br.com.spamshield.BuildConfig
 import br.com.spamshield.data.local.entity.CallDecisionEventEntity
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
+import br.com.spamshield.data.local.entity.FeatureEventEntity
 import br.com.spamshield.data.remote.toRemoteEvent
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -21,7 +22,7 @@ data class TelemetryExportMetadata(
     val exportedAt: Long = System.currentTimeMillis(),
     val exporterVersionName: String = BuildConfig.VERSION_NAME,
     val exporterVersionCode: Int = BuildConfig.VERSION_CODE,
-    val engineRevision: String = DecisionTrace.CURRENT_ENGINE_REVISION,
+    val engineRevision: String = DecisionTrace.SCREENING_ENGINE_REVISION,
     val timestampUnit: String = "UNIX_EPOCH_MILLISECONDS",
     val timezoneForIsoDates: String = "UTC",
     val rowTimestampSemantics: String = "CALL_TIME_NOT_PROCESSING_OR_INSTALL_TIME",
@@ -54,7 +55,8 @@ data class TelemetryExportSummary(
     val originalVersionAmbiguousRows: Int,
     val currentClassificationVersionUnknownRows: Int,
     val versions: List<VersionPeriodSummary>,
-    val pendingEventCount: Int = 0
+    val pendingEventCount: Int = 0,
+    val features: FeatureExport? = null
 )
 
 object TelemetryExport {
@@ -78,7 +80,8 @@ object TelemetryExport {
 
     fun summary(
         rows: List<CallTelemetryEntity>, events: List<CallDecisionEventEntity>,
-        metadata: TelemetryExportMetadata = TelemetryExportMetadata()
+        metadata: TelemetryExportMetadata = TelemetryExportMetadata(),
+        featureEvents: List<FeatureEventEntity> = emptyList()
     ): TelemetryExportSummary {
         val rowIds = rows.map { it.id }.toSet()
         val includedEvents = events.filter { it.callId in rowIds }
@@ -108,12 +111,14 @@ object TelemetryExport {
             provenance.values.count { it.originalVersionStatus == "ORIGINAL_VERSION_UNKNOWN" },
             provenance.values.count { it.originalVersionStatus == "AMBIGUOUS_SCREENING_VERSIONS" },
             provenance.values.count { it.currentClassification == null }, versions,
-            pendingEventCount = includedEvents.count { it.syncStatus == "PENDING" }
+            pendingEventCount = includedEvents.count { it.syncStatus == "PENDING" },
+            features = FeatureExport.summarize(rows, includedEvents, featureEvents)
         )
     }
 
     fun encodeSummary(
         rows: List<CallTelemetryEntity>, events: List<CallDecisionEventEntity>,
-        metadata: TelemetryExportMetadata = TelemetryExportMetadata()
-    ): String = json.encodeToString(summary(rows, events, metadata))
+        metadata: TelemetryExportMetadata = TelemetryExportMetadata(),
+        featureEvents: List<FeatureEventEntity> = emptyList()
+    ): String = json.encodeToString(summary(rows, events, metadata, featureEvents))
 }

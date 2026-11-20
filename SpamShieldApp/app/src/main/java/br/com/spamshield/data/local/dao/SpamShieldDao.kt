@@ -13,6 +13,7 @@ import br.com.spamshield.data.local.entity.OutboundGraceEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
 import br.com.spamshield.data.local.entity.SyncMutationEntity
 import br.com.spamshield.data.local.entity.RemoteQuarantinePrefixEntity
+import br.com.spamshield.data.local.entity.FeatureEventEntity
 import br.com.spamshield.domain.TelemetryCoalescer
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.encodeToString
@@ -21,6 +22,32 @@ import java.util.UUID
 
 @Dao
 interface SpamShieldDao {
+    @Transaction
+    suspend fun applyLabRule(rule: ActiveRuleEntity, mutation: SyncMutationEntity, event: FeatureEventEntity) {
+        persistRuleUpdate(rule, mutation)
+        insertFeatureEvents(listOf(event))
+    }
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertFeatureEvents(events: List<FeatureEventEntity>)
+
+    @Query("SELECT * FROM feature_events ORDER BY recordedAt, rowid")
+    suspend fun getFeatureEvents(): List<FeatureEventEntity>
+
+    @Query("SELECT * FROM feature_events ORDER BY recordedAt, rowid")
+    fun observeFeatureEvents(): Flow<List<FeatureEventEntity>>
+
+    @Query("SELECT * FROM feature_events WHERE eventType IN (:types) ORDER BY recordedAt, rowid")
+    suspend fun getFeatureEventsByType(types: List<String>): List<FeatureEventEntity>
+
+    @Query("SELECT * FROM feature_events WHERE syncStatus = 'PENDING' ORDER BY recordedAt, rowid")
+    suspend fun getPendingFeatureEvents(): List<FeatureEventEntity>
+
+    @Query("UPDATE feature_events SET syncStatus = 'SYNCED' WHERE eventId IN (:ids)")
+    suspend fun acknowledgeFeatureEvents(ids: List<String>)
+
+    @Transaction
+    suspend fun getFullTelemetryExportSnapshot() = Triple(getAllTelemetry(), getAllDecisionEvents(), getFeatureEvents())
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun enqueueSyncMutation(mutation: SyncMutationEntity)

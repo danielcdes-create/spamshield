@@ -34,6 +34,8 @@ data class CallEvaluationResult(
 
 internal data class PreparedScreening(
     val result: CallEvaluationResult,
+    val window: ExpectedWindow? = null,
+    val quarantineMatch: PrefixQuarantineMatch = PrefixQuarantineMatch.NONE,
     val decisionDetails: () -> DecisionDetails
 )
 
@@ -118,10 +120,13 @@ class SpamScoringEngine @Inject constructor(
     internal suspend fun prepareIncomingCall(
         rawNumber: String,
         stirShakenStatus: String,
-        nowMillis: Long
+        nowMillis: Long,
+        timing: ScreeningTiming? = null,
+        onWindowSnapshot: (ExpectedWindow?) -> Unit = {}
     ): PreparedScreening {
         val startNanos = safeElapsedNanos()
         val settings = settingsDataStore.getSnapshot()
+        onWindowSnapshot(settings.expectedWindow)
         if (!QuarantinePrefixIndex.isReady) {
             QuarantinePrefixIndex.refreshActive(nowMillis) { dao.getAllQuarantines() }
         }
@@ -173,7 +178,9 @@ class SpamScoringEngine @Inject constructor(
                 ruleId = "CONTACT_WHITELIST",
                 ruleWeight = -1000,
                 startNanos = startNanos,
-                nowMillis = nowMillis
+                nowMillis = nowMillis,
+                settings = settings,
+                timing = timing
             )
         }
 
@@ -201,7 +208,9 @@ class SpamScoringEngine @Inject constructor(
                         ruleId = "EMERGENCY_REPEATED_CALL",
                         ruleWeight = -500,
                         startNanos = startNanos,
-                        nowMillis = nowMillis
+                        nowMillis = nowMillis,
+                        settings = settings,
+                        timing = timing
                     )
                 }
             }
@@ -236,7 +245,9 @@ class SpamScoringEngine @Inject constructor(
                     ruleId = "OUTBOUND_GRACE_PERIOD",
                     ruleWeight = -500,
                     startNanos = startNanos,
-                    nowMillis = nowMillis
+                    nowMillis = nowMillis,
+                    settings = settings,
+                    timing = timing
                 )
             }
         }
@@ -278,8 +289,9 @@ class SpamScoringEngine @Inject constructor(
                 disabledRuleIds = disabledRuleIds,
                 extraRegexRules = compiledRules
             )
-        val decision = HeuristicScorer.score(scoreInput)
-        val triggeredRules = decision.triggeredRules.toMutableList()
+        val contextualRules = mutableListOf<TriggeredRuleDto>()
+        var prefix6Count: Int? = null
+        var prefix5Count: Int? = null
 
         var distinctNumbers24h: Int? = null
         val burstPrefix = normalized.storedPrefix7.orEmpty()
@@ -296,7 +308,7 @@ class SpamScoringEngine @Inject constructor(
             distinctNumbers24h = effectiveDistinctCount
             if (effectiveDistinctCount >= 2) {
                 val burstWeight = enabledRules["PREFIX_NEIGHBORHOOD_BURST"]?.weight ?: 60
-                triggeredRules.add(
+                contextualRules.add(
                     TriggeredRuleDto(
                         rule_id = "PREFIX_NEIGHBORHOOD_BURST",
                         weight = burstWeight,
@@ -308,8 +320,9 @@ class SpamScoringEngine @Inject constructor(
 
         if (quarantineMatch == PrefixQuarantineMatch.NONE && normalized.prefix6.length >= 6) {
             val neighborCount = QuarantinePrefixIndex.countWithPrefix(normalized.prefix6, nowMillis)
+            prefix6Count = neighborCount
             if (neighborCount >= 1) {
-                triggeredRules.add(
+                contextualRules.add(
                     TriggeredRuleDto(
                         rule_id = "PREFIX6_NEIGHBOR_WARNING",
                         weight = 15,
@@ -322,8 +335,9 @@ class SpamScoringEngine @Inject constructor(
         val prefix5 = normalized.prefix7.take(5)
         if (prefix5.length == 5) {
             val farmCount = QuarantinePrefixIndex.countWithPrefix(prefix5, nowMillis)
+            prefix5Count = farmCount
             if (PhoneNormalizer.isKnownChipeiraFarmPrefix5(prefix5) || farmCount >= 6) {
-                triggeredRules.add(
+                contextualRules.add(
                     TriggeredRuleDto(
                         rule_id = "PREFIX5_CHIPEIRA_FARM",
                         weight = 35,
@@ -334,7 +348,7 @@ class SpamScoringEngine @Inject constructor(
         }
 
         if (normalized.ddd.isNotEmpty() && normalized.ddd != "00" && normalized.ddd != settings.userDdd) {
-            triggeredRules.add(
+            contextualRules.add(
                 TriggeredRuleDto(
                     rule_id = "EXTERNAL_DDD_UNKNOWN",
                     weight = 30,
@@ -343,9 +357,9 @@ class SpamScoringEngine @Inject constructor(
             )
         }
 
-        val effectiveRules = HeuristicScorer.configuredRules(triggeredRules, scoreInput)
-        triggeredRules.clear()
-        triggeredRules.addAll(effectiveRules)
+        timing?.mark("CONTEXT_READY")
+        val decision = HeuristicScorer.score(scoreInput)
+        val triggeredRules = HeuristicScorer.configuredRules(decision.triggeredRules + contextualRules, scoreInput)
         val score = HeuristicScorer.equation(triggeredRules)
         val threshold = settings.blockThresholdScore
         val outcome = HeuristicScorer.resolveOutcome(score, threshold, null, settings.shadowModeEnabled)
@@ -391,8 +405,19 @@ class SpamScoringEngine @Inject constructor(
             shouldSkipCallLog = shouldBlock && settings.hideBlockedFromSystemCallLog,
             shouldNotifyShadowBlock = outcome == "SHADOW_BLOCKED"
         )
-        return PreparedScreening(result) {
-            DecisionTrace.configuredSnapshot(telemetryEntity, allRules).copy(
+        timing?.mark("RULES_READY")
+        return PreparedScreening(result, settings.expectedWindow, quarantineMatch) {
+            val context = ArrivalContext(carrierGuess, resolvedLineType, settings.userDdd,
+                settings.hideBlockedFromSystemCallLog, contextualRules.map { it.copy(meta = null) },
+                prefix6Count, prefix5Count)
+            val configuration = DecisionTrace.configuration(allRules + RuleLaboratory.catalog(allRules).filter { candidate ->
+                allRules.none { it.ruleId == candidate.ruleId }
+            })
+            DecisionTrace.snapshot(telemetryEntity).copy(
+                evaluatedRules = configuration,
+                ruleSetFingerprint = DecisionTrace.configurationFingerprint(configuration, threshold,
+                    settings.shadowModeEnabled, settings.userDdd, settings.hideBlockedFromSystemCallLog),
+                arrivalContext = context,
                 quarantineMatch = quarantineMatch.name,
                 quarantineCacheReady = cacheReady,
                 quarantineCacheSize = cacheSize,
@@ -410,11 +435,12 @@ class SpamScoringEngine @Inject constructor(
         val result = prepared.result
         val callId = result.telemetry.id
         val source = "CALL_SCREENING_SERVICE"
+        val recordedAt = if (response?.callAt != null) System.currentTimeMillis() else submittedAt
         val events = buildList {
-            add(DecisionTrace.buildEvent(callId, "SCREENING_DECISION", source, prepared.decisionDetails(), submittedAt))
+            add(DecisionTrace.buildEvent(callId, "SCREENING_DECISION", source, prepared.decisionDetails(), recordedAt, key = "arrival"))
             if (response != null) {
                 val eventType = if (responseFailure == null) "SCREENING_RESPONSE_SUBMITTED" else "SCREENING_RESPONSE_FAILED"
-                add(DecisionTrace.buildEvent(callId, eventType, source, response.copy(reason = responseFailure), submittedAt))
+                add(DecisionTrace.buildEvent(callId, eventType, source, response.copy(reason = responseFailure ?: response.reason), recordedAt, key = "submission"))
             }
         }
         val row = dao.persistScreeningAudit(result.telemetry, events)
@@ -609,8 +635,8 @@ class SpamScoringEngine @Inject constructor(
         val allRules = configuration
         val ruleWeights = allRules.associate { it.ruleId to it.weight }
         val disabledRuleIds = allRules.filterNot { it.enabled }.map { it.ruleId }.toSet()
-        val arrival = dao.getDecisionEvents(latest.id)
-            .firstOrNull { it.eventType == "SCREENING_DECISION" && it.source == "CALL_SCREENING_SERVICE" }
+        val arrivalEvents = dao.getDecisionEvents(latest.id)
+        val arrival = arrivalEvents.firstOrNull { it.eventType == "SCREENING_DECISION" && it.source == "CALL_SCREENING_SERVICE" }
             ?.let(DecisionTrace::details)
         val cleanArrivalRules = (arrival?.rules ?: existingRules).filter {
             it.rule_id != "SYSTEM_CALLLOG_BLOCKED" &&
@@ -720,7 +746,9 @@ class SpamScoringEngine @Inject constructor(
         val isUnanswered = callType == android.provider.CallLog.Calls.MISSED_TYPE ||
             (callType == android.provider.CallLog.Calls.INCOMING_TYPE && callDurationSec == 0)
 
-        if (isUnanswered && cleanArrivalScore < latest.thresholdApplied) {
+        val silenceRequested = arrivalEvents.any { it.source == "CALL_SCREENING_SERVICE" &&
+            it.eventType == "SCREENING_RESPONSE_SUBMITTED" && DecisionTrace.details(it).silenceCall == true }
+        if (isUnanswered && !silenceRequested && cleanArrivalScore < latest.thresholdApplied) {
             val qPrefix = extractQuarantinePrefix(latest.normalizedNumber, latest.prefix7)
             dao.updateCallDurationAndCategory(latest.id, 0, latest.category)
 
@@ -815,8 +843,11 @@ class SpamScoringEngine @Inject constructor(
         ruleId: String,
         ruleWeight: Int,
         startNanos: Long,
-        nowMillis: Long
+        nowMillis: Long,
+        settings: br.com.spamshield.data.local.SpamShieldSettings,
+        timing: ScreeningTiming?
     ): PreparedScreening {
+        timing?.mark("CONTEXT_READY")
         val rules = listOf(TriggeredRuleDto(ruleId, ruleWeight, null))
         val latencyMs = (safeElapsedNanos() - startNanos).coerceAtLeast(50_000L) / 1_000_000.0
         val entity = CallTelemetryEntity(
@@ -848,7 +879,12 @@ class SpamScoringEngine @Inject constructor(
             shouldSkipCallLog = false,
             shouldNotifyShadowBlock = false
         )
-        return PreparedScreening(result) { DecisionTrace.snapshot(entity) }
+        timing?.mark("RULES_READY")
+        return PreparedScreening(result, settings.expectedWindow) {
+            DecisionTrace.snapshot(entity).copy(ruleSetFingerprint = DecisionTrace.digest(
+                "protected|$ruleId|$threshold|$shadowMode|${settings.userDdd}"
+            ))
+        }
     }
 
     private fun safeElapsedNanos(): Long {

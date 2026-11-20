@@ -6,6 +6,7 @@ import br.com.spamshield.data.local.dao.SpamShieldDao
 import br.com.spamshield.data.local.entity.ActiveRuleEntity
 import br.com.spamshield.data.local.entity.AnatelPrefixEntity
 import br.com.spamshield.data.local.entity.CallDecisionEventEntity
+import br.com.spamshield.data.local.entity.FeatureEventEntity
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.OutboundGraceEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
@@ -21,6 +22,20 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 open class FakeSpamShieldDao : SpamShieldDao {
+    private val featureEvents = MutableStateFlow<List<FeatureEventEntity>>(emptyList())
+    override suspend fun insertFeatureEvents(events: List<FeatureEventEntity>) {
+        featureEvents.value = (featureEvents.value + events).distinctBy { it.eventId }
+    }
+    override suspend fun getFeatureEvents() = featureEvents.value
+    override fun observeFeatureEvents() = featureEvents
+    override suspend fun getFeatureEventsByType(types: List<String>) = featureEvents.value.filter { it.eventType in types }
+    override suspend fun getPendingFeatureEvents() = featureEvents.value.filter { it.syncStatus == "PENDING" }
+    override suspend fun acknowledgeFeatureEvents(ids: List<String>) {
+        featureEvents.value = featureEvents.value.map {
+            if (it.eventId in ids) it.copy(syncStatus = "SYNCED") else it
+        }
+    }
+
     val remotePrefixes = mutableSetOf<String>()
     override suspend fun getRemoteQuarantinePrefixes() = remotePrefixes.toList()
     override suspend fun clearRemoteQuarantinePrefixes() { remotePrefixes.clear() }

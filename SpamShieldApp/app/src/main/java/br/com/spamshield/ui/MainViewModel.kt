@@ -11,6 +11,16 @@ import br.com.spamshield.data.local.entity.ActiveRuleEntity
 import br.com.spamshield.data.local.entity.CallDecisionEventEntity
 import br.com.spamshield.data.remote.toRemoteEvent
 import br.com.spamshield.domain.DecisionTrace
+import br.com.spamshield.domain.Campaigns
+import br.com.spamshield.domain.ExpectedWindow
+import br.com.spamshield.domain.FeatureRepository
+import br.com.spamshield.domain.LabExperiment
+import br.com.spamshield.domain.RuleChange
+import br.com.spamshield.domain.RuleLaboratory
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
 import br.com.spamshield.data.local.entity.TriggeredRuleDto
@@ -73,7 +83,8 @@ class MainViewModel @Inject constructor(
     private val settingsDataStore: SettingsDataStore,
     private val syncRepository: SyncRepository,
     private val spamScoringEngine: SpamScoringEngine,
-    private val callHistoryAnalyzer: CallHistoryAnalyzer
+    private val callHistoryAnalyzer: CallHistoryAnalyzer,
+    private val features: FeatureRepository
 ) : ViewModel() {
 
     private val _apkInstallEvents = MutableSharedFlow<ApkInstallEvent>(extraBufferCapacity = 1)
@@ -91,6 +102,10 @@ class MainViewModel @Inject constructor(
 
     val decisionEvents: StateFlow<List<CallDecisionEventEntity>> = dao.observeDecisionEvents()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val featureEvents = dao.observeFeatureEvents().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val labBusy = MutableStateFlow(false)
+    val featureError = MutableStateFlow<String?>(null)
 
     val activeRules: StateFlow<List<ActiveRuleEntity>> = dao
         .observeAllRules()
@@ -116,6 +131,24 @@ class MainViewModel @Inject constructor(
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
+            dao.observeDecisionEvents().map { events -> events.filter { it.eventType in setOf(
+                "SCREENING_DECISION", "SCREENING_RESPONSE_SUBMITTED", "SCREENING_RESPONSE_FAILED", "CALL_LOG_OBSERVATION"
+            ) }.map { it.eventId } }.distinctUntilChanged().collect {
+                if (settingsDataStore.getSnapshot().localDataDisclosureAccepted) handleFeatureAction { features.reconcile() }
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            combine(settingsDataStore.settingsFlow, dao.observeFeatureEvents()) { preferences, events ->
+                if (!preferences.localDataDisclosureAccepted) emptyList() else listOfNotNull(
+                    preferences.expectedWindow?.expiresAt, RuleLaboratory.running(events)?.expiresAt
+                ) + Campaigns.silences(events).map { it.expiresAt }
+            }.distinctUntilChanged().collectLatest { expires ->
+                val next = expires.minOrNull() ?: return@collectLatest
+                delay((next - System.currentTimeMillis()).coerceAtLeast(0))
+                handleFeatureAction { features.reconcile() }
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 if (!settingsDataStore.getSnapshot().localDataDisclosureAccepted) return@runCatching
                 dao.deduplicateHistoryRecords()
@@ -127,6 +160,56 @@ class MainViewModel @Inject constructor(
             }
         }
         refreshTailscaleStatus()
+    }
+
+    fun refreshFeatures() = featureAction {
+        features.reconcile()
+        features.resumeReplays()
+    }
+
+    fun windowSelector(id: String, open: Boolean, window: ExpectedWindow?) = featureAction { features.selector(id, open, window) }
+
+    fun changeWindow(id: String, minutes: Int?, keepExact: Boolean, restore: Boolean) =
+        featureAction { features.changeWindow(id, minutes, keepExact, restore) }
+
+    fun markExpectedCall(callId: String, expected: Boolean) = featureAction { features.feedback(callId, expected) }
+
+    fun changeCampaignSilence(id: String, minutes: Int?) = featureAction { features.changeSilence(id, minutes) }
+
+    fun startLab(change: RuleChange, minutes: Int?) = labAction { features.startLab(change, minutes) }
+
+    fun finishLab(experiment: LabExperiment, action: String) = labAction { features.finishLab(experiment, action) }
+
+    private fun featureAction(action: suspend () -> Unit) {
+        viewModelScope.launch(Dispatchers.IO, start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            handleFeatureAction(action)
+        }
+    }
+
+    private suspend fun handleFeatureAction(action: suspend () -> Unit) {
+        try {
+            action()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            featureError.value = "Não foi possível atualizar o diário de recursos."
+        }
+    }
+
+    fun clearFeatureError() {
+        featureError.value = null
+    }
+
+    private fun labAction(action: suspend () -> Unit) {
+        if (!labBusy.compareAndSet(expect = false, update = true)) return
+        featureAction {
+            featureError.value = null
+            try {
+                action()
+            } finally {
+                labBusy.value = false
+            }
+        }
     }
 
     fun refreshTailscaleStatus() {
@@ -416,7 +499,8 @@ class MainViewModel @Inject constructor(
     }
 
     suspend fun exportTelemetryFiles(): Pair<File, File> = withContext(Dispatchers.IO) {
-        val (all, journal) = dao.getTelemetryExportSnapshot()
+        features.reconcile()
+        val (all, journal, featureJournal) = features.exportSnapshot()
         val exportMetadata = br.com.spamshield.domain.TelemetryExportMetadata()
         val exportDir = File(appContext.cacheDir, "exports/${exportMetadata.exportId}")
         check(exportDir.mkdirs()) { "Não foi possível preparar os arquivos de exportação." }
@@ -425,17 +509,20 @@ class MainViewModel @Inject constructor(
         val events = journal.groupBy { it.callId }
         jsonFile.writeText(br.com.spamshield.domain.TelemetryExport.encode(all, journal, exportMetadata))
         File(exportDir, "spamshield_telemetry_summary.json").writeText(
-            br.com.spamshield.domain.TelemetryExport.encodeSummary(all, journal, exportMetadata)
+            br.com.spamshield.domain.TelemetryExport.encodeSummary(all, journal, exportMetadata, featureJournal)
         )
 
         val csvFile = File(exportDir, "spamshield_telemetry.csv")
         val sb = StringBuilder()
-        sb.appendLine("id,timestamp,rawNumber,normalizedNumber,ddd,prefix7,carrierGuess,lineType,stirShakenStatus,finalScore,thresholdApplied,outcome,category,processingLatencyMs,userFeedback,syncStatus,arrivalScore,observedResult,decisionEventsJson,originalAppVersion,originalVersionStatus,currentClassificationAppVersion,currentClassificationRecordedAt,currentClassificationVersionStatus,eventAppVersions,exportSchemaVersion,exportedAt,exporterVersionName,exporterVersionCode,provenanceJson,decisionEventSyncJson")
+        sb.appendLine("id,timestamp,rawNumber,normalizedNumber,ddd,prefix7,carrierGuess,lineType,stirShakenStatus,finalScore,thresholdApplied,outcome,category,processingLatencyMs,userFeedback,syncStatus,arrivalScore,observedResult,decisionEventsJson,originalAppVersion,originalVersionStatus,currentClassificationAppVersion,currentClassificationRecordedAt,currentClassificationVersionStatus,eventAppVersions,exportSchemaVersion,exportedAt,exporterVersionName,exporterVersionCode,provenanceJson,decisionEventSyncJson,exportId,normalAction,chosenAction,policyReason,latencyJson,featureEventIdsJson")
         fun csv(value: String) = "\"" + value.replace("\"", "\"\"") + "\""
+        val featuresByCall = featureJournal.groupBy { it.callId }
         for (row in all) {
             val callEvents = events[row.id].orEmpty()
             val evidence = DecisionTrace.evidence(row, callEvents)
             val provenance = br.com.spamshield.domain.TelemetryProvenance.forCall(row, callEvents)
+            val response = callEvents.lastOrNull { it.source == "CALL_SCREENING_SERVICE" &&
+                it.eventType in setOf("SCREENING_RESPONSE_SUBMITTED", "SCREENING_RESPONSE_FAILED") }?.let(DecisionTrace::details)
             val serializedEvents = json.encodeToString(callEvents.map { it.toRemoteEvent() })
             sb.appendLine(
                 "${row.id},${row.timestamp},${csv(row.rawNumber)},${csv(row.normalizedNumber)},${row.ddd},${row.prefix7}," +
@@ -446,7 +533,10 @@ class MainViewModel @Inject constructor(
                     "${csv(provenance.currentClassification?.appVersion?.label.orEmpty())},${provenance.currentClassification?.recordedAt ?: ""},${provenance.currentClassificationStatus}," +
                     "${csv(provenance.eventAppVersions.joinToString("; ") { it.label })},${exportMetadata.schemaVersion},${exportMetadata.exportedAt}," +
                     "${csv(exportMetadata.exporterVersionName)},${exportMetadata.exporterVersionCode},${csv(json.encodeToString(provenance))}," +
-                    csv(json.encodeToString(callEvents.associate { it.eventId to it.syncStatus }))
+                    csv(json.encodeToString(callEvents.associate { it.eventId to it.syncStatus })) +
+                    ",${exportMetadata.exportId},${response?.policy?.normalAction.orEmpty()},${response?.policy?.chosenAction.orEmpty()}," +
+                    "${csv(response?.policy?.reason.orEmpty())},${csv(json.encodeToString(response?.latency))}," +
+                    csv(json.encodeToString(featuresByCall[row.id].orEmpty().map { it.eventId }))
             )
         }
         csvFile.writeText(sb.toString())

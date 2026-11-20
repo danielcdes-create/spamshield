@@ -32,6 +32,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import br.com.spamshield.data.local.entity.ActiveRuleEntity
+import br.com.spamshield.data.local.entity.FeatureEventEntity
+import br.com.spamshield.data.local.entity.CallDecisionEventEntity
+import br.com.spamshield.domain.LabExperiment
+import br.com.spamshield.domain.RuleChange
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
 
 @Composable
@@ -41,8 +45,16 @@ fun QuarantineRulesScreen(
     onAddCustomRule: (String, String, String, Int) -> Unit,
     onAddManualQuarantine: (String, String, Int) -> Unit,
     onRemoveQuarantine: (String) -> Unit,
-    onToggleRule: (ActiveRuleEntity) -> Unit
+    onToggleRule: (ActiveRuleEntity) -> Unit,
+    featureEvents: List<FeatureEventEntity>,
+    decisionEvents: List<CallDecisionEventEntity>,
+    onStartLab: (RuleChange, Int?) -> Unit,
+    onFinishLab: (LabExperiment, String) -> Unit,
+    labBusy: Boolean,
+    labError: String?
 ) {
+    var labOpen by remember { mutableStateOf(false) }
+    if (labOpen) RuleLab(rules, featureEvents, decisionEvents, { labOpen = false }, onStartLab, onFinishLab, labBusy, labError)
     var newPrefix by remember { mutableStateOf("") }
     var newCarrier by remember { mutableStateOf("VoIP / Manual") }
     var newPrefixWeight by remember { mutableStateOf("70") }
@@ -72,6 +84,8 @@ fun QuarantineRulesScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+
+        item { Button(onClick = { labOpen = true }) { Text("Testar alteração") } }
 
         // Manual Prefix Quarantine Adder
         item {

@@ -15,6 +15,7 @@ import br.com.spamshield.data.local.entity.OutboundGraceEntity
 import br.com.spamshield.data.local.entity.PrefixQuarantineEntity
 import br.com.spamshield.data.local.entity.SyncMutationEntity
 import br.com.spamshield.data.local.entity.RemoteQuarantinePrefixEntity
+import br.com.spamshield.data.local.entity.FeatureEventEntity
 import br.com.spamshield.data.remote.FeedbackPatchRequestDto
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -28,15 +29,27 @@ import kotlinx.serialization.json.Json
         OutboundGraceEntity::class,
         AnatelPrefixEntity::class,
         SyncMutationEntity::class,
-        RemoteQuarantinePrefixEntity::class
+        RemoteQuarantinePrefixEntity::class,
+        FeatureEventEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun spamShieldDao(): SpamShieldDao
 
     companion object {
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS feature_events (
+                    eventId TEXT NOT NULL PRIMARY KEY, callId TEXT, resourceId TEXT NOT NULL,
+                    eventType TEXT NOT NULL, source TEXT NOT NULL, recordedAt INTEGER NOT NULL,
+                    effectiveAt INTEGER NOT NULL, appVersion TEXT NOT NULL, detailsJson TEXT NOT NULL,
+                    schemaVersion INTEGER NOT NULL, syncStatus TEXT NOT NULL)""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_feature_events_syncStatus ON feature_events(syncStatus)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_feature_events_eventType ON feature_events(eventType)")
+            }
+        }
         val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("""CREATE TABLE IF NOT EXISTS sync_mutations (

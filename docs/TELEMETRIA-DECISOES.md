@@ -1,5 +1,72 @@
 # Telemetria de decisões
 
+## Janela esperada, campanhas e laboratório
+
+O diário de recursos tem IDs imutáveis por evento, vínculo opcional à chamada, ID do recurso, origem, versão do app e esquema. O cliente e o servidor confirmam IDs individuais. O resumo contém o diário de recursos, inclusive em exportações sem chamadas, sob o mesmo `exportId` da lista e do CSV.
+
+| Família | Eventos |
+| --- | --- |
+| Janela | `WAIT_SELECTOR_OPENED`, `WAIT_SELECTOR_DISMISSED`, `WAIT_ACTIVATED`, `WAIT_RENEWED`, `WAIT_RESTORED`, `WAIT_EXPIRED`, `WAIT_FEEDBACK` |
+| Campanha | `CAMPAIGN_DETECTED`, `CAMPAIGN_UPDATED`, `CAMPAIGN_MERGED`, `CAMPAIGN_SILENCE_ACTIVATED`, `CAMPAIGN_SILENCE_REMOVED`, `CAMPAIGN_SILENCE_EXPIRED` |
+| Laboratório | `LAB_REPLAY_STARTED`, `LAB_SHADOW_STARTED`, `LAB_COMPARISON`, `LAB_REPLAY_FINISHED`, `LAB_ENDED`, `LAB_DISCARDED`, `LAB_APPLIED` |
+
+Na triagem, `SCREENING_DECISION` preserva as regras e acrescenta a política normal e a resolução após as prioridades. `SCREENING_RESPONSE_SUBMITTED` e `SCREENING_RESPONSE_FAILED` guardam as opções tentadas. `SCREENING_POST_RESPONSE` registra o trabalho medido depois do envio. Um envio de permissão não confirma toque. O CallLog continua como evidência posterior separada.
+
+### Vínculos e relógios
+
+| Campo | Como interpretar |
+| --- | --- |
+| `callAt` | Horário original fornecido pelo Android, com o horário do callback como contingência quando vier ausente |
+| `evidenceAt` | Horário de chegada ao serviço para a decisão, ou horário da tentativa de envio para a resposta |
+| `recorded_at` | Horário associado ao registro no diário. Expirações observadas depois de reiniciar conservam o horário de observação aqui |
+| `effective_at` | Horário de vigência de um evento de recurso. Para expiração é o vencimento original. Para detecção de campanha é o horário da chamada que satisfez o critério |
+| `event_id`, `call_id`, `resource_id` | Identidades imutáveis do evento, da chamada quando houver e da janela, seletor, campanha ou execução |
+| `policy` | Ação normal e escolhida, motivo, sinais positivos, referência à janela, intervenção de campanha e faixa vizinha observada. `campaignContextReady=false` indica leitura indisponível |
+| `arrivalContext` | Contexto original para reproduzir regras, com peso efetivo no diário, contagens do cache quando disponíveis e regras contextuais antes da aplicação de pesos |
+| `ruleSetFingerprint` | SHA-256 da configuração original ordenada incluindo limiar, modo sombra global, DDD local e opção de ocultar do CallLog. Permissões protegidas têm fingerprint do contexto reduzido do atalho |
+
+Horários de parede usam epoch em milissegundos. Durações usam `elapsedRealtimeNanos()` convertido em ms. Na revisão `decision-journal-v3`, `elapsedMs` cobre do início do callback até depois da tentativa de envio, dentro da qual estão `callbackSetupMs`, `evaluationWaitMs`, `localContextMs`, `rulesMs`, `policyMs` e `submissionMs`. Há intervalos entre essas marcas. `localContextMs` inclui preferências, consultas locais e permissões, enquanto a métrica histórica `processingLatencyMs` conserva os limites anteriores do motor. Some somente etapas disjuntas. `journalMs` (diário e aprendizado imediato, quando executado) e `candidateMs` (comparação e sua gravação) ficam fora de `elapsedMs`. O relógio monotônico informa `budgetMs=3500`, `timedOut` e a última etapa atingida. Etapas não concluídas ficam ausentes.
+
+### Política e denominadores
+
+A agenda, a repetição de emergência e a carência de saída mantêm suas permissões. O modo sombra global deixa a chamada passar e conserva a previsão de risco. Em proteção ativa, a janela esperada pode liberar um bloqueio elegível. Os demais bloqueios prevalecem sobre a campanha, que silencia apenas chamadas normalmente liberadas. Uma falta de atendimento após silêncio solicitado pelo próprio app fica fora do aprendizado automático por chamadas não atendidas.
+
+- **Janela de espera.** `window.startedAt` é inclusivo e `window.expiresAt` exclusivo. Renovação vincula a janela anterior por `previousId` e a encerra no início da nova. O registro de feedback referencia a decisão original e a janela. A distribuição usa a última resposta explícita de cada chamada com liberação enviada por esse modo e inclui `UNRATED`. Ativações por duração incluem renovações. `windowEligibleTriages` tem como universo triagens em que a janela foi observada. Uma falha de envio pode deixar a política calculada sem intervenção registrada.
+- **Campanha.** O critério v1 usa oito dígitos nacionais e pelo menos três números distintos em cinco minutos, com os dois limites incluídos. Cada projeção em `campaign` inclui `memberIds`, `criterionSatisfiedAt`, `detectedAt` e `distinctNumbers`. Uma nova detecção pode agrupar chamadas antigas. As intervenções são contadas pelas respostas efetivamente enviadas com `campaignSilenceId` e ficam restritas a chamadas futuras após ativação. Faixa vizinha significa sete dígitos iguais e oitavo diferente de uma faixa com silenciamento vigente. `neighboringCampaignId` registra a observação sem usar essa vizinhança para decidir. A lista de membros fornece o denominador de tentativas por campanha.
+- **Laboratório.** A comparação usa ação normal, score, regras e limiar da chegada e informa `originalEventId`, `baseFingerprint` e `candidateFingerprint`. A liberação da janela ou o silenciamento ficam na política efetiva da chamada. Para regras aditivas independentes conhecidas, um legado com configuração registrada, equação reconciliável e sem duração posterior permite a comparação aritmética. Outros legados precisam do contexto original. `INSUFFICIENT` tem causa explícita. As quatro direções somam as comparações por chamada em cada execução. A cobertura de sombra é comparações registradas sobre triagens vinculadas. O resumo separa as bases pelo fingerprint de cada decisão.
+- **Triagem.** `triageByOriginalVersion` usa chamadas com decisão ou tentativa registrada do serviço real. `UNKNOWN` inclui contingências sem versão original comprovada. Cobertura do Android usa triagens com observação CallLog sobre o total de triagens do grupo. Confirmações de bloqueio exigem autoria explícita do SpamShield. A confirmação de toque e de silêncio permanece indisponível.
+- **Latência.** O universo é uma entrada por triagem registrada. `valid` e `missing` têm esse denominador, mesmo para etapas que se aplicam só a certas chamadas. Mediana e P95 usam posição `ceil(p × n)` na amostra válida ordenada, com posições começando em 1. Máximo usa a mesma amostra.
+
+### Exportação e sincronização de recursos
+
+Os campos antigos continuam no array de chamadas e nas colunas do CSV. O CSV também inclui `exportId`, política, latências e IDs de recursos ligados à chamada. `spamshield_telemetry_summary.json` inclui `features.events`, `features.eventSync` e os indicadores. O identificador do pacote é o mesmo nos três arquivos. A leitura de chamadas, diário e recursos roda em uma transação Room. O vencimento e seu evento de janela são escritos juntos no DataStore e o evento é transferido de forma idempotente para a tabela `feature_events` da migração Room 5 → 6. Isso permite exportar uma ativação mesmo sem chamadas.
+
+`POST /api/v1/telemetry/features/batch` usa o mesmo bearer e limite de 16 MiB do endpoint de chamadas. Retorna `accepted_event_ids` e `conflicting_event_ids`. O servidor mantém o primeiro documento de cada ID e só aceita reenvio equivalente. HTTP 409 e 413 são isolados por divisão de lote. Um servidor antigo sem a rota deixa os novos eventos pendentes no aparelho. O cliente confirma apenas IDs pertencentes ao lote enviado. Os novos eventos de recurso usam referências internas, sem números completos, nomes ou conteúdo de chamada.
+
+### Exemplo sanitizado reconstruído
+
+| Horário ilustrativo | Registro | O que os vínculos demonstram |
+| --- | --- | --- |
+| 15h10 | `WAIT_SELECTOR_OPENED`, seletor S | Abertura pelo escudo |
+| 15h10 | `WAIT_ACTIVATED`, janela J, seletor S | 30 minutos, até 15h40, com quarentena exata mantida |
+| 15h11 | `LAB_SHADOW_STARTED`, experimento E | Candidata desativa `PREFIX5_CHIPEIRA_FARM` |
+| 15h12 | `SCREENING_DECISION`, evento D, chamada C | 25 + 15 + 35 = 75 com limiar 70. Política normal `BLOCK`. Janela J escolheu `ALLOW` |
+| 15h12 | `SCREENING_RESPONSE_SUBMITTED`, chamada C | Envio com `disallowCall=false` e `silenceCall=false` |
+| 15h12 | `LAB_COMPARISON`, experimento E, chamada C e decisão D | Candidata 40, direção `BLOCK_TO_ALLOW`, fora do caminho da resposta |
+| 15h14 | `WAIT_FEEDBACK`, janela J, chamada C e decisão D | `EXPECTED_CALL_CONFIRMED` pela escolha em Auditoria |
+| 15h46 | `WAIT_EXPIRED`, janela J | Abertura do app observou às 15h46 um vencimento efetivo às 15h40 |
+
+### Roteiro em aparelho
+
+1. Abra o escudo, dispense a folha e confira o estado. Ative 15 minutos, feche o app, abra de novo e confira o horário. Renove, restaure e confirme a expiração em outra janela.
+2. Em ambiente controlado, receba uma chamada com os sinais elegíveis. Compare a política normal, o que foi enviado ao Android e a observação posterior na Auditoria. Marque se era a ligação esperada e exporte.
+3. Com números de teste da mesma faixa, gere três origens distintas em até cinco minutos. Abra o resumo pelo Dashboard, confira a autoria dos bloqueios e ative o silenciamento. Compare uma chamada futura da faixa e uma vizinha, depois desfaça.
+4. Abra **Testar alteração**, faça replay e inicie a sombra. Compare as quatro contagens e a linha do tempo. Confira que encerrar ou descartar deixa a configuração ativa intacta. Use **Aplicar alteração** apenas para verificar a atualização explícita da regra.
+
+Os testes locais usam chamadas fictícias, relógio monotônico simulado e MongoDB em loopback. O comportamento do discador, a autoria fornecida por cada fabricante e a latência de chamadas reais dependem da verificação em aparelho.
+
+O cenário JVM de reconstrução gerou 8 eventos de chamada e 10 de recursos. O array JSON teve 26.797 bytes e o resumo 11.485 bytes. A migração incremental e a leitura durante escrita concorrente foram verificadas em SQLite com WAL no host. O teste de transporte em MongoDB isolado confirmou reenvio, ACK parcial e preservação do primeiro conteúdo numa colisão de ID.
+
 ## Correções da auditoria de 19/11/2026
 
 - A exportação de JSON, CSV e resumo usa uma única leitura transacional. Ela inclui o diário que já estava no banco quando a leitura começou. `decisionEventSync` no JSON, `decisionEventSyncJson` no CSV e `pendingEventCount` no resumo descrevem o estado local da sincronização dos eventos.
@@ -28,7 +95,7 @@ O JSON mantém o array de chamadas e os campos anteriores. Cada linha acrescenta
 
 Uma chamada de novembro decidida pela 1.3.2, reavaliada pela 1.3.3 e exportada pela 1.3.3 mantém esses três papéis separados. O horário exato de instalação não é inferido da primeira atividade de uma versão.
 
-Eventos novos usam `details.schemaVersion=2`, `engineRevision=decision-journal-v2` e `appVersionName/appVersionCode`. Eventos antigos mantêm seu schema e seus campos originais; a decodificação não injeta a versão atual nos eventos antigos. Avaliações idênticas em versões ou configurações diferentes são preservadas como etapas distintas.
+A revisão 2 introduziu `details.schemaVersion=2`, `engineRevision=decision-journal-v2` e `appVersionName/appVersionCode`. A revisão 3 amplia os eventos de triagem. Eventos antigos mantêm seu schema e seus campos originais; a decodificação não injeta a versão atual nos eventos antigos. Avaliações idênticas em versões ou configurações diferentes são preservadas como etapas distintas.
 
 Room `4→5` acrescenta a outbox e a origem das quarentenas remotas. A sincronização exige consentimento explícito; enquanto desativada, os dados e as mutações ficam no aparelho. O backend atualizado mescla eventos por ID atomicamente e só confirma o conjunto após persistência. Consulte [release 1.3.3](RELEASE-1.3.3.md).
 
