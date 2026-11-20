@@ -8,3 +8,11 @@
 Os eventos de janela, campanha e laboratório aparecem localmente e no export. O envio desses eventos depende do backend com `POST /api/v1/telemetry/features/batch`. Enquanto o servidor estiver na imagem anterior, eles ficam pendentes no aparelho e a sincronização de chamadas continua.
 
 As verificações de chamadas e latência são automatizadas. Toque, silenciamento e comportamento do CallLog ainda precisam de teste em aparelho.
+
+## Publicação em 19/11/2026
+
+O commit `30188bc8e700ae6b6fbb6f3a55f534e0b7fe4d2a` está na `main` e na tag `v1.4.0`. O APK assinado está disponível na [release do GitHub](https://github.com/danielcdes-create/spamshield/releases/tag/v1.4.0) e no canal OTA da VPS.
+
+Os downloads do GitHub e do OTA têm 4.031.820 bytes e SHA-256 `e370ca422d37b2890e1cb0f5f04af7a471d4c4a8a12f19b1156b9dee7663df6c`. O certificado de assinatura coincide com o da 1.3.5. A VPS continuou usando a imagem do backend 1.3.5 e confirmou a conexão com o MongoDB após a troca do APK. A configuração OTA anterior foi preservada em backup privado.
+
+O build 20 passou nos 123 testes JVM, em `lintDebug` e em `assembleRelease`. O código Rust da tag passou em 28 testes, incluindo as integrações com MongoDB local isolado.
