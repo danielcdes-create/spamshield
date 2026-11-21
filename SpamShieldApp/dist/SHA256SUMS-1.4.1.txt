@@ -1,0 +1,2 @@
+6e76f890dbe7bcc378241c819fd2e1fd6b4a4d054ccc103a4eb17280b19679e7  SpamShieldBR-1.4.1-release.apk
+5c6a0a38000a8f5b35147640d75c29a2c54d5a6d618de7c055180a6a7afd77b0  apk-info-1.4.1-release.json

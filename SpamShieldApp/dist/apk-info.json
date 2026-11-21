@@ -1,7 +1,7 @@
 {
-  "version_code": 20,
-  "version_name": "1.4.0",
   "size_bytes": 4031820,
-  "sha256_checksum": "e370ca422d37b2890e1cb0f5f04af7a471d4c4a8a12f19b1156b9dee7663df6c",
-  "download_path": "/apk"
+  "download_path": "/apk",
+  "version_code": 21,
+  "sha256_checksum": "6e76f890dbe7bcc378241c819fd2e1fd6b4a4d054ccc103a4eb17280b19679e7",
+  "version_name": "1.4.1"
 }
