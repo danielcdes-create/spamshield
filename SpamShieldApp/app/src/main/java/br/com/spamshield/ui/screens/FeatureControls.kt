@@ -30,10 +30,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import br.com.spamshield.data.local.entity.ActiveRuleEntity
 import br.com.spamshield.data.local.entity.CallDecisionEventEntity
-import br.com.spamshield.data.local.entity.CallTelemetryEntity
 import br.com.spamshield.data.local.entity.FeatureEventEntity
-import br.com.spamshield.domain.Campaign
-import br.com.spamshield.domain.Campaigns
 import br.com.spamshield.domain.DecisionTrace
 import br.com.spamshield.domain.ExpectedWindow
 import br.com.spamshield.domain.FeatureJournal
@@ -62,7 +59,7 @@ internal fun ScreeningLatency.elapsedLabel(): String? {
     }.joinToString(" · ").ifEmpty { null }
 }
 
-private fun durationLabel(minutes: Int) = when (minutes) {
+internal fun durationLabel(minutes: Int) = when (minutes) {
     60 -> "1 hora"
     120 -> "2 horas"
     else -> "$minutes min"
@@ -90,51 +87,6 @@ internal fun ExpectedCallSelector(
             for (duration in ExpectedWindow.durations) {
                 Button(onClick = { change(duration, keepExact, false) },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text(durationLabel(duration)) }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-internal fun CampaignDetail(
-    campaign: Campaign, calls: List<CallTelemetryEntity>, journal: List<CallDecisionEventEntity>,
-    features: List<FeatureEventEntity>, dismiss: () -> Unit, change: (String, Int?) -> Unit
-) {
-    val silenced = Campaigns.silences(features).lastOrNull { it.prefix == campaign.prefix && it.activeAt(System.currentTimeMillis()) }
-    var selecting by remember { mutableStateOf(false) }
-    val members = remember(campaign, calls) { calls.filter { it.id in campaign.memberIds }.sortedBy { it.timestamp } }
-    val byCall = remember(journal) { journal.groupBy { it.callId } }
-    val evidence = members.associate { it.id to DecisionTrace.evidence(it, byCall[it.id].orEmpty()) }
-    ModalBottomSheet(onDismissRequest = dismiss) {
-        LazyColumn(Modifier.padding(horizontal = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            item {
-                Text("Campanha ${campaign.prefix}••", fontWeight = FontWeight.Bold)
-                Text("${displayTime(campaign.firstCallAt)} a ${displayTime(campaign.lastCallAt)}")
-                Text("${campaign.memberIds.size} tentativas · ${campaign.distinctNumbers} números distintos")
-                Text("Critério v${campaign.criterionVersion}. Três números distintos da mesma faixa em até cinco minutos.")
-                Text("${evidence.values.count { it.blockRequested }} pedidos de bloqueio · ${evidence.values.count { it.blockObserved }} confirmados pelo Android")
-                if (silenced != null) {
-                    Text("Silenciamento ativo até ${displayTime(silenced.expiresAt)}")
-                    TextButton(onClick = { change(campaign.id, null) }) { Text("Desfazer silenciamento") }
-                } else {
-                    Button(onClick = { selecting = !selecting }) { Text("Silenciar próximas chamadas desta campanha") }
-                    if (selecting) ExpectedWindow.durations.forEach { minutes ->
-                        TextButton(onClick = { change(campaign.id, minutes); selecting = false }) { Text(durationLabel(minutes)) }
-                    }
-                }
-            }
-            items(members, key = { it.id }) { call ->
-                val status = evidence.getValue(call.id)
-                val response = submittedResponse(byCall[call.id].orEmpty())
-                Text("${displayTime(call.timestamp)} · ${maskedNumber(call.normalizedNumber)}")
-                val request = when {
-                    status.blockRequested -> "Bloqueio solicitado"
-                    response?.silenceCall == true -> "Silenciamento solicitado"
-                    response != null -> "Permissão enviada"
-                    else -> "Resposta indisponível"
-                }
-                Text("$request · ${status.label}")
             }
         }
     }

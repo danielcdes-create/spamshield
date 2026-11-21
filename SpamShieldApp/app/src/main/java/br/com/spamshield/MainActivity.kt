@@ -116,7 +116,6 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
     ).any { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
     var hasMissingDataPermissions by remember { mutableStateOf(missingDataPermissions()) }
     var selectedTab by remember { mutableIntStateOf(0) }
-    var selectedCampaignId by remember { mutableStateOf<String?>(null) }
     var isScreeningRoleHeld by remember {
         mutableStateOf(RoleManagerHelper.isCallScreeningRoleHeld(context))
     }
@@ -316,8 +315,6 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
                     settings = settings,
                     tailscaleStatus = tailscaleStatus,
                     onSyncNow = viewModel::syncNowWithMongoDb,
-                    campaigns = campaigns,
-                    onCampaign = { selectedCampaignId = it; selectedTab = 1 },
                     onSelector = viewModel::windowSelector,
                     onWindowChange = viewModel::changeWindow
                 )
@@ -328,8 +325,6 @@ fun SpamShieldMainApp(viewModel: MainViewModel = hiltViewModel()) {
                     onMarkFeedback = viewModel::markCallFeedback,
                     campaigns = campaigns,
                     featureEvents = featureEvents,
-                    selectedCampaignId = selectedCampaignId,
-                    onCampaign = { selectedCampaignId = it },
                     onSilence = viewModel::changeCampaignSilence,
                     onExpectedFeedback = viewModel::markExpectedCall
                 )

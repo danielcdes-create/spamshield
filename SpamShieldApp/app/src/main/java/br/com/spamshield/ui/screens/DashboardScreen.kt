@@ -3,15 +3,18 @@ package br.com.spamshield.ui.screens
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
-import br.com.spamshield.domain.Campaign
 import br.com.spamshield.domain.ExpectedWindow
+import kotlinx.coroutines.delay
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -63,6 +66,9 @@ import br.com.spamshield.ui.TailscaleStatusUi
 import java.util.Calendar
 import java.util.Locale
 
+internal fun isProtectionOff(activeWindow: ExpectedWindow?, shadowModeEnabled: Boolean): Boolean =
+    activeWindow != null || shadowModeEnabled
+
 @Composable
 fun DashboardScreen(
     telemetryList: List<CallTelemetryEntity>,
@@ -70,14 +76,25 @@ fun DashboardScreen(
     settings: SpamShieldSettings,
     tailscaleStatus: TailscaleStatusUi,
     onSyncNow: () -> Unit,
-    campaigns: List<Campaign>,
-    onCampaign: (String) -> Unit,
     onSelector: (String, Boolean, ExpectedWindow?) -> Unit,
     onWindowChange: (String, Int?, Boolean, Boolean) -> Unit
 ) {
     val scrollState = rememberScrollState()
     var selectorId by rememberSaveable { mutableStateOf<String?>(null) }
-    val active = settings.expectedWindow?.takeIf { it.activeAt(System.currentTimeMillis()) }
+    var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(settings.expectedWindow) {
+        nowMillis = System.currentTimeMillis()
+        val expiresAt = settings.expectedWindow?.expiresAt ?: return@LaunchedEffect
+        val remaining = expiresAt - nowMillis
+        if (remaining > 0L) {
+            delay(remaining + 50L)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+    val active = settings.expectedWindow?.takeIf { it.activeAt(nowMillis) }
+    val protectionOff = isProtectionOff(active, settings.shadowModeEnabled)
+    val shieldAccent = if (protectionOff) Color(0xFFEF4444) else Color(0xFF38BDF8)
+    val statusColor = if (protectionOff) Color(0xFFFCA5A5) else Color(0xFF94A3B8)
     val status = when {
         active != null -> "Aguardando ligação · até ${displayTime(active.expiresAt, "HH'h'mm")}"
         settings.shadowModeEnabled -> "Modo Sombra Ativo • Anatel & STIR/SHAKEN"
@@ -132,14 +149,6 @@ fun DashboardScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        campaigns.firstOrNull()?.let { campaign ->
-            Card(onClick = { onCampaign(campaign.id) }, modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(14.dp)) {
-                    Text("Campanhas de chamadas · ${campaigns.size}", fontWeight = FontWeight.Bold)
-                    Text("${campaign.prefix}•• · ${campaign.memberIds.size} tentativas · ${campaign.distinctNumbers} números distintos")
-                }
-            }
-        }
         // 1. Capa Moderna (Hero Card) com Nome do App + Status Tailscale + Stats do Dia
         Box(
             modifier = Modifier
@@ -157,7 +166,11 @@ fun DashboardScreen(
                 .border(
                     width = 1.dp,
                     brush = Brush.linearGradient(
-                        colors = listOf(Color(0xFF38BDF8).copy(alpha = 0.6f), Color(0xFF22C55E).copy(alpha = 0.4f))
+                        colors = if (protectionOff) {
+                            listOf(Color(0xFFEF4444).copy(alpha = 0.70f), Color(0xFFF97316).copy(alpha = 0.45f))
+                        } else {
+                            listOf(Color(0xFF38BDF8).copy(alpha = 0.6f), Color(0xFF22C55E).copy(alpha = 0.4f))
+                        }
                     ),
                     shape = RoundedCornerShape(22.dp)
                 )
@@ -183,13 +196,24 @@ fun DashboardScreen(
                             modifier = Modifier
                                 .size(46.dp)
                                 .clip(RoundedCornerShape(14.dp))
-                                .background(Color(0xFF38BDF8).copy(alpha = 0.16f)),
+                                .background(shieldAccent.copy(alpha = if (protectionOff) 0.20f else 0.16f))
+                                .then(
+                                    if (protectionOff) {
+                                        Modifier.border(
+                                            width = 1.dp,
+                                            color = shieldAccent.copy(alpha = 0.55f),
+                                            shape = RoundedCornerShape(14.dp)
+                                        )
+                                    } else {
+                                        Modifier
+                                    }
+                                ),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Shield,
                                 contentDescription = null,
-                                tint = Color(0xFF38BDF8),
+                                tint = shieldAccent,
                                 modifier = Modifier.size(28.dp)
                             )
                         }
@@ -204,7 +228,8 @@ fun DashboardScreen(
                             Text(
                                 text = status,
                                 fontSize = 11.sp,
-                                color = Color(0xFF94A3B8)
+                                fontWeight = if (protectionOff) FontWeight.SemiBold else FontWeight.Normal,
+                                color = statusColor
                             )
                         }
                     }

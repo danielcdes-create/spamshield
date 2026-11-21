@@ -1,8 +1,8 @@
-# SpamShield BR 1.4.0 · build 20
+# SpamShield BR 1.4.1 · build 21
 
 Ecossistema privado de defesa local, telemetria auditável e inteligência contra chamadas de spam, robocall, chipeiras GSM e spoofing no Brasil.
 
-O escudo oferece uma janela de ligação esperada. A Auditoria reúne campanhas com números rotativos, e o laboratório permite testar uma regra no histórico e em sombra. O export vincula a decisão da chegada à resposta enviada, às observações do Android e às ações posteriores. [Notas da versão 1.4.0](docs/RELEASE-1.4.0.md)
+O escudo oferece uma janela de ligação esperada com destaque visual em vermelho quando a proteção ativa está pausada. A Auditoria apresenta chamadas e campanhas de números rotativos em lista única ordenada pela chamada mais recente, expandindo os detalhes da campanha e suas ligações ao tocar. O laboratório permite testar uma regra no histórico e em sombra. [Notas da versão 1.4.1](docs/RELEASE-1.4.1.md) · [Notas da versão 1.4.0](docs/RELEASE-1.4.0.md)
 
 ### Novidades da versão `v1.3.4` (Build `18`):
 - Corrigido o HTTP 409 provocado por defaults adicionados aos eventos antigos no reenvio da 1.3.3; o backend preserva o diário e aceita somente equivalências legadas conhecidas.

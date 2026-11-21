@@ -60,7 +60,7 @@ Os campos antigos continuam no array de chamadas e nas colunas do CSV. O CSV tam
 
 1. Abra o escudo, dispense a folha e confira o estado. Ative 15 minutos, feche o app, abra de novo e confira o horário. Renove, restaure e confirme a expiração em outra janela.
 2. Em ambiente controlado, receba uma chamada com os sinais elegíveis. Compare a política normal, o que foi enviado ao Android e a observação posterior na Auditoria. Marque se era a ligação esperada e exporte.
-3. Com números de teste da mesma faixa, gere três origens distintas em até cinco minutos. Abra o resumo pelo Dashboard, confira a autoria dos bloqueios e ative o silenciamento. Compare uma chamada futura da faixa e uma vizinha, depois desfaça.
+3. Com números de teste da mesma faixa, gere três origens distintas em até cinco minutos. Abra a campanha diretamente na lista cronológica da Auditoria, confira a autoria dos bloqueios e ative o silenciamento. Compare uma chamada futura da faixa e uma vizinha, depois desfaça.
 4. Abra **Testar alteração**, faça replay e inicie a sombra. Compare as quatro contagens e a linha do tempo. Confira que encerrar ou descartar deixa a configuração ativa intacta. Use **Aplicar alteração** apenas para verificar a atualização explícita da regra.
 
 Os testes locais usam chamadas fictícias, relógio monotônico simulado e MongoDB em loopback. O comportamento do discador, a autoria fornecida por cada fabricante e a latência de chamadas reais dependem da verificação em aparelho.
