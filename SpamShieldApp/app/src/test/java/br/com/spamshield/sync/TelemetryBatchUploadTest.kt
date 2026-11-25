@@ -21,7 +21,7 @@ class TelemetryBatchUploadTest {
         device_id = "test",
         call_details = CallDetailsRemoteDto("", "", "", "", null, "UNKNOWN", "NOT_VERIFIED"),
         decision_vector = DecisionVectorRemoteDto(
-            0, 70, "ALLOWED_LOW_SCORE", "UNKNOWN", 0.0, triggered_rules = emptyList()
+            0, 70, "ALLOWED_LOW_SCORE", "UNKNOWN_UNVERIFIED", 0.0, triggered_rules = emptyList()
         ),
         audit = AuditRemoteDto("UNRATED"),
         decision_events = listOf(DecisionEventRemoteDto("event-$id", 101, "HISTORY_ASSESSMENT", "TEST", "TEST", JsonObject(emptyMap())))
@@ -62,5 +62,29 @@ class TelemetryBatchUploadTest {
         )
         assertEquals(listOf("before", "after"), acknowledged)
         assertEquals(listOf("conflict", "oversize"), deferred)
+    }
+
+    @Test fun emptyBatchSkipsNetworkAnd5xxServerFailurePropagatesForRetry() = runTest {
+        var calls = 0
+        uploadTelemetryBatch(
+            emptyList(),
+            send = { calls++; BatchTelemetryResponseDto() },
+            acknowledge = { _, _ -> },
+            defer = {}
+        )
+        assertEquals(0, calls)
+
+        var threw503 = false
+        try {
+            uploadTelemetryBatch(
+                listOf(call("transient")),
+                send = { throw HttpException(Response.error<Unit>(503, "".toResponseBody())) },
+                acknowledge = { _, _ -> },
+                defer = {}
+            )
+        } catch (err: HttpException) {
+            threw503 = err.code() == 503
+        }
+        assertEquals(true, threw503)
     }
 }

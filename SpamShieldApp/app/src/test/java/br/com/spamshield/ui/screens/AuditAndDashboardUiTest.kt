@@ -129,4 +129,49 @@ class AuditAndDashboardUiTest {
         val feed = buildAuditFeedItems(listOf(standalone), listOf(ghostCampaign))
         assertEquals(listOf("call-solo-1"), feed.map { it.itemKey })
     }
+
+    @Test
+    fun outcomeBadgeMapsSpamShieldConfirmedAndroidBlockToRedBadgeAndDistinguishesStates() {
+        val confirmed = resolveOutcomeBadgeSpec("Bloqueio do SpamShield registrado pelo Android")
+        assertEquals("BLOQUEIO REGISTRADO", confirmed.label)
+        assertEquals(0xFFDC2626, confirmed.colorArgb)
+
+        assertEquals("REJEITADA", resolveOutcomeBadgeSpec("Rejeitada no discador", wasLearnedAfterRing = true).label)
+        assertEquals("SOLICITADO", resolveOutcomeBadgeSpec("Bloqueio solicitado (resultado desconhecido)").label)
+        assertEquals("SILENCIADA", resolveOutcomeBadgeSpec("Silenciamento solicitado (resultado desconhecido)").label)
+        assertEquals("LEGADO", resolveOutcomeBadgeSpec("Legado: decisão original não registrada").label)
+        assertEquals("ATENDIDA", resolveOutcomeBadgeSpec("Atendida").label)
+        assertEquals("EFETUADA", resolveOutcomeBadgeSpec("Chamada efetuada").label)
+        assertEquals("AUDITADA", resolveOutcomeBadgeSpec("Passagem autorizada pelo app").label)
+    }
+
+    @Test
+    fun carrierClassifierAndFeatureFormattingHelpersCoverAllOperationalCases() {
+        assertEquals("Fixo", classifyCarrierLabel(call("f1", 0, prefix = "31328732").copy(carrierGuess = "Fixo", lineType = "FIXED_OR_VOIP")))
+        assertEquals("VoIP", classifyCarrierLabel(call("v1", 0, prefix = "31410112").copy(carrierGuess = "Claro Fixo", lineType = "FIXED_OR_VOIP")))
+        assertEquals("Fixo", classifyCarrierLabel(call("f2", 0, prefix = "31376812").copy(carrierGuess = null, lineType = "FIXED_OR_VOIP")))
+        assertEquals("VoIP", classifyCarrierLabel(call("u1", 0, prefix = "").copy(carrierGuess = null, lineType = "TOLL_FREE_OR_SPECIAL")))
+        assertEquals("Claro", classifyCarrierLabel(call("c1", 0).copy(carrierGuess = "Claro S.A.")))
+        assertEquals("TIM", classifyCarrierLabel(call("t1", 0).copy(carrierGuess = "TIM")))
+        assertEquals("Vivo", classifyCarrierLabel(call("vv1", 0).copy(carrierGuess = "Vivo")))
+        assertEquals("Outros", classifyCarrierLabel(call("o1", 0).copy(carrierGuess = "MVNO Regional")))
+
+        assertEquals("5531••••", maskedNumber("+55 31 98765-4321"))
+        assertEquals("Número oculto", maskedNumber("10315"))
+        assertEquals("15 min", durationLabel(15))
+        assertEquals("1 hora", durationLabel(60))
+        assertEquals("2 horas", durationLabel(120))
+        assertEquals("Contexto original indisponível", labReason("ARRIVAL_CONTEXT_UNAVAILABLE"))
+        assertEquals("Permissão protegida", labReason("PROTECTED_ALLOW"))
+        assertEquals("CUSTOM_RULE", labReason("CUSTOM_RULE"))
+
+        val latency = br.com.spamshield.domain.ScreeningLatency(
+            evaluationWaitMs = 0.4,
+            localContextMs = 1.2,
+            rulesMs = 0.8,
+            submissionMs = 0.5
+        )
+        assertTrue(latency.elapsedLabel()!!.contains("contexto"))
+        assertEquals(null, br.com.spamshield.domain.ScreeningLatency().elapsedLabel())
+    }
 }

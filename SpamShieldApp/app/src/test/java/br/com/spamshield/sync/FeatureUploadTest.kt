@@ -34,4 +34,30 @@ class FeatureUploadTest {
         assertEquals(acknowledged, persisted)
         assertEquals(1, uploadFeatureBatch(listOf(events[1]), ::send) { error("unexpected ACK") })
     }
+
+    @Test
+    fun legacyServer404Or405LeavesAllFeatureEventsDeferredWhile500Propagates() = runTest {
+        val batch = listOf("f1", "f2").map {
+            FeatureEventRemoteDto(it, null, "id", "WAIT_SELECTOR_OPENED", "DASHBOARD_SHIELD", 1, 1, "fixture", 1, JsonObject(emptyMap()))
+        }
+        for (status in listOf(404, 405)) {
+            val deferred = uploadFeatureBatch(
+                batch,
+                send = { throw HttpException(Response.error<FeatureBatchAck>(status, "".toResponseBody())) },
+                acknowledge = { error("unexpected ACK on $status") }
+            )
+            assertEquals(2, deferred)
+        }
+        var propagated500 = false
+        try {
+            uploadFeatureBatch(
+                batch,
+                send = { throw HttpException(Response.error<FeatureBatchAck>(500, "".toResponseBody())) },
+                acknowledge = {}
+            )
+        } catch (err: HttpException) {
+            propagated500 = err.code() == 500
+        }
+        assertEquals(true, propagated500)
+    }
 }

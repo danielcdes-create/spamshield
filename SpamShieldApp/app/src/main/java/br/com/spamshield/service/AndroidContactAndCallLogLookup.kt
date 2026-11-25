@@ -7,6 +7,7 @@ import android.net.Uri
 import android.provider.CallLog
 import android.provider.ContactsContract
 import androidx.core.content.ContextCompat
+import br.com.spamshield.data.local.SettingsDataStore
 import br.com.spamshield.domain.ContactAndCallLogLookup
 import br.com.spamshield.domain.PhoneNormalizer
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -17,7 +18,8 @@ import javax.inject.Singleton
 
 @Singleton
 class AndroidContactAndCallLogLookup @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val settingsDataStore: SettingsDataStore
 ) : ContactAndCallLogLookup {
 
     override suspend fun isNumberInContacts(rawOrNormalizedNumber: String): Boolean =
@@ -60,6 +62,7 @@ class AndroidContactAndCallLogLookup @Inject constructor(
         if (!hasPerm) return@withContext false
 
         try {
+            val userDdd = settingsDataStore.getSnapshot().userDdd
             val selection = "${CallLog.Calls.TYPE} = ? AND ${CallLog.Calls.DATE} >= ?"
             val selectionArgs = arrayOf(
                 CallLog.Calls.OUTGOING_TYPE.toString(),
@@ -76,7 +79,7 @@ class AndroidContactAndCallLogLookup @Inject constructor(
                 while (cursor.moveToNext()) {
                     val dialedRaw = if (numIdx >= 0) cursor.getString(numIdx) ?: "" else ""
                     if (dialedRaw.isNotBlank()) {
-                        val normDialed = PhoneNormalizer.normalize(dialedRaw)
+                        val normDialed = PhoneNormalizer.normalize(dialedRaw, userDdd)
                         if (normDialed.normalizedNumber == normalizedNumber ||
                             (prefix6.isNotEmpty() && normDialed.prefix6 == prefix6)
                         ) {

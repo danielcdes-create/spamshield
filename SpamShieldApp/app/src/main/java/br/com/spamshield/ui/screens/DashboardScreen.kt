@@ -372,14 +372,14 @@ fun DashboardScreen(
     }
 }
 
-private fun classifyCarrierLabel(item: CallTelemetryEntity): String {
+internal fun classifyCarrierLabel(item: CallTelemetryEntity): String {
     val c = item.carrierGuess?.uppercase()?.trim() ?: ""
     return when {
         c == "FIXO" -> "Fixo"
         c == "VOIP" -> "VoIP"
         item.lineType == "TOLL_FREE_OR_SPECIAL" || c.contains("PABX") -> "VoIP"
         item.lineType == "FIXED_OR_VOIP" || c.contains("VOIP") || c.contains("FIXO") -> {
-            if (br.com.spamshield.domain.PhoneNormalizer.isVoipPrefixOrSubscriber(item.prefix7)) {
+            if (br.com.spamshield.domain.PhoneNormalizer.isVoipPrefixOrSubscriber("", prefix7 = item.prefix7, rawCarrier = item.carrierGuess)) {
                 "VoIP"
             } else {
                 "Fixo"

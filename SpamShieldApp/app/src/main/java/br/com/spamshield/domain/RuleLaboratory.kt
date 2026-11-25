@@ -145,8 +145,11 @@ object RuleLaboratory {
                 disabledRuleIds = config.filterNot { it.enabled }.mapTo(hashSetOf()) { it.ruleId },
                 extraRegexRules = config.mapNotNull {
                     val pattern = it.pattern
-                    if (it.enabled && it.ruleType == "REGEX_MATCH" && !pattern.isNullOrBlank()) {
-                        CompiledRegexRule(it.ruleId, it.weight, pattern, ScreeningPatternCache.pattern(pattern))
+                    val regex = if (it.enabled && it.ruleType == "REGEX_MATCH" && !pattern.isNullOrBlank()) {
+                        ScreeningPatternCache.patternOrNull(pattern)
+                    } else null
+                    if (regex != null && pattern != null) {
+                        CompiledRegexRule(it.ruleId, it.weight, pattern, regex)
                     } else null
                 }
             )

@@ -46,8 +46,14 @@ pub mod flexible_datetime {
             where
                 E: Error,
             {
-                // Detect seconds vs milliseconds
-                let millis = if v < 100_000_000_000 { v * 1000 } else { v };
+                // Values within (-100_000_000_000..100_000_000_000) are treated as epoch seconds;
+                // larger magnitudes are already epoch milliseconds.
+                let millis = if (-100_000_000_000..100_000_000_000).contains(&v) {
+                    v.checked_mul(1000)
+                        .ok_or_else(|| E::custom(format!("Overflow in epoch timestamp: {}", v)))?
+                } else {
+                    v
+                };
                 Utc.timestamp_millis_opt(millis)
                     .single()
                     .ok_or_else(|| E::custom(format!("Invalid epoch timestamp: {}", v)))
@@ -57,7 +63,9 @@ pub mod flexible_datetime {
             where
                 E: Error,
             {
-                self.visit_i64(v as i64)
+                let signed = i64::try_from(v)
+                    .map_err(|_| E::custom(format!("Epoch timestamp out of range: {}", v)))?;
+                self.visit_i64(signed)
             }
 
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -78,7 +86,9 @@ pub mod flexible_datetime {
                             if let Some(num_long) = obj.get("$numberLong").and_then(|v| v.as_str())
                             {
                                 if let Ok(ms) = num_long.parse::<i64>() {
-                                    return self.visit_i64(ms);
+                                    if let Some(dt) = Utc.timestamp_millis_opt(ms).single() {
+                                        return Ok(dt);
+                                    }
                                 }
                             }
                         }
@@ -479,7 +489,15 @@ pub struct AnalyticsSummaryResponse {
 
 #[cfg(test)]
 mod contract_enums {
-    use super::{CallCategory, CallOutcome, LineType};
+    use super::{flexible_datetime, CallCategory, CallOutcome, LineType};
+    use chrono::{DateTime, TimeZone, Utc};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct TimestampEnvelope {
+        #[serde(with = "flexible_datetime")]
+        at: DateTime<Utc>,
+    }
 
     #[test]
     fn accepts_note_line_outcome_and_category_values() {
@@ -488,12 +506,64 @@ mod contract_enums {
             serde_json::from_str("\"FLAGGED_POST_CALL_QUARANTINED\"").unwrap();
         let user_blocked: CallOutcome =
             serde_json::from_str("\"USER_BLOCKED_RETROACTIVE\"").unwrap();
+        let outgoing: CallOutcome = serde_json::from_str("\"OUTGOING_CALL\"").unwrap();
         let verified: CallCategory = serde_json::from_str("\"VERIFIED_UNKNOWN\"").unwrap();
         let reported: CallCategory = serde_json::from_str("\"USER_REPORTED_SPAM\"").unwrap();
         assert_eq!(line.as_str(), "MALFORMED_OR_SPOOFED");
         assert_eq!(flagged.as_str(), "FLAGGED_POST_CALL_QUARANTINED");
         assert_eq!(user_blocked.as_str(), "USER_BLOCKED_RETROACTIVE");
+        assert_eq!(outgoing.as_str(), "OUTGOING_CALL");
         assert_eq!(verified.as_str(), "VERIFIED_UNKNOWN");
         assert_eq!(reported.as_str(), "USER_REPORTED_SPAM");
+    }
+
+    #[test]
+    fn flexible_datetime_handles_rfc3339_seconds_millis_bson_and_rejects_overflow_without_panic() {
+        // RFC3339 string
+        let rfc: TimestampEnvelope =
+            serde_json::from_str(r#"{"at":"2026-11-25T10:00:00Z"}"#).unwrap();
+        assert_eq!(
+            rfc.at,
+            Utc.with_ymd_and_hms(2026, 11, 25, 10, 0, 0).unwrap()
+        );
+
+        // Numeric string in milliseconds
+        let num_str: TimestampEnvelope = serde_json::from_str(r#"{"at":"1700000000123"}"#).unwrap();
+        assert_eq!(num_str.at.timestamp_millis(), 1_700_000_000_123);
+
+        // Positive & negative epoch seconds vs milliseconds
+        let pos_sec: TimestampEnvelope = serde_json::from_str(r#"{"at":1700000000}"#).unwrap();
+        assert_eq!(pos_sec.at.timestamp_millis(), 1_700_000_000_000);
+
+        let neg_sec: TimestampEnvelope = serde_json::from_str(r#"{"at":-10}"#).unwrap();
+        assert_eq!(neg_sec.at.timestamp_millis(), -10_000);
+
+        let neg_ms: TimestampEnvelope = serde_json::from_str(r#"{"at":-200000000000}"#).unwrap();
+        assert_eq!(neg_ms.at.timestamp_millis(), -200_000_000_000);
+
+        // Extended JSON BSON {"$date": ...} and {"$date": {"$numberLong": ...}}
+        let bson_str: TimestampEnvelope =
+            serde_json::from_str(r#"{"at":{"$date":"2026-11-25T10:00:00Z"}}"#).unwrap();
+        assert_eq!(bson_str.at, rfc.at);
+
+        let bson_long: TimestampEnvelope =
+            serde_json::from_str(r#"{"at":{"$date":{"$numberLong":"1700000000456"}}}"#).unwrap();
+        assert_eq!(bson_long.at.timestamp_millis(), 1_700_000_000_456);
+
+        // BUG-06 regression: extreme integers and malformed strings must return Err cleanly without panicking
+        assert!(
+            serde_json::from_str::<TimestampEnvelope>(&format!(r#"{{"at":{}}}"#, i64::MIN))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<TimestampEnvelope>(&format!(r#"{{"at":{}}}"#, i64::MAX))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<TimestampEnvelope>(&format!(r#"{{"at":{}}}"#, u64::MAX))
+                .is_err()
+        );
+        assert!(serde_json::from_str::<TimestampEnvelope>(r#"{"at":"not-a-timestamp"}"#).is_err());
+        assert!(serde_json::from_str::<TimestampEnvelope>(r#"{"at":{"other":1}}"#).is_err());
     }
 }

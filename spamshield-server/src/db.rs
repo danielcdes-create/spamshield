@@ -128,7 +128,8 @@ impl AppDatabase {
                             "prefix_7": { "bsonType": "string" },
                             "carrier_guess": { "bsonType": ["string", "null"] },
                             "line_type": { "enum": ["MOBILE", "FIXED_OR_VOIP", "TOLL_FREE_OR_SPECIAL", "MALFORMED_OR_SPOOFED", "UNKNOWN"] },
-                            "stir_shaken_status": { "enum": ["PASSED", "FAILED", "NOT_VERIFIED"] }
+                            "stir_shaken_status": { "enum": ["PASSED", "FAILED", "NOT_VERIFIED"] },
+                            "call_direction": { "bsonType": ["string", "null"] }
                         }
                     },
                     "decision_vector": {

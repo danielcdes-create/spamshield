@@ -312,6 +312,72 @@ ddd,prefix,carrier,line_type,is_corporate_pabx
         assert_eq!(next_global_rule_weight(80, 6, 100, false), None);
         assert_eq!(next_global_rule_weight(80, 5, 100, true), None);
         assert_eq!(next_global_rule_weight(80, 6, 100, true), Some(75));
+        assert_eq!(next_global_rule_weight(18, 10, 50, true), Some(15));
+        assert_eq!(next_global_rule_weight(15, 10, 50, true), None);
+        assert_eq!(next_global_rule_weight(80, 5, 0, true), None);
+    }
+
+    #[test]
+    fn test_db_bson_parsers_and_builtin_anatel_plan_coverage() {
+        use crate::db::{
+            doc_get_datetime, doc_get_i32, parse_active_rule, parse_anatel_doc,
+            parse_prefix_quarantine,
+        };
+        use crate::services::anatel_sync::BUILTIN_ANATEL_PLAN_CSV;
+        use bson::doc;
+
+        let builtin = parse_anatel_csv_parallel(BUILTIN_ANATEL_PLAN_CSV);
+        assert_eq!(builtin.len(), 35);
+        assert!(builtin
+            .iter()
+            .any(|r| r.prefix_7 == "3141011" && r.carrier == "VoIP" && r.is_corporate_pabx_range));
+        assert!(builtin.iter().any(|r| r.prefix_7 == "1191086"
+            && r.carrier == "TIM"
+            && r.line_type == LineType::MOBILE));
+
+        let edge_csv = "\
+ddd,prefix,carrier,line_type,is_corporate_pabx
+31,08007,SERVICO 0800,0800 SPECIAL,false
+21,99999,OPERADORA REGIONAL,SATELITE,false
+bad,12345,INVALIDA,MOBILE,false
+";
+        let edge_parsed = parse_anatel_csv_parallel(edge_csv);
+        assert_eq!(edge_parsed.len(), 2);
+        assert_eq!(edge_parsed[0].line_type, LineType::TOLL_FREE_OR_SPECIAL);
+        assert_eq!(edge_parsed[0].carrier, "VoIP");
+        assert_eq!(edge_parsed[1].line_type, LineType::UNKNOWN);
+        assert_eq!(edge_parsed[1].carrier, "OPERADORA REGIONAL");
+
+        let numeric_doc = doc! { "i32": 10_i32, "i64": 25_i64, "f64": 42.9_f64, "ts_str": "2026-11-25T00:00:00Z", "ts_ms": 1_700_000_000_000_i64 };
+        assert_eq!(doc_get_i32(&numeric_doc, "i32", 0), 10);
+        assert_eq!(doc_get_i32(&numeric_doc, "i64", 0), 25);
+        assert_eq!(doc_get_i32(&numeric_doc, "f64", 0), 42);
+        assert_eq!(doc_get_i32(&numeric_doc, "missing", 7), 7);
+        assert_eq!(
+            doc_get_datetime(&numeric_doc, "ts_ms").timestamp_millis(),
+            1_700_000_000_000
+        );
+        assert_eq!(
+            doc_get_datetime(&numeric_doc, "ts_str").timestamp(),
+            1_795_564_800
+        );
+
+        let rule_doc = doc! { "rule_id": "R1", "name": "Regra 1", "weight": 60_i64, "priority": 5_i32, "enabled": false, "updated_at": 1_700_000_000_000_i64 };
+        let parsed_rule = parse_active_rule(&rule_doc).unwrap();
+        assert_eq!(parsed_rule.rule_id, "R1");
+        assert_eq!(parsed_rule.rule_type, "HEURISTIC_WEIGHT");
+        assert!(!parsed_rule.enabled);
+        assert!(parse_active_rule(&doc! { "name": "Sem ID" }).is_none());
+
+        let q_doc = doc! { "prefix_7": "31987654", "ddd": "31", "distinct_numbers_seen": ["+5531987654321"], "hit_count": 3_i32, "penalty_weight": 70_i32 };
+        let parsed_q = parse_prefix_quarantine(&q_doc).unwrap();
+        assert_eq!(parsed_q.prefix_7, "31987654");
+        assert_eq!(parsed_q.distinct_numbers_seen, vec!["+5531987654321"]);
+
+        let anatel_doc = doc! { "prefix_7": "3141011", "ddd": "31", "carrier": "VoIP", "line_type": "MALFORMED_OR_SPOOFED", "is_corporate_pabx_range": true };
+        let parsed_anatel = parse_anatel_doc(&anatel_doc).unwrap();
+        assert_eq!(parsed_anatel.line_type, LineType::MALFORMED_OR_SPOOFED);
+        assert!(parsed_anatel.is_corporate_pabx_range);
     }
 
     #[test]

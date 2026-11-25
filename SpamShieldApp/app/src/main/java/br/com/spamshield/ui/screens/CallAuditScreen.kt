@@ -678,17 +678,31 @@ private fun CampaignBadge(attemptCount: Int, isSilenced: Boolean) {
     }
 }
 
+internal data class OutcomeBadgeSpec(
+    val label: String,
+    val colorArgb: Long
+)
+
+internal fun resolveOutcomeBadgeSpec(
+    outcome: String,
+    wasLearnedAfterRing: Boolean = false
+): OutcomeBadgeSpec = when {
+    wasLearnedAfterRing -> OutcomeBadgeSpec("REJEITADA", 0xFFEA580C)
+    outcome == "Bloqueio do SpamShield registrado pelo Android" ||
+        outcome == "Bloqueio registrado pelo Android" -> OutcomeBadgeSpec("BLOQUEIO REGISTRADO", 0xFFDC2626)
+    outcome.startsWith("Bloqueio solicitado") -> OutcomeBadgeSpec("SOLICITADO", 0xFFD97706)
+    outcome.startsWith("Silenciamento solicitado") -> OutcomeBadgeSpec("SILENCIADA", 0xFFF59E0B)
+    outcome.startsWith("Legado") -> OutcomeBadgeSpec("LEGADO", 0xFF64748B)
+    outcome == "Atendida" -> OutcomeBadgeSpec("ATENDIDA", 0xFF16A34A)
+    outcome == "Chamada efetuada" -> OutcomeBadgeSpec("EFETUADA", 0xFF64748B)
+    else -> OutcomeBadgeSpec("AUDITADA", 0xFF64748B)
+}
+
 @Composable
 private fun OutcomeBadge(outcome: String, score: Int, wasLearnedAfterRing: Boolean = false) {
-    val (label, bgColor) = when {
-        wasLearnedAfterRing -> "REJEITADA" to Color(0xFFEA580C)
-        outcome == "Bloqueio registrado pelo Android" -> "BLOQUEIO REGISTRADO" to Color(0xFFDC2626)
-        outcome.startsWith("Bloqueio solicitado") -> "SOLICITADO" to Color(0xFFD97706)
-        outcome.startsWith("Legado") -> "LEGADO" to Color(0xFF64748B)
-        outcome == "Atendida" -> "ATENDIDA" to Color(0xFF16A34A)
-        outcome == "Chamada efetuada" -> "EFETUADA" to Color(0xFF64748B)
-        else -> "AUDITADA" to Color(0xFF64748B)
-    }
+    val spec = resolveOutcomeBadgeSpec(outcome, wasLearnedAfterRing)
+    val label = spec.label
+    val bgColor = Color(spec.colorArgb)
     Surface(
         color = bgColor.copy(alpha = 0.16f),
         shape = RoundedCornerShape(8.dp)

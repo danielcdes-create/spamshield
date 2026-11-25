@@ -6,6 +6,7 @@
     <base-config cleartextTrafficPermitted="false" />
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">100.83.253.15</domain>
+        <domain includeSubdomains="false">100.101.23.111</domain>
         <domain includeSubdomains="true">ts.net</domain>
         <domain includeSubdomains="false">127.0.0.1</domain>
         <domain includeSubdomains="false">localhost</domain>

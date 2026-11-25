@@ -286,6 +286,96 @@ fn feedback_journal_event(
     "event_type": "USER_FEEDBACK", "source": "FEEDBACK_API", "app_version": "server", "details": details }
 }
 
+fn apply_feedback_to_decision_vector(
+    existing_vector: &Document,
+    feedback: &UserFeedback,
+) -> Document {
+    let mut vector = existing_vector.clone();
+    let mut rules = vector
+        .get_array("triggered_rules")
+        .cloned()
+        .unwrap_or_default();
+    match feedback {
+        UserFeedback::FALSE_POSITIVE => {
+            rules.retain(|r| {
+                r.as_document().and_then(|d| d.get_str("rule_id").ok())
+                    != Some("USER_CONFIRMED_SPAM_OVERRIDE")
+            });
+            if !rules.iter().any(|r| {
+                r.as_document().and_then(|d| d.get_str("rule_id").ok())
+                    == Some("USER_FALSE_POSITIVE_OVERRIDE")
+            }) {
+                rules.push(Bson::Document(doc! { "rule_id": "USER_FALSE_POSITIVE_OVERRIDE", "weight": -1000_i32, "meta": "Manual feedback" }));
+            }
+            vector.insert("outcome", "ALLOWED_CONTACT");
+            vector.insert("category", "LEGITIMATE");
+        }
+        UserFeedback::CONFIRMED_SPAM => {
+            rules.retain(|r| {
+                r.as_document().and_then(|d| d.get_str("rule_id").ok())
+                    != Some("USER_FALSE_POSITIVE_OVERRIDE")
+            });
+            if !rules.iter().any(|r| {
+                r.as_document().and_then(|d| d.get_str("rule_id").ok())
+                    == Some("USER_CONFIRMED_SPAM_OVERRIDE")
+            }) {
+                rules.push(Bson::Document(doc! { "rule_id": "USER_CONFIRMED_SPAM_OVERRIDE", "weight": 100_i32, "meta": "Manual feedback" }));
+            }
+            if vector
+                .get_str("outcome")
+                .ok()
+                .is_some_and(|outcome| outcome.starts_with("ALLOWED"))
+            {
+                vector.insert("outcome", "USER_BLOCKED_RETROACTIVE");
+            }
+            vector.insert("category", "USER_REPORTED_SPAM");
+        }
+        UserFeedback::UNRATED => {
+            rules.retain(|r| {
+                !matches!(
+                    r.as_document().and_then(|d| d.get_str("rule_id").ok()),
+                    Some("USER_CONFIRMED_SPAM_OVERRIDE" | "USER_FALSE_POSITIVE_OVERRIDE")
+                )
+            });
+            let threshold = crate::db::doc_get_i32(&vector, "threshold_applied", 70);
+            let restored_score = rules
+                .iter()
+                .filter_map(|r| r.as_document())
+                .map(|r| crate::db::doc_get_i32(r, "weight", 0))
+                .sum::<i32>()
+                .max(0);
+            if matches!(
+                vector.get_str("outcome").ok(),
+                Some("USER_BLOCKED_RETROACTIVE" | "ALLOWED_CONTACT")
+            ) {
+                vector.insert(
+                    "outcome",
+                    if restored_score >= threshold {
+                        "BLOCKED"
+                    } else {
+                        "ALLOWED_LOW_SCORE"
+                    },
+                );
+            }
+            if matches!(
+                vector.get_str("category").ok(),
+                Some("USER_REPORTED_SPAM" | "LEGITIMATE")
+            ) {
+                vector.insert("category", "UNKNOWN_UNVERIFIED");
+            }
+        }
+    }
+    let score = rules
+        .iter()
+        .filter_map(|r| r.as_document())
+        .map(|r| crate::db::doc_get_i32(r, "weight", 0))
+        .sum::<i32>()
+        .max(0);
+    vector.insert("triggered_rules", rules);
+    vector.insert("final_score", score);
+    vector
+}
+
 /// Feedback side effects are idempotent and precede the journal acknowledgement.
 pub async fn patch_telemetry_feedback(
     State(state): State<AppState>,
@@ -344,59 +434,11 @@ pub async fn patch_telemetry_feedback(
             }
             UserFeedback::UNRATED => {}
         }
-        let mut vector = existing
+        let existing_vector = existing
             .get_document("decision_vector")
             .cloned()
             .unwrap_or_default();
-        let mut rules = vector
-            .get_array("triggered_rules")
-            .cloned()
-            .unwrap_or_default();
-        match payload.user_feedback {
-            UserFeedback::FALSE_POSITIVE => {
-                rules.retain(|r| {
-                    r.as_document().and_then(|d| d.get_str("rule_id").ok())
-                        != Some("USER_CONFIRMED_SPAM_OVERRIDE")
-                });
-                if !rules.iter().any(|r| {
-                    r.as_document().and_then(|d| d.get_str("rule_id").ok())
-                        == Some("USER_FALSE_POSITIVE_OVERRIDE")
-                }) {
-                    rules.push(Bson::Document(doc! { "rule_id": "USER_FALSE_POSITIVE_OVERRIDE", "weight": -1000_i32, "meta": "Manual feedback" }));
-                }
-                vector.insert("outcome", "ALLOWED_CONTACT");
-                vector.insert("category", "LEGITIMATE");
-            }
-            UserFeedback::CONFIRMED_SPAM => {
-                rules.retain(|r| {
-                    r.as_document().and_then(|d| d.get_str("rule_id").ok())
-                        != Some("USER_FALSE_POSITIVE_OVERRIDE")
-                });
-                if !rules.iter().any(|r| {
-                    r.as_document().and_then(|d| d.get_str("rule_id").ok())
-                        == Some("USER_CONFIRMED_SPAM_OVERRIDE")
-                }) {
-                    rules.push(Bson::Document(doc! { "rule_id": "USER_CONFIRMED_SPAM_OVERRIDE", "weight": 100_i32, "meta": "Manual feedback" }));
-                }
-                if vector
-                    .get_str("outcome")
-                    .ok()
-                    .is_some_and(|outcome| outcome.starts_with("ALLOWED"))
-                {
-                    vector.insert("outcome", "USER_BLOCKED_RETROACTIVE");
-                }
-                vector.insert("category", "USER_REPORTED_SPAM");
-            }
-            UserFeedback::UNRATED => {}
-        }
-        let score = rules
-            .iter()
-            .filter_map(|r| r.as_document())
-            .map(|r| crate::db::doc_get_i32(r, "weight", 0))
-            .sum::<i32>()
-            .max(0);
-        vector.insert("triggered_rules", rules);
-        vector.insert("final_score", score);
+        let vector = apply_feedback_to_decision_vector(&existing_vector, &payload.user_feedback);
         let filter = doc! { "_id": &id, "decision_events.event_id": { "$ne": &operation_id }, "$or": [
             { "audit.feedback_recorded_at": { "$lte": recorded_at } }, { "audit.feedback_recorded_at": { "$exists": false } }
         ] };
@@ -694,6 +736,43 @@ mod journal_regression_tests {
             .get_document("details")
             .unwrap()
             .contains_key("legacyCallTimeLowerBound"));
+    }
+
+    #[test]
+    fn apply_feedback_transitions_confirmed_spam_false_positive_and_unrated_cleanly() {
+        let base = doc! {
+            "final_score": 45_i32,
+            "threshold_applied": 70_i32,
+            "outcome": "ALLOWED_LOW_SCORE",
+            "category": "UNKNOWN_UNVERIFIED",
+            "triggered_rules": [
+                { "rule_id": "NOT_IN_CONTACTS", "weight": 25_i32, "meta": Bson::Null },
+                { "rule_id": "STIR_SHAKEN_UNVERIFIED", "weight": 20_i32, "meta": Bson::Null }
+            ]
+        };
+
+        let spam = apply_feedback_to_decision_vector(&base, &UserFeedback::CONFIRMED_SPAM);
+        assert_eq!(spam.get_str("outcome").unwrap(), "USER_BLOCKED_RETROACTIVE");
+        assert_eq!(spam.get_str("category").unwrap(), "USER_REPORTED_SPAM");
+        assert_eq!(spam.get_i32("final_score").unwrap(), 145);
+
+        let fp = apply_feedback_to_decision_vector(&spam, &UserFeedback::FALSE_POSITIVE);
+        assert_eq!(fp.get_str("outcome").unwrap(), "ALLOWED_CONTACT");
+        assert_eq!(fp.get_str("category").unwrap(), "LEGITIMATE");
+        assert_eq!(fp.get_i32("final_score").unwrap(), 0);
+        assert!(!fp.get_array("triggered_rules").unwrap().iter().any(|r| r
+            .as_document()
+            .unwrap()
+            .get_str("rule_id")
+            .ok()
+            == Some("USER_CONFIRMED_SPAM_OVERRIDE")));
+
+        // BUG-07 regression: reverting to UNRATED strips manual override rules and restores score/outcome/category
+        let unrated = apply_feedback_to_decision_vector(&fp, &UserFeedback::UNRATED);
+        assert_eq!(unrated.get_str("outcome").unwrap(), "ALLOWED_LOW_SCORE");
+        assert_eq!(unrated.get_str("category").unwrap(), "UNKNOWN_UNVERIFIED");
+        assert_eq!(unrated.get_i32("final_score").unwrap(), 45);
+        assert_eq!(unrated.get_array("triggered_rules").unwrap().len(), 2);
     }
 
     /// Intentionally cannot read environment configuration or connect to a production database.

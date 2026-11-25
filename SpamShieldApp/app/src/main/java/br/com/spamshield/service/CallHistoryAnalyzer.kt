@@ -132,7 +132,7 @@ class CallHistoryAnalyzer @Inject constructor(
             val regexRules = enabledRules.values.filter {
                 it.ruleType == "REGEX_MATCH" && !it.pattern.isNullOrBlank()
             }.mapNotNull { rule ->
-                runCatching { Regex(rule.pattern!!) to rule }.getOrNull()
+                br.com.spamshield.domain.ScreeningPatternCache.patternOrNull(rule.pattern!!)?.let { it to rule }
             }
             val now = System.currentTimeMillis()
 
@@ -476,8 +476,9 @@ class CallHistoryAnalyzer @Inject constructor(
                     )
                 }
 
+                val userDdd = settingsDataStore.getSnapshot().userDdd
                 for (call in collected.asReversed()) {
-                    val norm = PhoneNormalizer.normalize(call.rawNumber)
+                    val norm = PhoneNormalizer.normalize(call.rawNumber, userDdd)
                     if (norm.normalizedNumber.isEmpty()) continue
                     if (call.callType == CallLog.Calls.OUTGOING_TYPE) {
                         val callAt = call.timestamp.takeIf { it > 0L } ?: now
@@ -530,7 +531,7 @@ internal suspend fun reprocessStoredTelemetry(
         val regexRules = enabledRules.values.filter {
             it.ruleType == "REGEX_MATCH" && !it.pattern.isNullOrBlank()
         }.mapNotNull { rule ->
-            runCatching { Regex(rule.pattern!!) to rule }.getOrNull()
+            br.com.spamshield.domain.ScreeningPatternCache.patternOrNull(rule.pattern!!)?.let { it to rule }
         }
 
         var updatedCount = deduplicateStoredTelemetryRows(dao, settings.userDdd)

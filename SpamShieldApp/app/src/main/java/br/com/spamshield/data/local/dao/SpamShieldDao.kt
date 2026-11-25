@@ -199,28 +199,6 @@ interface SpamShieldDao {
 
     @Query(
         """
-        UPDATE call_telemetry
-        SET userFeedback = :feedback,
-            outcome = CASE
-                WHEN :feedback = 'FALSE_POSITIVE' THEN 'ALLOWED_CONTACT'
-                ELSE outcome
-            END,
-            category = CASE
-                WHEN :feedback = 'FALSE_POSITIVE' THEN 'LEGITIMATE'
-                ELSE category
-            END,
-            finalScore = CASE
-                WHEN :feedback = 'FALSE_POSITIVE' THEN 0
-                ELSE finalScore
-            END,
-            syncStatus = 'PENDING'
-        WHERE id = :id
-        """
-    )
-    suspend fun updateUserFeedback(id: String, feedback: String)
-
-    @Query(
-        """
         SELECT * FROM call_telemetry
         WHERE normalizedNumber = :normalizedNumber
           AND deviceId != 's23-ultra-history'

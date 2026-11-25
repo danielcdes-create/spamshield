@@ -48,7 +48,7 @@ A versão 1.3.3 foi publicada no GitHub e no canal OTA da VPS em 18/11/2026, com
 ## 1. Arquitetura do Sistema
 
 ### 1.1. Android Edge App (`SpamShieldApp`)
-100% Kotlin + Jetpack Compose + Material 3 + Room SQLite (WAL, schema `v5`) + Hilt + WorkManager:
+100% Kotlin + Jetpack Compose + Material 3 + Room SQLite (WAL, schema `v6`) + Hilt + WorkManager:
 
 - **Interceptação Nativa (`< 2 ms`):** `SmartCallScreeningService` (`ROLE_CALL_SCREENING`) com bloqueio silencioso antes do toque (`setDisallowCall`, `setRejectCall`, `setSkipNotification`).
 - **Quarentena Granular de 8 Dígitos (`/8` — bloco de 1.000 números):**
@@ -164,9 +164,9 @@ cargo run
 
 ### 3.2. Aplicativo Android (`SpamShieldApp`)
 ```powershell
-powershell -ExecutionPolicy Bypass -File C:\Users\danie\spamshield\SpamShieldApp\build-android.ps1
+powershell -ExecutionPolicy Bypass -File C:\Users\danie\spamshield\SpamShieldApp\build-android.ps1 -BuildType debug
 ```
-O script executa os testes unitários (`testDebugUnitTest`), compila o APK (`assembleDebug`) e publica os artefatos em `SpamShieldApp\dist\SpamShieldBR-debug.apk` e `SpamShieldApp\dist\apk-info.json`.
+O script executa os testes unitários (`testDebugUnitTest`), compila o APK (`assembleDebug` ou `assembleRelease` mediante variáveis privadas `SPAMSHIELD_KEYSTORE_*`) e prepara os artefatos locais com checksum SHA-256 em `SpamShieldApp\dist\`. Para gerar o relatório de cobertura JaCoCo, execute `.\gradlew.bat createDebugUnitTestCoverageReport`.
 
 ---
 

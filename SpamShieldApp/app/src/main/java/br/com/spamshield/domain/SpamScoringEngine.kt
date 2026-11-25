@@ -261,10 +261,15 @@ class SpamScoringEngine @Inject constructor(
         val disabledRuleIds = allRules.filterNot { it.enabled }.map { it.ruleId }.toSet()
         val compiledRules = enabledRules.values.mapNotNull { rule ->
             val pattern = rule.pattern
-            if (rule.ruleType != "REGEX_MATCH" || pattern.isNullOrBlank()) {
+            val regex = if (rule.ruleType == "REGEX_MATCH" && !pattern.isNullOrBlank()) {
+                ScreeningPatternCache.patternOrNull(pattern)
+            } else {
+                null
+            }
+            if (regex == null || pattern == null) {
                 null
             } else {
-                CompiledRegexRule(rule.ruleId, rule.weight, pattern, ScreeningPatternCache.pattern(pattern))
+                CompiledRegexRule(rule.ruleId, rule.weight, pattern, regex)
             }
         }
         val quarantineMatch = QuarantinePrefixIndex.match(normalized.storedPrefix7, nowMillis)
@@ -459,10 +464,18 @@ class SpamScoringEngine @Inject constructor(
         return pending.retryCallLog.get()
     }
 
-    fun extractQuarantinePrefix(normalizedNumber: String, fallbackPrefix7: String): String {
-        val digits = normalizedNumber.filter { it.isDigit() }
-        val nat = if (digits.startsWith("55") && digits.length in 12..13) digits.substring(2) else digits
-        return if (nat.length >= 8) nat.take(8) else fallbackPrefix7
+    fun extractQuarantinePrefix(
+        normalizedNumber: String,
+        fallbackPrefix7: String,
+        defaultDdd: String = "31"
+    ): String {
+        val cleanFallback = fallbackPrefix7.takeIf { it.length in 7..8 && it.all(Char::isDigit) }.orEmpty()
+        if (normalizedNumber.isBlank()) return cleanFallback
+        val normalized = PhoneNormalizer.normalize(normalizedNumber, defaultDdd)
+        if (normalized.isShortOrUtilityCode || normalized.lineType == "TOLL_FREE_OR_SPECIAL") {
+            return ""
+        }
+        return normalized.storedPrefix7 ?: cleanFallback
     }
 
     /**
@@ -497,7 +510,11 @@ class SpamScoringEngine @Inject constructor(
             ruleWeights = allRules.associate { it.ruleId to it.weight },
             disabledRuleIds = allRules.filterNot { it.enabled }.map { it.ruleId }.toSet()
         ))
-        val qPrefix = extractQuarantinePrefix(latest.normalizedNumber, latest.prefix7)
+        val qPrefix = extractQuarantinePrefix(
+            latest.normalizedNumber,
+            latest.prefix7,
+            latest.ddd.takeIf { it.length == 2 } ?: settingsDataStore.getSnapshot().userDdd
+        )
         val recomputed = finalized.finalScore
         val updatedTelemetry = latest.copy(
             prefix7 = qPrefix.ifEmpty { latest.prefix7 },
@@ -534,12 +551,15 @@ class SpamScoringEngine @Inject constructor(
     ): Boolean {
         // Outgoing calls establish return-call grace; they are never incoming spam evidence.
         if (callType == android.provider.CallLog.Calls.OUTGOING_TYPE) return false
+        val currentSettings = settingsDataStore.getSnapshot()
+        val effectiveNormalized = PhoneNormalizer.normalize(rawNumber ?: normalizedNumber, currentSettings.userDdd)
+            .normalizedNumber.ifEmpty { normalizedNumber }
         val latest = if (callTimestampMs != null) {
-            val match = findScreenedCall(normalizedNumber, callTimestampMs)
+            val match = findScreenedCall(effectiveNormalized, callTimestampMs)
             if (match.deferred) return false
             match.row
         } else {
-            dao.getLatestTelemetryForNumber(normalizedNumber)
+            dao.getLatestTelemetryForNumber(effectiveNormalized)
         }
         val candidateAlreadyBound = latest != null && callTimestampMs != null &&
             dao.getDecisionEvents(latest.id).any {
@@ -550,14 +570,14 @@ class SpamScoringEngine @Inject constructor(
         // Keep the earlier call's evidence and persist the unpaired redial with its own identity.
         var insertedHistory = false
         val target = latest?.takeUnless { candidateAlreadyBound } ?: run {
-            val n = PhoneNormalizer.normalize(rawNumber ?: normalizedNumber)
+            val n = PhoneNormalizer.normalize(rawNumber ?: effectiveNormalized, currentSettings.userDdd)
             val callAt = callTimestampMs ?: nowMillis
             val id = UUID.nameUUIDFromBytes("calllog-$callAt-${n.normalizedNumber}".toByteArray()).toString()
             dao.getTelemetryById(id) ?: CallTelemetryEntity(
                 id = id, timestamp = callAt, deviceId = "s23-ultra-history", rawNumber = rawNumber ?: normalizedNumber,
                 normalizedNumber = n.normalizedNumber, ddd = n.ddd, prefix7 = n.storedPrefix7.orEmpty(),
                 carrierGuess = n.carrierHint, lineType = n.lineType, stirShakenStatus = "NOT_VERIFIED",
-                finalScore = 0, thresholdApplied = settingsDataStore.getSnapshot().blockThresholdScore,
+                finalScore = 0, thresholdApplied = currentSettings.blockThresholdScore,
                 outcome = "ALLOWED_LOW_SCORE", category = "UNKNOWN_UNVERIFIED", processingLatencyMs = 0.0,
                 shadowModeActive = false, callDurationSec = callDurationSec, triggeredRulesJson = "[]"
             ).also {
@@ -709,7 +729,11 @@ class SpamScoringEngine @Inject constructor(
                 )
             )
 
-            val qPrefix = extractQuarantinePrefix(latest.normalizedNumber, latest.prefix7)
+            val qPrefix = extractQuarantinePrefix(
+            latest.normalizedNumber,
+            latest.prefix7,
+            latest.ddd.takeIf { it.length == 2 } ?: settingsDataStore.getSnapshot().userDdd
+        )
             val updatedTelemetry = latest.copy(
                 prefix7 = qPrefix.ifEmpty { latest.prefix7 },
                 outcome = finalized.outcome,
@@ -749,7 +773,11 @@ class SpamScoringEngine @Inject constructor(
         val silenceRequested = arrivalEvents.any { it.source == "CALL_SCREENING_SERVICE" &&
             it.eventType == "SCREENING_RESPONSE_SUBMITTED" && DecisionTrace.details(it).silenceCall == true }
         if (isUnanswered && !silenceRequested && cleanArrivalScore < latest.thresholdApplied) {
-            val qPrefix = extractQuarantinePrefix(latest.normalizedNumber, latest.prefix7)
+            val qPrefix = extractQuarantinePrefix(
+            latest.normalizedNumber,
+            latest.prefix7,
+            latest.ddd.takeIf { it.length == 2 } ?: settingsDataStore.getSnapshot().userDdd
+        )
             dao.updateCallDurationAndCategory(latest.id, 0, latest.category)
 
             val recentCallsInPrefix = if (qPrefix.isNotEmpty()) {

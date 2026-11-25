@@ -394,4 +394,148 @@ mod telemetry_body_limit_tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
+
+    #[tokio::test]
+    async fn apk_download_and_bom_metadata_and_pre_db_validation_guards_work() {
+        let dir = std::env::temp_dir().join(format!("spamshield-route-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let apk_file = dir.join("release.apk");
+        let meta_file = dir.join("output-metadata.json");
+
+        let mut options = ClientOptions::parse("mongodb://127.0.0.1:1").await.unwrap();
+        options.server_selection_timeout = Some(Duration::from_millis(150));
+        options.connect_timeout = Some(Duration::from_millis(150));
+        let client = mongodb::Client::with_options(options).unwrap();
+        let app = create_router(AppState {
+            db: AppDatabase {
+                client: client.clone(),
+                db: client.database("route_validation_test"),
+            },
+            api_key: "route-unit-key".into(),
+            apk_path: apk_file.clone(),
+            apk_metadata_path: meta_file.clone(),
+            tailscale_ip: "100.101.23.111".into(),
+        });
+
+        // 1. Missing APK -> 404 NOT_FOUND on /apk
+        let missing_dl = app
+            .clone()
+            .oneshot(Request::builder().uri("/apk").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(missing_dl.status(), StatusCode::NOT_FOUND);
+
+        // 2. Empty 0-byte APK -> 503 SERVICE_UNAVAILABLE
+        std::fs::write(&apk_file, b"").unwrap();
+        let empty_dl = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/spamshield.apk")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty_dl.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // 3. Valid APK + UTF-8 BOM metadata -> 200 OK on /apk and /api/v1/apk/info
+        let apk_bytes = b"PK\x03\x04spamshield-apk-payload";
+        std::fs::write(&apk_file, apk_bytes).unwrap();
+        let bom_meta = "\u{feff}{\"elements\":[{\"versionCode\":21,\"versionName\":\"1.4.1\"}]}";
+        std::fs::write(&meta_file, bom_meta.as_bytes()).unwrap();
+
+        let ok_dl = app
+            .clone()
+            .oneshot(Request::builder().uri("/apk").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(ok_dl.status(), StatusCode::OK);
+        assert_eq!(
+            ok_dl.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/vnd.android.package-archive"
+        );
+        assert!(ok_dl
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("spamshield-br.apk"));
+        let downloaded = ok_dl.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(downloaded.as_ref(), apk_bytes);
+
+        let ok_info = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/apk/info")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok_info.status(), StatusCode::OK);
+
+        // 4. POST /api/v1/rules rejects blank rule_id and REGEX_MATCH without pattern (BUG-07)
+        for bad_rule in [
+            json!({"rule_id": "   ", "name": "Bad", "rule_type": "HEURISTIC_WEIGHT", "pattern": null, "weight": 20, "priority": 10, "enabled": true, "updated_at": 1700000000000_i64}),
+            json!({"rule_id": "CUSTOM_EMPTY_REGEX", "name": "Bad Regex", "rule_type": "REGEX_MATCH", "pattern": "   ", "weight": 50, "priority": 25, "enabled": true, "updated_at": 1700000000000_i64}),
+        ] {
+            let bad_resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/rules")
+                        .header(header::AUTHORIZATION, "Bearer route-unit-key")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(bad_rule.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(bad_resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        // 5. POST /api/v1/telemetry/batch rejects duplicate call IDs or empty event_id with 400 BAD_REQUEST
+        let sample_call = json!({
+            "_id": "dup-call-1",
+            "timestamp": 1700000000000_i64,
+            "device_id": "dev-1",
+            "call_details": {
+                "raw_number": "03132221111",
+                "normalized_number": "+553132221111",
+                "ddd": "31",
+                "prefix_7": "3132221",
+                "carrier_guess": "Fixo",
+                "line_type": "FIXED_OR_VOIP",
+                "stir_shaken_status": "NOT_VERIFIED"
+            },
+            "decision_vector": {
+                "final_score": 25,
+                "threshold_applied": 70,
+                "outcome": "ALLOWED_LOW_SCORE",
+                "category": "UNKNOWN_UNVERIFIED",
+                "processing_latency_ms": 1.0,
+                "triggered_rules": []
+            },
+            "decision_events": []
+        });
+        let dup_batch_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/telemetry/batch")
+                    .header(header::AUTHORIZATION, "Bearer route-unit-key")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!([&sample_call, &sample_call]).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dup_batch_resp.status(), StatusCode::BAD_REQUEST);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

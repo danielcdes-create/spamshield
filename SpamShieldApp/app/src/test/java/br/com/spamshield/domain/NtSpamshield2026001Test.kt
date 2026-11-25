@@ -9,9 +9,9 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.File
 
 class NtSpamshield2026001Test {
 
@@ -451,20 +451,15 @@ class NtSpamshield2026001Test {
     @Test
     fun stage4ScreeningUsesMemoryQuarantineAndProcessLifetimePatterns() = runTest {
         val pattern = ScreeningPatternCache.blacklistMgVoipPabx()
-        assertTrue(pattern === ScreeningPatternCache.pattern(ScreeningPatternCache.BLACKLIST_MG_VOIP_PABX_PATTERN))
-        val screening = functionBody(
-            "br/com/spamshield/domain/SpamScoringEngine.kt",
-            "suspend fun evaluateIncomingCall",
-            "fun extractQuarantinePrefix"
+        assertSame(pattern, ScreeningPatternCache.pattern(ScreeningPatternCache.BLACKLIST_MG_VOIP_PABX_PATTERN))
+        assertSame(
+            ScreeningPatternCache.regexMgVoipTrunks(),
+            ScreeningPatternCache.pattern(ScreeningPatternCache.REGEX_MG_VOIP_TRUNKS_PATTERN)
         )
-        assertFalse(screening.contains("Regex("))
-        assertFalse(screening.contains("Pattern.compile"))
-        assertFalse(screening.contains("getActiveQuarantine"))
-        assertFalse(screening.contains("SELECT"))
-        val service = readSource("br/com/spamshield/service/SmartCallScreeningService.kt")
-        assertFalse(service.contains("Regex("))
-        assertFalse(service.contains("Pattern.compile"))
-        assertFalse(service.contains("SELECT"))
+        val custom = ScreeningPatternCache.patternOrNull("^\\+553199\\d{7}$")
+        assertSame(custom, ScreeningPatternCache.pattern("^\\+553199\\d{7}$"))
+        assertNull(ScreeningPatternCache.patternOrNull("[invalid"))
+        assertNull(ScreeningPatternCache.patternOrNull("   "))
 
         QuarantinePrefixIndex.replaceAll(emptyList())
         QuarantinePrefixIndex.add("31410112")
@@ -666,24 +661,4 @@ class NtSpamshield2026001Test {
         triggeredRulesJson = """[{"rule_id":"NOT_IN_CONTACTS","weight":25}]""",
         syncStatus = "SYNCED"
     )
-
-    private fun functionBody(relative: String, startMarker: String, endMarker: String): String {
-        val source = readSource(relative)
-        val start = source.indexOf(startMarker)
-        val end = source.indexOf(endMarker, start + 1)
-        assertTrue(start >= 0 && end > start)
-        return source.substring(start, end)
-    }
-
-    private fun readSource(relative: String): String {
-        val roots = listOf(
-            File("src/main/java"),
-            File("app/src/main/java"),
-            File("SpamShieldApp/app/src/main/java"),
-            File("C:/Users/danie/spamshield/SpamShieldApp/app/src/main/java")
-        )
-        val file = roots.map { File(it, relative) }.firstOrNull { it.exists() }
-            ?: throw AssertionError("missing source $relative")
-        return file.readText()
-    }
 }

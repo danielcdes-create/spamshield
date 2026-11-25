@@ -188,6 +188,7 @@ class SyncRepository @Inject constructor(
         val api = buildApi(settings.tailscaleServerUrl, settings.apiBearerToken)
 
         try {
+            dao.deduplicateHistoryRecords()
             var pushedCount = 0
             val deferredCalls = mutableSetOf<String>()
             var afterTimestamp = Long.MIN_VALUE
@@ -357,9 +358,12 @@ class SyncRepository @Inject constructor(
             )
             dao.persistFeedbackUpdate(updatedRow, mutation, event)
             if (feedback == "FALSE_POSITIVE" && prefix7.isNotEmpty()) {
-                deleteManualQuarantine(prefix7)
+                dao.deleteQuarantineByPrefix(prefix7)
+                QuarantinePrefixIndex.remove(prefix7)
                 if (prefix7.length == 8) {
-                    deleteManualQuarantine(prefix7.take(7))
+                    val broad = prefix7.take(7)
+                    dao.deleteQuarantineByPrefix(broad)
+                    QuarantinePrefixIndex.remove(broad)
                 }
             } else if (feedback == "CONFIRMED_SPAM" && prefix7.isNotEmpty()) {
                 val now = System.currentTimeMillis()
@@ -376,18 +380,18 @@ class SyncRepository @Inject constructor(
                     lastSeenAt = now,
                     expiresAt = now + 30L * 24 * 60 * 60 * 1000L
                 )
-                saveManualQuarantine(qEntity)
+                dao.upsertQuarantine(qEntity)
+                QuarantinePrefixIndex.add(qEntity.prefix7, qEntity.expiresAt)
             }
 
-            dao.getTelemetryById(telemetryId)?.let { updated ->
-                if (prefix7.isNotEmpty() && feedback in setOf("CONFIRMED_SPAM", "FALSE_POSITIVE")) {
-                    val protection = dao.getActiveQuarantineForPrefix(prefix7, System.currentTimeMillis())
-                    DecisionTrace.record(dao, telemetryId, "QUARANTINE_UPDATED", "USER",
-                        br.com.spamshield.domain.DecisionDetails(prefix = prefix7,
-                            reason = if (feedback == "FALSE_POSITIVE") "REMOVED_AFTER_FALSE_POSITIVE"
-                            else "${protection?.reason}; expiresAt=${protection?.expiresAt}"))
-                }
-                TelemetrySyncScheduler.enqueueImmediateSync()
+            if (dao.getTelemetryById(telemetryId) != null &&
+                prefix7.isNotEmpty() && feedback in setOf("CONFIRMED_SPAM", "FALSE_POSITIVE")
+            ) {
+                val protection = dao.getActiveQuarantineForPrefix(prefix7, System.currentTimeMillis())
+                DecisionTrace.record(dao, telemetryId, "QUARANTINE_UPDATED", "USER",
+                    br.com.spamshield.domain.DecisionDetails(prefix = prefix7,
+                        reason = if (feedback == "FALSE_POSITIVE") "REMOVED_AFTER_FALSE_POSITIVE"
+                        else "${protection?.reason}; expiresAt=${protection?.expiresAt}"))
             }
 
             QuarantinePrefixIndex.refreshActive { dao.getAllQuarantines() }

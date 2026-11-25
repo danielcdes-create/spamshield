@@ -74,20 +74,61 @@ class PhoneNormalizerTest {
         assertEquals("+553132873275", rFixo.normalizedNumber)
         assertEquals("FIXED_OR_VOIP", rFixo.lineType)
         assertEquals("Fixo", rFixo.carrierHint)
+    }
 
-        val r0041 = PhoneNormalizer.normalize("004131939995971")
-        assertEquals("+5531939995971", r0041.normalizedNumber)
-        assertEquals("31", r0041.ddd)
-        assertEquals("31939995", r0041.prefix7)
-        assertEquals("Claro", r0041.carrierHint)
+    @Test
+    fun `handles empty input, emergency short codes, 0800-0500-3003-105-106 utilities, 0055 header and custom local DDD`() {
+        val empty = PhoneNormalizer.normalize("   ---  ")
+        assertEquals("", empty.normalizedNumber)
+        assertEquals("UNKNOWN", empty.lineType)
+        assertEquals(null, empty.storedPrefix7)
 
-        val r10315 = PhoneNormalizer.normalize("03110315")
-        assertEquals("10315", r10315.normalizedNumber)
-        assertEquals("31", r10315.ddd)
-        assertEquals(null, r10315.storedPrefix7)
-        assertEquals("TOLL_FREE_OR_SPECIAL", r10315.lineType)
-        assertEquals("Vivo", r10315.carrierHint)
-        assertTrue(r10315.isShortOrUtilityCode)
+        val emergency190 = PhoneNormalizer.normalize("190", "11")
+        assertEquals("190", emergency190.normalizedNumber)
+        assertEquals("11", emergency190.ddd)
+        assertEquals("TOLL_FREE_OR_SPECIAL", emergency190.lineType)
+        assertTrue(emergency190.isShortOrUtilityCode)
+
+        for ((raw, expectedNorm, expectedCarrier) in listOf(
+            Triple("08007221234", "08007221234", "VoIP"),
+            Triple("05001234567", "05001234567", "VoIP"),
+            Triple("30031234", "30031234", "VoIP"),
+            Triple("40031234", "40031234", "VoIP"),
+            Triple("0111058", "1058", "VoIP"),
+            Triple("02110621", "10621", "VoIP"),
+            Triple("10321", "10321", "Claro"),
+            Triple("10341", "10341", "TIM")
+        )) {
+            val u = PhoneNormalizer.normalize(raw, "11")
+            assertEquals(expectedNorm, u.normalizedNumber)
+            assertEquals("TOLL_FREE_OR_SPECIAL", u.lineType)
+            assertEquals(expectedCarrier, u.carrierHint)
+            assertEquals(null, u.storedPrefix7)
+        }
+
+        val c0055 = PhoneNormalizer.normalize("005521998765432", "31")
+        assertEquals("+5521998765432", c0055.normalizedNumber)
+        assertEquals("21", c0055.ddd)
+        assertEquals("21998765", c0055.prefix7)
+        assertEquals("Vivo", c0055.carrierHint)
+        assertEquals("0055", c0055.cspExtracted)
+
+        val localMobileSp = PhoneNormalizer.normalize("987654321", "11")
+        assertEquals("+5511987654321", localMobileSp.normalizedNumber)
+        assertEquals("11", localMobileSp.ddd)
+        assertEquals("11987654", localMobileSp.prefix7)
+
+        val localLandlineSp = PhoneNormalizer.normalize("32873275", "11")
+        assertEquals("+551132873275", localLandlineSp.normalizedNumber)
+        assertEquals("11", localLandlineSp.ddd)
+        assertEquals("Fixo", localLandlineSp.carrierHint)
+
+        assertTrue(PhoneNormalizer.isKnownChipeiraFarmPrefix5("31937"))
+        assertTrue(PhoneNormalizer.isKnownChipeiraFarmPrefix5("11910"))
+        assertEquals(false, PhoneNormalizer.isKnownChipeiraFarmPrefix5("31999"))
+        assertEquals(false, PhoneNormalizer.hasAbnormalTrunkOrCspHeader("011987654321", "11"))
+        assertTrue(PhoneNormalizer.hasAbnormalTrunkOrCspHeader("031987654321", "11"))
+        assertTrue(PhoneNormalizer.hasAbnormalTrunkOrCspHeader("01511987654321", "11"))
     }
 
     @Test

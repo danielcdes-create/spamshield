@@ -22,6 +22,9 @@ object ScreeningPatternCache {
 
     fun pattern(source: String): Regex = compiled.computeIfAbsent(source) { Regex(it) }
 
+    fun patternOrNull(source: String): Regex? =
+        if (source.isBlank()) null else runCatching { pattern(source) }.getOrNull()
+
     fun blacklistMgVoipPabx(): Regex = pattern(BLACKLIST_MG_VOIP_PABX_PATTERN)
 
     fun regexMgVoipTrunks(): Regex = pattern(REGEX_MG_VOIP_TRUNKS_PATTERN)

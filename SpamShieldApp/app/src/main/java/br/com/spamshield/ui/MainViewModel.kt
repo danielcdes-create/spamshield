@@ -96,6 +96,11 @@ class MainViewModel @Inject constructor(
         encodeDefaults = true
     }
 
+    private val csvJson = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+    }
+
     val telemetryList: StateFlow<List<CallTelemetryEntity>> = dao
         .observeAllTelemetry()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -305,7 +310,7 @@ class MainViewModel @Inject constructor(
                 )
             } else {
                 val installedCode = BuildConfig.VERSION_CODE
-                val sizeMb = String.format("%.1f MB", info.size_bytes / (1024.0 * 1024.0))
+                val sizeMb = String.format(java.util.Locale.US, "%.1f MB", info.size_bytes / (1024.0 * 1024.0))
                 val msg = when {
                     info.version_code > installedCode ->
                         "Nova versão disponível no servidor: v${info.version_name} (build ${info.version_code}, $sizeMb)."
@@ -399,9 +404,11 @@ class MainViewModel @Inject constructor(
 
     fun markCallFeedback(telemetry: CallTelemetryEntity, feedback: String) {
         viewModelScope.launch {
+            val userDdd = telemetry.ddd.takeIf { it.length == 2 } ?: settingsDataStore.getSnapshot().userDdd
             val targetPrefix = spamScoringEngine.extractQuarantinePrefix(
                 telemetry.normalizedNumber,
-                telemetry.prefix7
+                telemetry.prefix7,
+                userDdd
             )
             syncRepository.submitFeedback(telemetry.id, feedback, targetPrefix)
         }
@@ -413,15 +420,20 @@ class MainViewModel @Inject constructor(
         pattern: String,
         weight: Int
     ) {
+        val trimmedPattern = pattern.trim()
+        if (trimmedPattern.isEmpty() || br.com.spamshield.domain.ScreeningPatternCache.patternOrNull(trimmedPattern) == null) {
+            featureError.value = "Expressão regular inválida. Corrija o padrão antes de salvar."
+            return
+        }
         viewModelScope.launch {
             val now = System.currentTimeMillis()
-            val cleanId = ruleId.trim().uppercase().replace(Regex("[^A-Z0-9_]"), "_")
+            val cleanId = ruleId.trim().uppercase(java.util.Locale.ROOT).replace(Regex("[^A-Z0-9_]"), "_")
                 .ifEmpty { "CUSTOM_RULE_${now % 10000}" }
             val entity = ActiveRuleEntity(
                 ruleId = cleanId,
                 name = name.ifBlank { "Regra Customizada ($cleanId)" },
                 ruleType = "REGEX_MATCH",
-                pattern = pattern.trim(),
+                pattern = trimmedPattern,
                 weight = weight.coerceIn(-500, 200),
                 priority = 25,
                 enabled = true,
@@ -523,7 +535,7 @@ class MainViewModel @Inject constructor(
             val provenance = br.com.spamshield.domain.TelemetryProvenance.forCall(row, callEvents)
             val response = callEvents.lastOrNull { it.source == "CALL_SCREENING_SERVICE" &&
                 it.eventType in setOf("SCREENING_RESPONSE_SUBMITTED", "SCREENING_RESPONSE_FAILED") }?.let(DecisionTrace::details)
-            val serializedEvents = json.encodeToString(callEvents.map { it.toRemoteEvent() })
+            val serializedEvents = csvJson.encodeToString(callEvents.map { it.toRemoteEvent() })
             sb.appendLine(
                 "${row.id},${row.timestamp},${csv(row.rawNumber)},${csv(row.normalizedNumber)},${row.ddd},${row.prefix7}," +
                     "${csv(row.carrierGuess.orEmpty())},${row.lineType},${row.stirShakenStatus},${row.finalScore}," +
@@ -532,11 +544,11 @@ class MainViewModel @Inject constructor(
                     "${csv(provenance.originalDecision?.appVersion?.label.orEmpty())},${provenance.originalVersionStatus}," +
                     "${csv(provenance.currentClassification?.appVersion?.label.orEmpty())},${provenance.currentClassification?.recordedAt ?: ""},${provenance.currentClassificationStatus}," +
                     "${csv(provenance.eventAppVersions.joinToString("; ") { it.label })},${exportMetadata.schemaVersion},${exportMetadata.exportedAt}," +
-                    "${csv(exportMetadata.exporterVersionName)},${exportMetadata.exporterVersionCode},${csv(json.encodeToString(provenance))}," +
-                    csv(json.encodeToString(callEvents.associate { it.eventId to it.syncStatus })) +
+                    "${csv(exportMetadata.exporterVersionName)},${exportMetadata.exporterVersionCode},${csv(csvJson.encodeToString(provenance))}," +
+                    csv(csvJson.encodeToString(callEvents.associate { it.eventId to it.syncStatus })) +
                     ",${exportMetadata.exportId},${response?.policy?.normalAction.orEmpty()},${response?.policy?.chosenAction.orEmpty()}," +
-                    "${csv(response?.policy?.reason.orEmpty())},${csv(json.encodeToString(response?.latency))}," +
-                    csv(json.encodeToString(featuresByCall[row.id].orEmpty().map { it.eventId }))
+                    "${csv(response?.policy?.reason.orEmpty())},${csv(csvJson.encodeToString(response?.latency))}," +
+                    csv(csvJson.encodeToString(featuresByCall[row.id].orEmpty().map { it.eventId }))
             )
         }
         csvFile.writeText(sb.toString())

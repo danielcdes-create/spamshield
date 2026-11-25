@@ -184,6 +184,145 @@ mod tests {
         assert!(!invalid.valid());
     }
 
+    #[test]
+    fn feature_event_validates_all_event_families_and_rejects_malformed_envelopes() {
+        let u1 = "00000000-0000-4000-8000-000000000011";
+        let u2 = "00000000-0000-4000-8000-000000000012";
+        let u3 = "00000000-0000-4000-8000-000000000013";
+        let valid_cases = [
+            json!({"event_id": u1, "resource_id": u2, "event_type": "WAIT_ACTIVATED", "source": "DASHBOARD_SHIELD", "recorded_at": 10, "effective_at": 10, "app_version": "1.4.1", "schema_version": 1, "details": {"window": {"id": u2}}}),
+            json!({"event_id": u1, "call_id": u3, "resource_id": u2, "event_type": "WAIT_FEEDBACK", "source": "AUDIT_USER", "recorded_at": 10, "effective_at": 10, "app_version": "1.4.1", "schema_version": 1, "details": {"decisionEventId": u2, "reason": "EXPECTED_CALL_CONFIRMED"}}),
+            json!({"event_id": u1, "resource_id": u2, "event_type": "CAMPAIGN_DETECTED", "source": "CAMPAIGN_RECONCILIATION", "recorded_at": 10, "effective_at": 10, "app_version": "1.4.1", "schema_version": 1, "details": {"campaign": {"id": u2}}}),
+            json!({"event_id": u1, "resource_id": u2, "event_type": "CAMPAIGN_MERGED", "source": "CAMPAIGN_RECONCILIATION", "recorded_at": 10, "effective_at": 10, "app_version": "1.4.1", "schema_version": 1, "details": {"previousId": u3}}),
+            json!({"event_id": u1, "resource_id": u2, "event_type": "CAMPAIGN_SILENCE_EXPIRED", "source": "CLOCK", "recorded_at": 10, "effective_at": 10, "app_version": "1.4.1", "schema_version": 1, "details": {"silence": {"id": u3}}}),
+            json!({"event_id": u1, "call_id": u3, "resource_id": u2, "event_type": "LAB_COMPARISON", "source": "REPLAY", "recorded_at": 10, "effective_at": 10, "app_version": "1.4.1", "schema_version": 1, "details": {"comparison": {"direction": "UNCHANGED"}}}),
+            json!({"event_id": u1, "resource_id": u2, "event_type": "LAB_SHADOW_STARTED", "source": "RULE_LAB", "recorded_at": 10, "effective_at": 10, "app_version": "1.4.1", "schema_version": 1, "details": {"experiment": {"id": u2}}}),
+        ];
+        for case in valid_cases {
+            let parsed: FeatureEvent = serde_json::from_value(case.clone()).unwrap();
+            assert!(parsed.valid(), "expected valid case: {case}");
+        }
+
+        let invalid_cases = [
+            // Invalid UUID
+            json!({"event_id": "bad-uuid", "resource_id": u2, "event_type": "WAIT_ACTIVATED", "source": "DASHBOARD_SHIELD", "recorded_at": 10, "effective_at": 10, "app_version": "1.4.1", "schema_version": 1, "details": {"window": {}}}),
+            // Unsupported schema_version
+            json!({"event_id": u1, "resource_id": u2, "event_type": "WAIT_ACTIVATED", "source": "DASHBOARD_SHIELD", "recorded_at": 10, "effective_at": 10, "app_version": "1.4.1", "schema_version": 2, "details": {"window": {}}}),
+            // Unknown source
+            json!({"event_id": u1, "resource_id": u2, "event_type": "WAIT_ACTIVATED", "source": "UNKNOWN_SOURCE", "recorded_at": 10, "effective_at": 10, "app_version": "1.4.1", "schema_version": 1, "details": {"window": {}}}),
+            // WAIT_FEEDBACK missing call_id
+            json!({"event_id": u1, "resource_id": u2, "event_type": "WAIT_FEEDBACK", "source": "AUDIT_USER", "recorded_at": 10, "effective_at": 10, "app_version": "1.4.1", "schema_version": 1, "details": {"decisionEventId": u2, "reason": "SPAM_CONFIRMED"}}),
+            // CAMPAIGN_MERGED invalid previousId
+            json!({"event_id": u1, "resource_id": u2, "event_type": "CAMPAIGN_MERGED", "source": "CAMPAIGN_RECONCILIATION", "recorded_at": 10, "effective_at": 10, "app_version": "1.4.1", "schema_version": 1, "details": {"previousId": "not-uuid"}}),
+        ];
+        for case in invalid_cases {
+            let parsed: FeatureEvent = serde_json::from_value(case.clone()).unwrap();
+            assert!(!parsed.valid(), "expected invalid case: {case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn post_feature_batch_validates_auth_duplicates_and_body_limits_before_db() {
+        use crate::db::AppDatabase;
+        use crate::routes::TELEMETRY_BATCH_BODY_LIMIT;
+        use axum::{body::Body, http::Request};
+        use http_body_util::BodyExt;
+        use mongodb::options::ClientOptions;
+        use std::time::Duration;
+        use tower::ServiceExt;
+
+        let mut options = ClientOptions::parse("mongodb://127.0.0.1:1").await.unwrap();
+        options.server_selection_timeout = Some(Duration::from_millis(150));
+        options.connect_timeout = Some(Duration::from_millis(150));
+        let client = mongodb::Client::with_options(options).unwrap();
+        let router = super::super::create_router(AppState {
+            db: AppDatabase {
+                client: client.clone(),
+                db: client.database("feature_validation_unit"),
+            },
+            api_key: "feat-unit-key".into(),
+            apk_path: Default::default(),
+            apk_metadata_path: Default::default(),
+            tailscale_ip: "127.0.0.1".into(),
+        });
+
+        // 1. Empty batch succeeds with 200 OK without touching MongoDB
+        let empty_resp = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/telemetry/features/batch")
+                    .header("authorization", "Bearer feat-unit-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from("[]"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty_resp.status(), StatusCode::OK);
+
+        // 2. Duplicate event_id in the same batch is rejected with 400 BAD_REQUEST before DB
+        let ev = json!({
+            "event_id": "00000000-0000-4000-8000-000000000099",
+            "resource_id": "00000000-0000-4000-8000-000000000098",
+            "event_type": "WAIT_ACTIVATED",
+            "source": "DASHBOARD_SHIELD",
+            "recorded_at": 100,
+            "effective_at": 100,
+            "app_version": "1.4.1",
+            "schema_version": 1,
+            "details": {"window": {"id": "00000000-0000-4000-8000-000000000098"}}
+        });
+        let dup_resp = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/telemetry/features/batch")
+                    .header("authorization", "Bearer feat-unit-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!([&ev, &ev]).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dup_resp.status(), StatusCode::BAD_REQUEST);
+
+        // 3. Missing bearer returns 401 UNAUTHORIZED
+        let unauth_resp = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/telemetry/features/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from("[]"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth_resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 4. Payload exceeding TELEMETRY_BATCH_BODY_LIMIT returns 413 with TELEMETRY_BATCH_TOO_LARGE JSON
+        let mut oversized = vec![b' '; TELEMETRY_BATCH_BODY_LIMIT + 1];
+        oversized[0] = b'[';
+        oversized[TELEMETRY_BATCH_BODY_LIMIT] = b']';
+        let too_large_resp = router
+            .oneshot(
+                Request::post("/api/v1/telemetry/features/batch")
+                    .header("authorization", "Bearer feat-unit-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(oversized))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(too_large_resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body_bytes = too_large_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let err_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(err_json["error"], "TELEMETRY_BATCH_TOO_LARGE");
+    }
+
     #[tokio::test]
     #[ignore = "Requires isolated MongoDB at 127.0.0.1:27028; never uses .env"]
     async fn isolated_feature_route_preserves_original_and_acknowledges_partial_batch() {

@@ -14,14 +14,25 @@ import br.com.spamshield.data.local.entity.SyncMutationEntity
 import br.com.spamshield.data.local.entity.RemoteQuarantinePrefixEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 open class FakeSpamShieldDao : SpamShieldDao {
+    private val stateVersion = MutableStateFlow(0L)
+    private fun notifyChange() {
+        stateVersion.value++
+    }
+
     private val featureEvents = MutableStateFlow<List<FeatureEventEntity>>(emptyList())
     override suspend fun insertFeatureEvents(events: List<FeatureEventEntity>) {
         featureEvents.value = (featureEvents.value + events).distinctBy { it.eventId }
@@ -41,15 +52,25 @@ open class FakeSpamShieldDao : SpamShieldDao {
     override suspend fun clearRemoteQuarantinePrefixes() { remotePrefixes.clear() }
     override suspend fun insertRemoteQuarantinePrefixes(items: List<RemoteQuarantinePrefixEntity>) { remotePrefixes.addAll(items.map { it.prefix7 }) }
     val syncMutations = mutableListOf<SyncMutationEntity>()
-    override suspend fun enqueueSyncMutation(mutation: SyncMutationEntity) { syncMutations.add(mutation) }
+    override suspend fun enqueueSyncMutation(mutation: SyncMutationEntity) {
+        syncMutations.removeAll { it.mutationId == mutation.mutationId }
+        syncMutations.add(mutation)
+        notifyChange()
+    }
     override suspend fun getSyncMutations() = syncMutations.toList()
-    override suspend fun acknowledgeSyncMutation(mutationId: String) { syncMutations.removeAll { it.mutationId == mutationId } }
+    override suspend fun acknowledgeSyncMutation(mutationId: String) {
+        if (syncMutations.removeAll { it.mutationId == mutationId }) notifyChange()
+    }
     val decisionEvents = mutableListOf<CallDecisionEventEntity>()
     override suspend fun insertDecisionEvent(event: CallDecisionEventEntity) {
-        if (decisionEvents.none { it.eventId == event.eventId }) decisionEvents.add(event)
+        if (decisionEvents.none { it.eventId == event.eventId }) {
+            decisionEvents.add(event)
+            notifyChange()
+        }
     }
-    override suspend fun getAllDecisionEvents() = decisionEvents.toList()
-    override fun observeDecisionEvents(): Flow<List<CallDecisionEventEntity>> = MutableStateFlow(decisionEvents)
+    override suspend fun getAllDecisionEvents() = decisionEvents.sortedWith(compareBy({ it.recordedAt }, { it.eventId }))
+    override fun observeDecisionEvents(): Flow<List<CallDecisionEventEntity>> =
+        stateVersion.map { decisionEvents.sortedWith(compareBy({ it.recordedAt }, { it.eventId })) }
     override suspend fun getDecisionEvents(callId: String) = decisionEvents.filter { it.callId == callId }.sortedWith(compareBy({ it.recordedAt }, { it.eventId }))
     override suspend fun getDecisionEventsForCalls(callIds: List<String>) =
         decisionEvents.filter { it.callId in callIds }.sortedWith(compareBy({ it.recordedAt }, { it.eventId }))
@@ -57,15 +78,17 @@ open class FakeSpamShieldDao : SpamShieldDao {
         decisionEvents.replaceAll {
             if (it.callId == callId && it.eventId in eventIds) it.copy(syncStatus = "SYNCED") else it
         }
+        notifyChange()
     }
     override suspend fun deleteDecisionEvents(eventIds: List<String>) {
         val set = eventIds.toSet()
-        decisionEvents.removeAll { it.eventId in set }
+        if (decisionEvents.removeAll { it.eventId in set }) notifyChange()
     }
     override suspend fun reassignDecisionEvents(fromCallId: String, toCallId: String) {
         decisionEvents.replaceAll {
             if (it.callId == fromCallId) it.copy(callId = toCallId, syncStatus = "PENDING") else it
         }
+        notifyChange()
     }
     val telemetries = mutableListOf<CallTelemetryEntity>()
     val rules = AppDatabase.initialRulesSeed(1_700_000_000_000L).toMutableList()
@@ -76,20 +99,24 @@ open class FakeSpamShieldDao : SpamShieldDao {
     override suspend fun insertTelemetry(telemetry: CallTelemetryEntity) {
         telemetries.removeAll { it.id == telemetry.id }
         telemetries.add(0, telemetry)
+        notifyChange()
     }
     override suspend fun deleteTelemetryById(id: String) {
-        telemetries.removeAll { it.id == id }
+        if (telemetries.removeAll { it.id == id }) notifyChange()
     }
     override suspend fun deleteUnjournaledPendingTelemetry(id: String): Int {
         val removed = telemetries.removeAll { row ->
             row.id == id && row.syncStatus == "PENDING" && row.userFeedback == "UNRATED" &&
                 decisionEvents.none { it.callId == id }
         }
+        if (removed) notifyChange()
         return if (removed) 1 else 0
     }
 
-    override fun observeAllTelemetry(): Flow<List<CallTelemetryEntity>> = MutableStateFlow(telemetries)
-    override suspend fun getAllTelemetry(): List<CallTelemetryEntity> = telemetries.toList()
+    override fun observeAllTelemetry(): Flow<List<CallTelemetryEntity>> =
+        stateVersion.map { telemetries.sortedByDescending { row -> row.timestamp } }
+    override suspend fun getAllTelemetry(): List<CallTelemetryEntity> =
+        telemetries.sortedByDescending { it.timestamp }
     override suspend fun getTelemetryById(id: String): CallTelemetryEntity? = telemetries.find { it.id == id }
     override suspend fun getPendingTelemetry(afterTimestamp: Long, afterId: String): List<CallTelemetryEntity> =
         telemetries.filter { row ->
@@ -100,41 +127,48 @@ open class FakeSpamShieldDao : SpamShieldDao {
         telemetries.replaceAll { row ->
             if (row.id in ids) row.copy(syncStatus = "SYNCED") else row
         }
-    }
-    override suspend fun updateUserFeedback(id: String, feedback: String) {
-        val idx = telemetries.indexOfFirst { it.id == id }
-        if (idx >= 0) {
-            val cur = telemetries[idx]
-            telemetries[idx] = when (feedback) {
-                "CONFIRMED_SPAM" -> UserFeedbackAudit.applyConfirmedSpam(cur)
-                "FALSE_POSITIVE" -> cur.copy(
-                    userFeedback = feedback,
-                    outcome = "ALLOWED_CONTACT",
-                    category = "LEGITIMATE",
-                    finalScore = 0,
-                    syncStatus = "PENDING"
-                )
-                else -> cur.copy(userFeedback = feedback, syncStatus = "PENDING")
-            }
-        }
+        notifyChange()
     }
 
     override suspend fun findRealTimeTelemetryNearTimestamp(
         normalizedNumber: String,
         minTs: Long,
         maxTs: Long
-    ): CallTelemetryEntity? = telemetries.filter {
-        it.normalizedNumber == normalizedNumber &&
-            it.deviceId != "s23-ultra-history" &&
-            it.timestamp in minTs..maxTs
-    }.minByOrNull { kotlin.math.abs(it.timestamp - (minTs + (maxTs - minTs) / 2)) }
+    ): CallTelemetryEntity? {
+        val center = minTs + (maxTs - minTs) / 2
+        return telemetries.filter {
+            it.normalizedNumber == normalizedNumber &&
+                it.deviceId != "s23-ultra-history" &&
+                it.timestamp in minTs..maxTs
+        }.minWithOrNull(
+            compareBy<CallTelemetryEntity> { kotlin.math.abs(it.timestamp - center) }.thenBy { it.timestamp }
+        )
+    }
 
-    override suspend fun deduplicateHistoryRecords() {}
+    override suspend fun deduplicateHistoryRecords() {
+        val removed = telemetries.removeAll { row ->
+            row.deviceId == "s23-ultra-history" &&
+                row.syncStatus == "PENDING" &&
+                row.userFeedback == "UNRATED" &&
+                decisionEvents.none { it.callId == row.id } &&
+                telemetries.any { rt ->
+                    rt.deviceId != "s23-ultra-history" &&
+                        rt.normalizedNumber == row.normalizedNumber &&
+                        kotlin.math.abs(rt.timestamp - row.timestamp) <= 15_000L
+                }
+        }
+        if (removed) notifyChange()
+    }
 
     override suspend fun updateCallDurationAndCategory(id: String, durationSec: Int, category: String) {
         val idx = telemetries.indexOfFirst { it.id == id }
         if (idx >= 0) {
-            telemetries[idx] = telemetries[idx].copy(callDurationSec = durationSec, category = category)
+            telemetries[idx] = telemetries[idx].copy(
+                callDurationSec = durationSec,
+                category = category,
+                syncStatus = "PENDING"
+            )
+            notifyChange()
         }
     }
 
@@ -157,17 +191,19 @@ open class FakeSpamShieldDao : SpamShieldDao {
             .size
 
     override suspend fun getEnabledRules(): List<ActiveRuleEntity> = rules.filter { it.enabled }.sortedBy { it.priority }
-    override fun observeAllRules(): Flow<List<ActiveRuleEntity>> = MutableStateFlow(rules)
+    override fun observeAllRules(): Flow<List<ActiveRuleEntity>> = stateVersion.map { rules.sortedBy { r -> r.priority } }
     override suspend fun insertRules(rules: List<ActiveRuleEntity>) {
         this.rules.removeAll { existing -> rules.any { it.ruleId == existing.ruleId } }
         this.rules.addAll(rules)
+        notifyChange()
     }
     override suspend fun upsertRule(rule: ActiveRuleEntity) {
         rules.removeAll { it.ruleId == rule.ruleId }
         rules.add(rule)
+        notifyChange()
     }
     override suspend fun deleteRule(ruleId: String) {
-        rules.removeAll { it.ruleId == ruleId }
+        if (rules.removeAll { it.ruleId == ruleId }) notifyChange()
     }
     override suspend fun countRules(): Int = rules.size
 
@@ -185,30 +221,36 @@ open class FakeSpamShieldDao : SpamShieldDao {
         quarantines.count { it.prefix7.startsWith(prefix5) && it.expiresAt > now }
 
     override fun observeActiveQuarantines(now: Long): Flow<List<PrefixQuarantineEntity>> =
-        MutableStateFlow(quarantines.filter { it.expiresAt > now })
+        stateVersion.map {
+            quarantines.filter { q -> q.expiresAt > now }
+                .sortedWith(compareByDescending<PrefixQuarantineEntity> { it.hitCount }.thenByDescending { it.lastSeenAt })
+        }
 
     override suspend fun getAllQuarantines(): List<PrefixQuarantineEntity> = quarantines.toList()
 
     override suspend fun clearAllQuarantines() {
         quarantines.clear()
+        notifyChange()
     }
 
     override suspend fun insertQuarantines(items: List<PrefixQuarantineEntity>) {
         quarantines.clear()
         quarantines.addAll(items)
+        notifyChange()
     }
 
     override suspend fun persistQuarantine(item: PrefixQuarantineEntity) {
         quarantines.removeAll { it.prefix7 == item.prefix7 }
         quarantines.add(item)
+        notifyChange()
     }
 
     override suspend fun persistQuarantineDeletion(prefix7: String) {
-        quarantines.removeAll { it.prefix7 == prefix7 }
+        if (quarantines.removeAll { it.prefix7 == prefix7 }) notifyChange()
     }
 
     override suspend fun purgeExpiredQuarantines(now: Long) {
-        quarantines.removeAll { it.expiresAt <= now }
+        if (quarantines.removeAll { it.expiresAt <= now }) notifyChange()
     }
 
     override suspend fun upsertOutboundGrace(entry: OutboundGraceEntity) {
@@ -252,16 +294,32 @@ class SpamScoringEngineTest {
 
     @Test
     fun `blocks MG VoIP trunk 03141011230 with quarantine, regex and PABX range penalties`() = runTest {
-        val fakeDao = FakeSpamShieldDao()
-        val now = 1_700_000_010_000L
-        val norm = PhoneNormalizer.normalize("03141011230")
-        assertEquals("31410112", norm.prefix7)
+        QuarantinePrefixIndex.clear()
+        try {
+            val fakeDao = FakeSpamShieldDao()
+            val now = 1_700_000_010_000L
+            QuarantinePrefixIndex.replaceActive(fakeDao.getAllQuarantines(), now)
+            val engine = SpamScoringEngine(
+                fakeDao,
+                br.com.spamshield.data.local.SettingsDataStore(),
+                FakeContactLookup()
+            )
 
-        val quarantine = fakeDao.quarantines.find {
-            it.prefix7 == norm.prefix7 || norm.prefix7.startsWith(it.prefix7)
+            val eval = engine.evaluateIncomingCall("03141011230", "FAILED", now)
+            assertTrue(eval.shouldDisallowAndReject)
+            assertEquals("BLOCKED", eval.telemetry.outcome)
+            assertEquals("SPOOFING_STIR_FAILED", eval.telemetry.category)
+            assertEquals("31410112", eval.telemetry.prefix7)
+
+            val triggered = UserFeedbackAudit.decode(eval.telemetry.triggeredRulesJson)
+            assertTrue(triggered.any { it.rule_id == "PREFIX7_BROAD_QUARANTINE_HIT" && it.weight == 60 })
+            assertEquals(1, triggered.count { it.rule_id in HeuristicScorer.VOIP_TRUNK_GROUP })
+            assertTrue(triggered.any { it.rule_id == "BLACKLIST_MG_VOIP_PABX" && it.weight == 80 })
+            assertTrue(triggered.any { it.rule_id == "LEADING_ZERO_TRUNK_DIALING" && it.weight == 25 })
+            assertEquals(HeuristicScorer.equation(triggered), eval.telemetry.finalScore)
+        } finally {
+            QuarantinePrefixIndex.clear()
         }
-        assertNotNull(quarantine)
-        assertEquals(70, quarantine?.penaltyWeight)
     }
 
     @Test
@@ -307,43 +365,153 @@ class SpamScoringEngineTest {
     }
 
     @Test
-    fun `serializes CallTelemetryEntity to JSON for export and upgrades outcome on CONFIRMED_SPAM`() = runTest {
-        val fakeDao = FakeSpamShieldDao()
-        val now = 1_700_000_050_000L
+    fun `serializes telemetry export with journal and upgrades outcome via production feedback flow`() = runTest {
+        QuarantinePrefixIndex.clear()
+        TelemetrySyncScheduler.resetForTests()
+        try {
+            val fakeDao = FakeSpamShieldDao()
+            val now = 1_700_000_050_000L
 
-        val callEntity = CallTelemetryEntity(
-            id = "call-1136586701",
-            timestamp = now,
-            rawNumber = "01136586701",
-            normalizedNumber = "+551136586701",
-            ddd = "11",
-            prefix7 = "1136586",
-            carrierGuess = "VoIP / Fixo",
-            lineType = "FIXED_OR_VOIP",
-            stirShakenStatus = "NOT_VERIFIED",
-            finalScore = 45,
-            thresholdApplied = 70,
-            outcome = "ALLOWED_LOW_SCORE",
-            category = "UNKNOWN_UNVERIFIED",
-            processingLatencyMs = 1.5,
-            shadowModeActive = false,
-            triggeredRulesJson = "[]"
-        )
-        fakeDao.insertTelemetry(callEntity)
+            val callEntity = CallTelemetryEntity(
+                id = "call-1136586701",
+                timestamp = now,
+                rawNumber = "01136586701",
+                normalizedNumber = "+551136586701",
+                ddd = "11",
+                prefix7 = "11365867",
+                carrierGuess = "Fixo",
+                lineType = "FIXED_OR_VOIP",
+                stirShakenStatus = "NOT_VERIFIED",
+                finalScore = 45,
+                thresholdApplied = 70,
+                outcome = "ALLOWED_LOW_SCORE",
+                category = "UNKNOWN_UNVERIFIED",
+                processingLatencyMs = 1.5,
+                shadowModeActive = false,
+                triggeredRulesJson = """[{"rule_id":"NOT_IN_CONTACTS","weight":25},{"rule_id":"STIR_SHAKEN_UNVERIFIED","weight":20}]"""
+            )
+            fakeDao.insertTelemetry(callEntity)
 
-        val jsonStr = kotlinx.serialization.json.Json.encodeToString(
-            kotlinx.serialization.builtins.ListSerializer(CallTelemetryEntity.serializer()),
-            fakeDao.getAllTelemetry()
-        )
-        assertTrue(jsonStr.contains("+551136586701"))
+            val syncRepo = br.com.spamshield.sync.SyncRepository(
+                fakeDao,
+                br.com.spamshield.data.local.SettingsDataStore()
+            )
+            syncRepo.submitFeedback("call-1136586701", "CONFIRMED_SPAM", "11365867")
 
-        fakeDao.updateUserFeedback("call-1136586701", "CONFIRMED_SPAM")
-        val updated = fakeDao.getTelemetryById("call-1136586701")
-        assertEquals("CONFIRMED_SPAM", updated?.userFeedback)
-        assertEquals("USER_BLOCKED_RETROACTIVE", updated?.outcome)
-        assertEquals("USER_REPORTED_SPAM", updated?.category)
-        assertEquals(100, updated?.finalScore)
-        assertTrue(updated!!.triggeredRulesJson.contains("USER_CONFIRMED_SPAM_OVERRIDE"))
+            val updated = fakeDao.getTelemetryById("call-1136586701")!!
+            assertEquals("CONFIRMED_SPAM", updated.userFeedback)
+            assertEquals("USER_BLOCKED_RETROACTIVE", updated.outcome)
+            assertEquals("USER_REPORTED_SPAM", updated.category)
+            assertEquals(145, updated.finalScore)
+            assertTrue(updated.triggeredRulesJson.contains("USER_CONFIRMED_SPAM_OVERRIDE"))
+            assertEquals(1, TelemetrySyncScheduler.enqueuedCount)
+            assertEquals(setOf("FEEDBACK", "QUARANTINE_UPSERT"), fakeDao.getSyncMutations().map { it.kind }.toSet())
+            assertEquals(PrefixQuarantineMatch.EXACT8, QuarantinePrefixIndex.match("11365867"))
+
+            val exportedJson = TelemetryExport.encode(fakeDao.getAllTelemetry(), fakeDao.getAllDecisionEvents())
+            val exportedRow = Json.parseToJsonElement(exportedJson).jsonArray.single().jsonObject
+            assertEquals("+551136586701", exportedRow["normalizedNumber"]!!.jsonPrimitive.content)
+            val eventTypes = exportedRow["decisionEvents"]!!.jsonArray.map {
+                it.jsonObject["event_type"]!!.jsonPrimitive.content
+            }.toSet()
+            assertEquals(setOf("USER_FEEDBACK", "QUARANTINE_UPDATED"), eventTypes)
+        } finally {
+            QuarantinePrefixIndex.clear()
+            TelemetrySyncScheduler.resetForTests()
+        }
+    }
+
+    @Test
+    fun `malformed custom regex rule is isolated without disabling quarantine or STIR protection`() = runTest {
+        QuarantinePrefixIndex.clear()
+        try {
+            val fakeDao = FakeSpamShieldDao()
+            val now = 1_700_000_090_000L
+            QuarantinePrefixIndex.replaceAll(listOf("31995201"))
+            fakeDao.upsertRule(
+                ActiveRuleEntity(
+                    ruleId = "BROKEN_CUSTOM_REGEX",
+                    name = "Regex Malformada",
+                    ruleType = "REGEX_MATCH",
+                    pattern = "[unclosed-bracket",
+                    weight = 90,
+                    priority = 1,
+                    enabled = true,
+                    updatedAt = now
+                )
+            )
+            val engine = SpamScoringEngine(
+                fakeDao,
+                br.com.spamshield.data.local.SettingsDataStore(),
+                FakeContactLookup()
+            )
+            val eval = engine.evaluateIncomingCall("031995201234", "NOT_VERIFIED", now)
+            assertTrue(eval.shouldDisallowAndReject)
+            assertEquals("BLOCKED", eval.telemetry.outcome)
+            assertTrue(eval.telemetry.triggeredRulesJson.contains("PREFIX_QUARANTINE_HIT"))
+            assertFalse(eval.telemetry.triggeredRulesJson.contains("BROKEN_CUSTOM_REGEX"))
+        } finally {
+            QuarantinePrefixIndex.clear()
+        }
+    }
+
+    @Test
+    fun `toll free and special numbers never corrupt prefix7 or create bogus quarantines post-call`() = runTest {
+        QuarantinePrefixIndex.clear()
+        try {
+            val fakeDao = FakeSpamShieldDao().apply { quarantines.clear() }
+            val now = 1_700_000_120_000L
+            val engine = SpamScoringEngine(
+                fakeDao,
+                br.com.spamshield.data.local.SettingsDataStore(),
+                FakeContactLookup()
+            )
+            assertEquals("", engine.extractQuarantinePrefix("08007221234", ""))
+            assertEquals("", engine.extractQuarantinePrefix("03031234567", ""))
+            assertEquals("", engine.extractQuarantinePrefix("40041234", ""))
+            assertEquals("31982042", engine.extractQuarantinePrefix("+5531982042364", "3198204"))
+
+            val tollFreeCall = CallTelemetryEntity(
+                id = "call-0800",
+                timestamp = now - 3_000L,
+                rawNumber = "08007221234",
+                normalizedNumber = "08007221234",
+                ddd = "31",
+                prefix7 = "",
+                carrierGuess = "VoIP",
+                lineType = "TOLL_FREE_OR_SPECIAL",
+                stirShakenStatus = "NOT_VERIFIED",
+                finalScore = 45,
+                thresholdApplied = 70,
+                outcome = "ALLOWED_LOW_SCORE",
+                category = "UNKNOWN_UNVERIFIED",
+                processingLatencyMs = 1.0,
+                shadowModeActive = false,
+                triggeredRulesJson = """[{"rule_id":"NOT_IN_CONTACTS","weight":25},{"rule_id":"STIR_SHAKEN_UNVERIFIED","weight":20}]"""
+            )
+            fakeDao.insertTelemetry(tollFreeCall)
+
+            assertTrue(engine.evaluatePostCallPingDetector("08007221234", 3, now, callId = "call-0800"))
+            val updated = fakeDao.getTelemetryById("call-0800")!!
+            assertEquals("", updated.prefix7)
+            assertEquals("FLAGGED_POST_CALL_QUARANTINED", updated.outcome)
+            assertTrue(fakeDao.getAllQuarantines().isEmpty())
+
+            engine.evaluatePostCallLogVerdict(
+                normalizedNumber = "40041234",
+                callType = android.provider.CallLog.Calls.REJECTED_TYPE,
+                callDurationSec = 0,
+                callTimestampMs = now - 1_000L,
+                nowMillis = now,
+                rawNumber = "40041234"
+            )
+            val created4004 = fakeDao.getAllTelemetry().single { it.normalizedNumber == "40041234" }
+            assertEquals("", created4004.prefix7)
+            assertTrue(fakeDao.getAllQuarantines().isEmpty())
+            assertNull(fakeDao.getActiveQuarantineForPrefix("08007221", now))
+        } finally {
+            QuarantinePrefixIndex.clear()
+        }
     }
 
     @Test

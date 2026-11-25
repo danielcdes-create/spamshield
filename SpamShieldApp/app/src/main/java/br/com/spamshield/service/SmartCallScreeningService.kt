@@ -50,6 +50,7 @@ class SmartCallScreeningService : CallScreeningService() {
     @Inject lateinit var dao: SpamShieldDao
     @Inject lateinit var callHistoryAnalyzer: CallHistoryAnalyzer
     @Inject lateinit var features: FeatureRepository
+    @Inject lateinit var settingsDataStore: br.com.spamshield.data.local.SettingsDataStore
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val responseHandler = Handler(Looper.getMainLooper())
@@ -67,6 +68,7 @@ class SmartCallScreeningService : CallScreeningService() {
         val callbackAt = System.currentTimeMillis()
         val timing = ScreeningTiming(started, SystemClock::elapsedRealtimeNanos)
         val capturedWindow = AtomicReference<ExpectedWindow?>(null)
+        val capturedDdd = AtomicReference("31")
         // Only screen incoming calls
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
             callDetails.callDirection != Call.Details.DIRECTION_INCOMING
@@ -104,7 +106,8 @@ class SmartCallScreeningService : CallScreeningService() {
                 .setSkipNotification(skipNotification)
                 .setSkipCallLog(skipCallLog)
                 .build()
-            val normalized = result?.telemetry?.normalizedNumber ?: PhoneNormalizer.normalize(rawNumber).normalizedNumber
+            val normalized = result?.telemetry?.normalizedNumber
+                ?: PhoneNormalizer.normalize(rawNumber, capturedDdd.get()).normalizedNumber
             val pending = spamScoringEngine.beginScreeningAudit(normalized, callAt)
             timing.mark("SUBMITTING")
             val submissionFailure = runCatching { respondToCall(callDetails, response) }.exceptionOrNull()
@@ -197,6 +200,7 @@ class SmartCallScreeningService : CallScreeningService() {
                     Log.w(TAG, "Could not read campaign silences", error)
                     null
                 }
+                runCatching { capturedDdd.set(settingsDataStore.getSnapshot().userDdd) }
                 val prepared = spamScoringEngine.prepareIncomingCall(rawNumber, stirShakenStatus, callAt, timing, capturedWindow::set)
                 val row = prepared.result.telemetry
                 val prefix = row.prefix7
@@ -234,7 +238,8 @@ class SmartCallScreeningService : CallScreeningService() {
         errorType: String?,
         submissionFailure: String?
     ): String {
-        val normalized = PhoneNormalizer.normalize(rawNumber)
+        val userDdd = runCatching { settingsDataStore.getSnapshot().userDdd }.getOrDefault("31")
+        val normalized = PhoneNormalizer.normalize(rawNumber, userDdd)
         val row = CallTelemetryEntity(
             id = java.util.UUID.randomUUID().toString(),
             timestamp = callAt,

@@ -23,7 +23,8 @@ db.createCollection("call_telemetry", {
             prefix_7: { bsonType: "string" },
             carrier_guess: { bsonType: ["string", "null"] },
             line_type: { enum: ["MOBILE", "FIXED_OR_VOIP", "TOLL_FREE_OR_SPECIAL", "MALFORMED_OR_SPOOFED", "UNKNOWN"] },
-            stir_shaken_status: { enum: ["PASSED", "FAILED", "NOT_VERIFIED"] }
+            stir_shaken_status: { enum: ["PASSED", "FAILED", "NOT_VERIFIED"] },
+            call_direction: { bsonType: ["string", "null"] }
           }
         },
         decision_vector: {
@@ -40,6 +41,7 @@ db.createCollection("call_telemetry", {
                 "ALLOWED_EMERGENCY_REPEAT",
                 "ALLOWED_OUTBOUND_GRACE",
                 "ALLOWED_LOW_SCORE",
+                "OUTGOING_CALL",
                 "FLAGGED_POST_CALL_QUARANTINED",
                 "USER_BLOCKED_RETROACTIVE"
               ]

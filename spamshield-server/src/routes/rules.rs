@@ -118,6 +118,22 @@ pub async fn upsert_active_rule(
     State(state): State<AppState>,
     Json(rule): Json<ActiveRuleDoc>,
 ) -> Result<Json<ActiveRuleDoc>, (StatusCode, String)> {
+    if rule.rule_id.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "rule_id must not be empty".into()));
+    }
+    if rule.rule_type == "REGEX_MATCH"
+        && rule
+            .pattern
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "REGEX_MATCH rule requires a non-empty pattern".into(),
+        ));
+    }
     let db = &state.db;
     let pattern_bson = match &rule.pattern {
         Some(p) => Bson::String(p.clone()),

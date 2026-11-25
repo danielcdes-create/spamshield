@@ -9,6 +9,7 @@ import android.provider.CallLog
 import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.content.ContextCompat
+import br.com.spamshield.data.local.SettingsDataStore
 import br.com.spamshield.data.local.dao.SpamShieldDao
 import br.com.spamshield.data.local.entity.OutboundGraceEntity
 import br.com.spamshield.domain.PhoneNormalizer
@@ -36,6 +37,9 @@ class CallStateBroadcastReceiver : BroadcastReceiver() {
 
     @Inject
     lateinit var dao: SpamShieldDao
+
+    @Inject
+    lateinit var settingsDataStore: SettingsDataStore
 
     private val receiverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -86,6 +90,7 @@ class CallStateBroadcastReceiver : BroadcastReceiver() {
             if (numIdx < 0 || typeIdx < 0 || durIdx < 0 || dateIdx < 0) return
 
             val now = System.currentTimeMillis()
+            val userDdd = settingsDataStore.getSnapshot().userDdd
             var count = 0
             var anyQuarantineTriggered = false
 
@@ -101,15 +106,16 @@ class CallStateBroadcastReceiver : BroadcastReceiver() {
 
                 if (callDate < now - 120_000L) break
 
-                val normalized = PhoneNormalizer.normalize(rawNumber)
+                val normalized = PhoneNormalizer.normalize(rawNumber, userDdd)
                 if (normalized.normalizedNumber.isEmpty()) continue
 
                 if (callType == CallLog.Calls.OUTGOING_TYPE) {
+                    val callAt = callDate.takeIf { it > 0L } ?: now
                     dao.upsertOutboundGrace(
                         OutboundGraceEntity(
                             normalizedNumber = normalized.normalizedNumber,
                             prefix6 = normalized.prefix6,
-                            expiresAt = now + SpamScoringEngine.OUTBOUND_GRACE_WINDOW_MS
+                            expiresAt = callAt + SpamScoringEngine.OUTBOUND_GRACE_WINDOW_MS
                         )
                     )
                     Log.d(TAG, "Registered outbound grace (2h); app=${br.com.spamshield.BuildConfig.VERSION_NAME}(${br.com.spamshield.BuildConfig.VERSION_CODE})")
